@@ -41,8 +41,11 @@ from .sw_core import (
     iter_feature_objects,
     latest_sketch,
     logger,
+    nothing,
     origin_sketch_point,
     rebuild,
+    select_object,
+    select_origin,
     require_part,
     require_selection,
     resolve_plane_name,
@@ -1077,6 +1080,252 @@ def _next_display(feature: Any, current: Any) -> Any:
         return flag_methods(feature, 'GetNextDisplayDimension').GetNextDisplayDimension(current)
     except Exception:
         return None
+
+
+# swAutodimScheme_e
+_DEFINE_SCHEMES = {"baseline": 1, "ordinate": 2, "chain": 3, "centerline": 4}
+
+# swSketchFullyDefineRelationType_e
+_DEFINE_RELATIONS = {
+    "equal": 1, "horizontal": 2, "vertical": 4, "tangent": 8, "perpendicular": 16,
+    "collinear": 32, "concentric": 64, "parallel": 128, "midpoint": 256, "coincident": 512,
+}
+
+# swAutodimStatus_e
+_DEFINE_STATUS = {
+    0: "success", 1: "bad option value", 2: "no active document", 3: "document type not supported",
+    4: "no active sketch", 5: "3D sketches are not supported", 6: "the sketch is empty",
+    7: "the sketch is already over defined", 8: "no entities", 9: "entities not valid",
+    10: "a centerline is not allowed here", 11: "datum not supplied", 12: "datum not unique",
+    13: "datum not a valid type", 14: "datum line is not a centerline", 15: "datum line is not vertical",
+    16: "datum line is not horizontal", 17: "the algorithm failed", 18: "no solution found for the sketch",
+}
+
+_DATUM_SCHEMA = {
+    "type": "object",
+    "description": "One entity the dimensions of that direction measure from: {\"origin\": true} (the default), "
+                   "or one sketch_segments / sketch_points index.",
+    "properties": {
+        "origin": {"type": "boolean"},
+        "sketch_segments": {"type": "array", "items": {"type": "integer"}, "maxItems": 1},
+        "sketch_points": {"type": "array", "items": {"type": "integer"}, "maxItems": 1},
+    },
+}
+
+
+_ANCHOR_TOL_M = 1e-7
+
+
+def _line_ends(segment: Any) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Start and end of a straight segment in sketch metres, or None for anything else."""
+    if int(safe(segment, "GetType", -1) or 0) != 0:  # swSketchLINE
+        return None
+    try:
+        start = value(segment, "GetStartPoint2")
+        end = value(segment, "GetEndPoint2")
+        return (float(start.X), float(start.Y)), (float(end.X), float(end.Y))
+    except Exception:
+        return None
+
+
+def _anchor_sketch(doc: Any) -> dict[str, Any]:
+    """Tie the open sketch to the origin before SOLIDWORKS dimensions it.
+
+    FullyDefineSketch adds relations and sizes but never a relation to the
+    origin, and it measures locations from geometry it picks itself, so a
+    sketch that merely passes through the origin stays under defined however
+    many dimensions it gets.  Interactive sketching hides this because
+    inferencing adds the origin relations while drawing.  Here: a point on the
+    origin or a line through it becomes coincident with it; a direction still
+    free after that gets one location dimension from the origin to the nearest
+    perpendicular line, or to the nearest point when the sketch has no lines.
+    """
+    origin = origin_sketch_point(doc)
+    manager = flag_methods(value(doc.SketchManager.ActiveSketch, "RelationManager"), "AddRelation")
+    anchored_x = anchored_y = False
+    relations = 0
+    dimensions: list[str] = []
+
+    points = sketch_point_objects(doc)
+    for point in points:
+        if abs(float(point.X)) < _ANCHOR_TOL_M and abs(float(point.Y)) < _ANCHOR_TOL_M:
+            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["coincident"])
+            relations += 1
+            anchored_x = anchored_y = True
+            break
+
+    segments = sketch_segment_objects(doc)
+    if not (anchored_x and anchored_y):
+        for segment in segments:
+            ends = _line_ends(segment)
+            if ends is None:
+                continue
+            (x1, y1), (x2, y2) = ends
+            length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            if length < _ANCHOR_TOL_M:
+                continue
+            # Distance of the origin from the infinite line.
+            if abs((x2 - x1) * y1 - (y2 - y1) * x1) / length > _ANCHOR_TOL_M:
+                continue
+            horizontal = abs(y2 - y1) < _ANCHOR_TOL_M
+            vertical = abs(x2 - x1) < _ANCHOR_TOL_M
+            if (horizontal and anchored_y) or (vertical and anchored_x):
+                continue
+            manager.AddRelation(dispatch_array([segment, origin]), RELATIONS["coincident"])
+            relations += 1
+            if horizontal:
+                anchored_y = True
+            elif vertical:
+                anchored_x = True
+            else:
+                anchored_x = anchored_y = True  # a slanted line through the origin pins one DOF; the dims below cover the rest
+            if anchored_x and anchored_y:
+                break
+
+    def nearest_line(want_vertical: bool) -> int | None:
+        best, best_distance = None, None
+        for index, segment in enumerate(segments):
+            ends = _line_ends(segment)
+            if ends is None:
+                continue
+            (x1, y1), (x2, y2) = ends
+            is_vertical = abs(x2 - x1) < _ANCHOR_TOL_M
+            is_horizontal = abs(y2 - y1) < _ANCHOR_TOL_M
+            if want_vertical and not is_vertical or not want_vertical and not is_horizontal:
+                continue
+            distance = abs(x1) if want_vertical else abs(y1)
+            if distance < _ANCHOR_TOL_M:
+                continue
+            if best_distance is None or distance < best_distance:
+                best, best_distance = index, distance
+        return best
+
+    def nearest_point() -> int | None:
+        best, best_distance = None, None
+        for index, point in enumerate(points):
+            distance = float(point.X) ** 2 + float(point.Y) ** 2
+            if best_distance is None or distance < best_distance:
+                best, best_distance = index, distance
+        return best
+
+    for want_vertical, kind, free in ((True, "horizontal", not anchored_x), (False, "vertical", not anchored_y)):
+        if not free:
+            continue
+        line = nearest_line(want_vertical)
+        if line is not None:
+            selection: dict[str, Any] = {"sketch_segments": [line], "origin": True}
+        else:
+            point = nearest_point()
+            if point is None:
+                continue
+            selection = {"sketch_points": [point], "origin": True}
+        outcome = add_dimension({"selection": selection, "kind": kind, "place_x_mm": 0, "place_y_mm": 0})
+        if outcome.get("ok"):
+            dimensions.append(str((outcome.get("data") or {}).get("full_name", kind)))
+
+    return {"origin_relations": relations, "location_dimensions": dimensions}
+
+
+def _select_datum(doc: Any, spec: dict[str, Any] | None, mark: int) -> bool:
+    """Preselect a datum for FullyDefineSketch with the mark it reads it from."""
+    if not spec:
+        return False
+    if spec.get("origin"):
+        return select_origin(doc, mark, True)
+    entities = _relation_entities(doc, spec)
+    if len(entities) != 1:
+        raise RuntimeError("A datum is exactly one entity: the origin, one segment, or one point.")
+    return select_object(doc, entities[0], mark, True)
+
+
+@tool(
+    "fully_define_sketch",
+    "Make the open sketch fully defined in one call: SOLIDWORKS adds the geometric relations it can "
+    "infer (horizontal, vertical, equal, coincident, ...) and then the dimensions still needed, "
+    "measured from a datum in each direction. Default: all relations, baseline dimensions from the "
+    "origin, text below and to the left. For a revolve profile pass vertical_scheme=centerline with "
+    "the centerline segment as vertical_datum, which produces diameter dimensions. Read "
+    "list_dimensions afterwards for the generated names.",
+    {
+        "relations": {"type": "boolean", "default": True},
+        "relation_types": {
+            "type": "array",
+            "items": {"type": "string", "enum": sorted(_DEFINE_RELATIONS)},
+            "description": "Relations SOLIDWORKS may add. Defaults to all of them.",
+        },
+        "dimensions": {"type": "boolean", "default": True},
+        "horizontal_scheme": {"type": "string", "enum": sorted(_DEFINE_SCHEMES), "default": "baseline"},
+        "vertical_scheme": {"type": "string", "enum": sorted(_DEFINE_SCHEMES), "default": "baseline"},
+        "horizontal_datum": _DATUM_SCHEMA,
+        "vertical_datum": _DATUM_SCHEMA,
+        "horizontal_placement": {"type": "string", "enum": ["below", "above"], "default": "below"},
+        "vertical_placement": {"type": "string", "enum": ["left", "right"], "default": "left"},
+        "selection": SELECTION_SCHEMA,
+    },
+)
+def fully_define_sketch(args: dict[str, Any]) -> dict[str, Any]:
+    app, doc = active_document()
+    _active_sketch(doc)
+    manager = sketch_manager(doc)
+    status_before = _sketch_status(doc)
+    if status_before == "fully_defined":
+        return result(True, "The sketch is already fully defined.", sketch_status=status_before, dimensions_added=0)
+
+    use_relations = bool(args.get("relations", True))
+    wanted = args.get("relation_types") or list(_DEFINE_RELATIONS)
+    relation_mask = 0
+    for name in wanted:
+        relation_mask |= _DEFINE_RELATIONS[str(name)]
+    use_dimensions = bool(args.get("dimensions", True))
+
+    dims_before = len(list_dimensions({})["data"]["dimensions"])
+    anchor = _anchor_sketch(doc) if use_dimensions else {"origin_relations": 0, "location_dimensions": []}
+
+    # Datums travel as preselection marks (2 horizontal, 4 vertical); the
+    # dispatch arguments of FullyDefineSketch are ignored on this build.
+    clear_selection(doc)
+    if use_dimensions:
+        _select_datum(doc, args.get("horizontal_datum"), 2)
+        _select_datum(doc, args.get("vertical_datum"), 4)
+    entities = 1  # swAutodimEntitiesAll
+    if args.get("selection"):
+        require_selection(doc, args["selection"], mark=1, append=True)
+        entities = 2  # swAutodimEntitiesSelected
+
+    with dimension_dialog_suppressed(app):
+        status_code = int(
+            manager.FullyDefineSketch(
+                entities, use_relations, relation_mask, use_dimensions,
+                _DEFINE_SCHEMES[str(args.get("horizontal_scheme", "baseline"))], nothing(),
+                _DEFINE_SCHEMES[str(args.get("vertical_scheme", "baseline"))], nothing(),
+                -1 if str(args.get("horizontal_placement", "below")) == "below" else 1,
+                -1 if str(args.get("vertical_placement", "left")) == "left" else 1,
+            )
+        )
+    clear_selection(doc)
+    added = len(list_dimensions({})["data"]["dimensions"]) - dims_before
+    status_after = _sketch_status(doc)
+    outcome = _DEFINE_STATUS.get(status_code, f"status {status_code}")
+    ok = status_code == 0 and status_after == "fully_defined"
+    if status_code != 0:
+        message = f"SOLIDWORKS could not fully define the sketch: {outcome}. The sketch is {status_after}."
+    elif ok:
+        message = f"The sketch is now fully defined ({added} dimensions added)."
+    else:
+        message = (
+            f"SOLIDWORKS added {added} dimensions but the sketch is still {status_after}. "
+            "Check list_sketch_segments for geometry that no relation or dimension reaches."
+        )
+    return result(
+        ok,
+        message,
+        sketch_status=status_after,
+        sketch_status_before=status_before,
+        dimensions_added=added,
+        origin_relations_added=anchor["origin_relations"],
+        location_dimensions=anchor["location_dimensions"],
+        status=outcome,
+    )
 
 
 @tool(

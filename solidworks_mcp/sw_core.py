@@ -343,6 +343,7 @@ _SKETCH_MANAGER_METHODS = (
     "CreateLine", "CreateCenterLine", "CreateCircleByRadius", "CreateArc", "Create3PointArc",
     "CreateTangentArc", "CreateEllipse", "CreatePolygon", "CreateSketchSlot", "CreatePoint",
     "CreateSpline", "CreateCornerRectangle", "InsertSketch", "SketchTrim", "SketchUseEdge3",
+    "FullyDefineSketch",
 )
 
 _FEATURE_MANAGER_METHODS = (
