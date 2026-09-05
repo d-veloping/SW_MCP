@@ -857,6 +857,12 @@ _DIMENSION_METHODS = {
         "value_mm": {"type": "number", "description": "Target value for a linear dimension, in millimetres."},
         "value_deg": {"type": "number", "description": "Target value for an angular dimension, in degrees."},
         "kind": {"type": "string", "enum": sorted(_DIMENSION_METHODS), "default": "auto"},
+        "diametric": {
+            "type": "boolean",
+            "default": False,
+            "description": "Show a linear dimension measured to a centerline as a diameter, the revolve-profile "
+                           "convention; value_mm is then the diameter.",
+        },
         "place_x_mm": {"type": "number", "default": 0},
         "place_y_mm": {"type": "number", "default": 0},
         "place_z_mm": {"type": "number", "default": 0},
@@ -887,13 +893,25 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
             entities=count,
         )
 
+    applied: dict[str, Any] = {}
+    if bool(args.get("diametric", False)):
+        # Placing the text beyond the centerline, which flips a dimension to a
+        # diameter in the UI, does nothing through AddDimension2; the display
+        # dimension's Diametric property is the switch.  Set it before the
+        # value, so the value is applied as a diameter.
+        try:
+            display.Diametric = True
+            applied["diametric"] = bool(display.Diametric)
+        except Exception:
+            logger.info("Could not switch the new dimension to diametric display.")
+            applied["diametric"] = False
+
     dimension = None
     try:
         dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
     except Exception:
         dimension = safe(display, "GetDimension")
 
-    applied: dict[str, Any] = {}
     if dimension is not None:
         target = None
         if args.get("value_mm") is not None:
@@ -926,14 +944,39 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Added a dimension.", sketch_status=status, **applied)
 
 
+def _display_dimension(doc: Any, full_name: str) -> Any | None:
+    """The display dimension behind a full name such as 'D1@Sketch1@Part1.Part'.
+
+    IDimension carries the value; display style such as diametric lives on the
+    IDisplayDimension, which is only reachable by walking the feature tree.
+    """
+    wanted = full_name.split("@")[:2]
+    for feature in iter_feature_objects(doc):
+        try:
+            display = value(feature, "GetFirstDisplayDimension")
+        except Exception:
+            continue
+        while display is not None:
+            try:
+                dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+                if str(safe(dimension, "FullName", "")).split("@")[:2] == wanted:
+                    return display
+            except Exception:
+                pass
+            display = _next_display(feature, display)
+    return None
+
+
 @tool(
     "set_dimension",
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
-    "find names. Linear values are millimetres, angular values are degrees.",
+    "find names. Linear values are millimetres, angular values are degrees. diametric switches a "
+    "dimension measured to a centerline between radius and diameter display.",
     {
         "full_name": {"type": "string"},
         "value_mm": {"type": "number"},
         "value_deg": {"type": "number"},
+        "diametric": {"type": "boolean", "description": "Show the dimension as a diameter (true) or as the plain distance (false)."},
     },
     ["full_name"],
 )
@@ -943,12 +986,29 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
     dimension = doc.Parameter(name)
     if dimension is None:
         return result(False, f"No dimension named '{name}' exists. Call list_dimensions to see valid names.")
+    restyled: dict[str, Any] = {}
+    if args.get("diametric") is not None:
+        display = _display_dimension(doc, name)
+        if display is None:
+            return result(False, f"No display dimension named '{name}' was found to restyle.")
+        display.Diametric = bool(args["diametric"])
+        restyled["diametric"] = bool(display.Diametric)
     if args.get("value_mm") is not None:
-        target, applied = to_m(args["value_mm"]), {"value_mm": float(args["value_mm"])}
+        target, applied = to_m(args["value_mm"]), {"value_mm": float(args["value_mm"]), **restyled}
     elif args.get("value_deg") is not None:
-        target, applied = to_rad(args["value_deg"]), {"value_deg": float(args["value_deg"])}
+        target, applied = to_rad(args["value_deg"]), {"value_deg": float(args["value_deg"]), **restyled}
+    elif restyled:
+        if doc.SketchManager.ActiveSketch is None:
+            rebuild(doc)
+        actual = float(safe(dimension, "SystemValue", 0.0) or 0.0)
+        return result(
+            True,
+            f"Set {name} to {'diametric' if restyled['diametric'] else 'linear'} display.",
+            value_mm=round(to_mm(actual), 6),
+            **restyled,
+        )
     else:
-        return result(False, "Pass value_mm or value_deg.")
+        return result(False, "Pass value_mm, value_deg, or diametric.")
 
     flag_methods(dimension, "SetSystemValue3")
     code = int(dimension.SetSystemValue3(target, 2, empty_variant()))
