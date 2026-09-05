@@ -26,6 +26,8 @@ from typing import Any, Iterator
 
 from .sw_core import (
     active_document,
+    apply_transform,
+    mm_point,
     sketch_point_objects,
     dispatch_array,
     empty_variant,
@@ -201,7 +203,34 @@ def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
             created = str(name)
     except Exception:
         logger.info("Sketch opened but its feature could not be resolved for renaming.")
-    return result(True, f"Opened a sketch on {target}.", sketch=created, target=target)
+    return result(True, f"Opened a sketch on {target}.", sketch=created, target=target, **sketch_frame(doc))
+
+
+def sketch_frame(doc: Any) -> dict[str, Any]:
+    """Where the open sketch's coordinate system sits in the model.
+
+    On a face SOLIDWORKS picks the sketch axes itself -- on a face with normal
+    +X the sketch x axis runs along model Z -- and nothing in the API says so
+    up front.  Reading the sketch-to-model transform lets a caller convert
+    model coordinates into sketch coordinates instead of guessing.
+    """
+    try:
+        sketch = doc.SketchManager.ActiveSketch
+        forward = value(sketch, "ModelToSketchTransform")
+        inverse = flag_methods(forward, "Inverse").Inverse()
+        data = [float(v) for v in value(inverse, "ArrayData")]
+    except Exception:
+        return {}
+    origin = apply_transform([0.0, 0.0, 0.0], data)
+    x_axis = [a - b for a, b in zip(apply_transform([1.0, 0.0, 0.0], data), origin)]
+    y_axis = [a - b for a, b in zip(apply_transform([0.0, 1.0, 0.0], data), origin)]
+    normal = [a - b for a, b in zip(apply_transform([0.0, 0.0, 1.0], data), origin)]
+    return {
+        "origin_mm": mm_point(origin),
+        "x_axis": [round(v, 6) for v in x_axis],
+        "y_axis": [round(v, 6) for v in y_axis],
+        "normal": [round(v, 6) for v in normal],
+    }
 
 
 @tool(
