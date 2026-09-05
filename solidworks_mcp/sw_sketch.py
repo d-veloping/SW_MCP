@@ -21,7 +21,8 @@ afterthought.
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from .sw_core import (
     active_document,
@@ -117,6 +118,34 @@ def _require_open_sketch() -> tuple[Any, Any]:
     _, doc = active_document()
     _active_sketch(doc)
     return doc, sketch_manager(doc)
+
+
+@contextmanager
+def _direct_to_db(manager: Any) -> Iterator[Any]:
+    """Add sketch entities exactly as given, without SOLIDWORKS' inferencing.
+
+    The Create* members otherwise snap endpoints onto nearby model edges and
+    sketch points with a tolerance that scales with the current zoom.  On a
+    300 mm part zoomed to fit, a 4.5 mm line drawn 0.85 mm from a circular
+    edge collapsed onto that edge and was never created, and a rectangle's
+    verticals were pulled onto the origin.  ``AddToDB`` writes the entity to
+    the sketch database untouched; it is restored afterwards so interactive
+    sketching keeps its inferencing.
+    """
+    previous: bool | None = None
+    try:
+        previous = bool(manager.AddToDB)
+        manager.AddToDB = True
+    except Exception:
+        previous = None
+    try:
+        yield manager
+    finally:
+        if previous is not None:
+            try:
+                manager.AddToDB = previous
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------
@@ -235,10 +264,11 @@ _XY = {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}
 def draw_line(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    segment = manager.CreateLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
+    with _direct_to_db(manager):
+        segment = manager.CreateLine(
+            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
+            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+        )
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
     return _drawn(doc, before, "a line")
@@ -256,10 +286,11 @@ def draw_line(args: dict[str, Any]) -> dict[str, Any]:
 def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.CreateCenterLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
+    with _direct_to_db(manager):
+        manager.CreateCenterLine(
+            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
+            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+        )
     return _drawn(doc, before, "a centerline")
 
 
@@ -276,9 +307,10 @@ def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
 def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    segment = manager.CreateCircleByRadius(
-        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
-    )
+    with _direct_to_db(manager):
+        segment = manager.CreateCircleByRadius(
+            to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
+        )
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
     return _drawn(doc, before, "a circle")
@@ -296,10 +328,11 @@ def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
 def draw_rectangle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.CreateCornerRectangle(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
+    with _direct_to_db(manager):
+        manager.CreateCornerRectangle(
+            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
+            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+        )
     return _drawn(doc, before, "a rectangle")
 
 
@@ -318,12 +351,13 @@ def draw_rectangle(args: dict[str, Any]) -> dict[str, Any]:
 def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.CreateArc(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["start_x_mm"]), to_m(args["start_y_mm"]), 0.0,
-        to_m(args["end_x_mm"]), to_m(args["end_y_mm"]), 0.0,
-        int(args.get("direction", 1)),
-    )
+    with _direct_to_db(manager):
+        manager.CreateArc(
+            to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
+            to_m(args["start_x_mm"]), to_m(args["start_y_mm"]), 0.0,
+            to_m(args["end_x_mm"]), to_m(args["end_y_mm"]), 0.0,
+            int(args.get("direction", 1)),
+        )
     return _drawn(doc, before, "an arc")
 
 
@@ -340,11 +374,12 @@ def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
 def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.Create3PointArc(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        to_m(args["x3_mm"]), to_m(args["y3_mm"]), 0.0,
-    )
+    with _direct_to_db(manager):
+        manager.Create3PointArc(
+            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
+            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+            to_m(args["x3_mm"]), to_m(args["y3_mm"]), 0.0,
+        )
     return _drawn(doc, before, "a 3-point arc")
 
 
@@ -361,11 +396,12 @@ def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
 def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.CreateEllipse(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["major_x_mm"]), to_m(args["major_y_mm"]), 0.0,
-        to_m(args["minor_x_mm"]), to_m(args["minor_y_mm"]), 0.0,
-    )
+    with _direct_to_db(manager):
+        manager.CreateEllipse(
+            to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
+            to_m(args["major_x_mm"]), to_m(args["major_y_mm"]), 0.0,
+            to_m(args["minor_x_mm"]), to_m(args["minor_y_mm"]), 0.0,
+        )
     return _drawn(doc, before, "an ellipse")
 
 
@@ -383,11 +419,12 @@ def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
 def draw_polygon(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    manager.CreatePolygon(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["point_x_mm"]), to_m(args["point_y_mm"]), 0.0,
-        int(args.get("sides", 6)), bool(args.get("inscribed", True)),
-    )
+    with _direct_to_db(manager):
+        manager.CreatePolygon(
+            to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
+            to_m(args["point_x_mm"]), to_m(args["point_y_mm"]), 0.0,
+            int(args.get("sides", 6)), bool(args.get("inscribed", True)),
+        )
     return _drawn(doc, before, "a polygon")
 
 
@@ -408,16 +445,17 @@ def draw_slot(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     length_type = 0 if str(args.get("length_type", "center_center")) == "center_center" else 1
     before = _segment_count(doc)
-    manager.CreateSketchSlot(
-        0,  # swSketchSlotCreationType_line
-        length_type,
-        to_m(args["width_mm"]),
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        0.0, 0.0, 0.0,
-        1,  # arc direction, unused for a straight slot
-        bool(args.get("add_dimensions", False)),
-    )
+    with _direct_to_db(manager):
+        manager.CreateSketchSlot(
+            0,  # swSketchSlotCreationType_line
+            length_type,
+            to_m(args["width_mm"]),
+            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
+            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
+            0.0, 0.0, 0.0,
+            1,  # arc direction, unused for a straight slot
+            bool(args.get("add_dimensions", False)),
+        )
     return _drawn(doc, before, "a slot")
 
 
@@ -429,7 +467,8 @@ def draw_slot(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_point(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
-    point = manager.CreatePoint(to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0)
+    with _direct_to_db(manager):
+        point = manager.CreatePoint(to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0)
     return result(bool(point), "Added a sketch point." if point else "SOLIDWORKS did not create the point.")
 
 
@@ -457,7 +496,8 @@ def draw_spline(args: dict[str, Any]) -> dict[str, Any]:
     from .sw_core import double_array
 
     before = _segment_count(doc)
-    manager.CreateSpline(double_array(flat))
+    with _direct_to_db(manager):
+        manager.CreateSpline(double_array(flat))
     return _drawn(doc, before, "a spline")
 
 

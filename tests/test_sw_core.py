@@ -222,6 +222,51 @@ class CallVersionedTests(unittest.TestCase):
         self.assertIn("CreateDetailViewAt3", sw_drawing._DRAWING_METHODS)
 
 
+class FakeSketchManager:
+    def __init__(self) -> None:
+        self.AddToDB = False
+        self.seen: list[bool] = []
+
+    def CreateLine(self, *args):  # noqa: N802 - COM member name
+        self.seen.append(self.AddToDB)
+        return object()
+
+
+class DirectToDbTests(unittest.TestCase):
+    """Sketch entities must bypass inferencing while they are created.
+
+    With inferencing on, CreateLine snaps endpoints onto nearby edges with a
+    zoom-dependent tolerance and can drop the entity altogether; AddToDB is
+    the documented switch, and it has to be put back so interactive
+    sketching keeps its snapping.
+    """
+
+    def test_add_to_db_is_on_during_creation_and_restored_after(self) -> None:
+        from solidworks_mcp.sw_sketch import _direct_to_db
+
+        manager = FakeSketchManager()
+        with _direct_to_db(manager) as inner:
+            inner.CreateLine(0, 0, 0, 1, 0, 0)
+        self.assertEqual(manager.seen, [True])
+        self.assertFalse(manager.AddToDB)
+
+    def test_previous_setting_is_restored_even_when_creation_raises(self) -> None:
+        from solidworks_mcp.sw_sketch import _direct_to_db
+
+        manager = FakeSketchManager()
+        manager.AddToDB = True
+        with self.assertRaises(RuntimeError):
+            with _direct_to_db(manager):
+                raise RuntimeError("COM failure")
+        self.assertTrue(manager.AddToDB)
+
+    def test_a_manager_without_the_member_is_left_alone(self) -> None:
+        from solidworks_mcp.sw_sketch import _direct_to_db
+
+        with _direct_to_db(object()) as inner:
+            self.assertIsNotNone(inner)
+
+
 class UnitTests(unittest.TestCase):
     def test_millimetres_and_metres_round_trip(self) -> None:
         self.assertEqual(sw_core.to_m(1000), 1.0)
