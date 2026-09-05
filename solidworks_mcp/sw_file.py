@@ -189,6 +189,49 @@ def open_document(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "close_document",
+    "Close a document without saving: the active one, or the one whose title or path is given. "
+    "Unsaved changes are discarded, so save first if they matter. Useful before re-running a build "
+    "that saves to a path SOLIDWORKS still has open.",
+    {"title": {"type": "string", "description": "Title as shown in the window (e.g. 'Part1') or a full path. Defaults to the active document."}},
+)
+def close_document(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    wanted = str(args.get("title") or "").strip()
+    target = None
+    for doc in as_list(value(app, "GetDocuments")):
+        try:
+            title = str(value(doc, "GetTitle"))
+            path = str(value(doc, "GetPathName") or "")
+        except Exception:
+            continue
+        if not wanted:
+            if app.ActiveDoc is not None and title == str(value(app.ActiveDoc, "GetTitle")):
+                target = title
+                break
+        elif wanted in (title, path) or Path(path).stem == wanted or title.split(" - ")[0] == wanted:
+            target = title
+            break
+    if target is None:
+        return result(False, f"No open document matches '{wanted or 'the active document'}'.")
+    active_title = ""
+    try:
+        if app.ActiveDoc is not None:
+            active_title = str(value(app.ActiveDoc, "GetTitle"))
+    except Exception:
+        active_title = ""
+    app.CloseDoc(target)
+    # Closing another window can bring an arbitrary one to the front; the
+    # caller's active document has to stay the active one.
+    if active_title and active_title != target:
+        try:
+            app.ActivateDoc3(active_title, False, 0, byref_long(0))
+        except Exception:
+            logger.info("Could not re-activate '%s' after closing '%s'.", active_title, target)
+    return result(True, f"Closed '{target}'.", closed=target, document_count=int(value(app, "GetDocumentCount")))
+
+
+@tool(
     "save_document",
     "Save the active document as a new .sldprt, .sldasm, or .slddrw file under the designated "
     "outputs folder. Existing files are never overwritten unless overwrite is true.",

@@ -1244,20 +1244,54 @@ def _anchor_sketch(doc: Any) -> dict[str, Any]:
                 best, best_distance = index, distance
         return best
 
+    def locate_point(index: int, point: Any) -> None:
+        """Pin one sketch point to the origin in both directions.
+
+        A point in line with the origin gets an alignment relation, because a
+        dimension of zero cannot be created; anything else gets one
+        horizontal and one vertical dimension.
+        """
+        nonlocal relations
+        x, y = float(point.X), float(point.Y)
+        if abs(x) < _ANCHOR_TOL_M and abs(y) < _ANCHOR_TOL_M:
+            return
+        if abs(x) < _ANCHOR_TOL_M:
+            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["vertical"])
+            relations += 1
+        else:
+            outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "horizontal", "place_x_mm": 0, "place_y_mm": 0})
+            if outcome.get("ok"):
+                dimensions.append(str((outcome.get("data") or {}).get("full_name", "horizontal")))
+        if abs(y) < _ANCHOR_TOL_M:
+            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["horizontal"])
+            relations += 1
+        else:
+            outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "vertical", "place_x_mm": 0, "place_y_mm": 0})
+            if outcome.get("ok"):
+                dimensions.append(str((outcome.get("data") or {}).get("full_name", "vertical")))
+
+    has_lines = any(_line_ends(segment) is not None for segment in segments)
+    if not has_lines and points:
+        # Circles and arcs only, a bolt pattern say: SOLIDWORKS chains such
+        # centres to each other and leaves the chain floating, so every centre
+        # is pinned to the origin here.  What is left afterwards is radii.
+        for index, point in enumerate(points):
+            locate_point(index, point)
+        anchored_x = anchored_y = True
+
     for want_vertical, kind, free in ((True, "horizontal", not anchored_x), (False, "vertical", not anchored_y)):
         if not free:
             continue
         line = nearest_line(want_vertical)
         if line is not None:
-            selection: dict[str, Any] = {"sketch_segments": [line], "origin": True}
-        else:
-            point = nearest_point()
-            if point is None:
-                continue
-            selection = {"sketch_points": [point], "origin": True}
-        outcome = add_dimension({"selection": selection, "kind": kind, "place_x_mm": 0, "place_y_mm": 0})
-        if outcome.get("ok"):
-            dimensions.append(str((outcome.get("data") or {}).get("full_name", kind)))
+            outcome = add_dimension({"selection": {"sketch_segments": [line], "origin": True}, "kind": kind, "place_x_mm": 0, "place_y_mm": 0})
+            if outcome.get("ok"):
+                dimensions.append(str((outcome.get("data") or {}).get("full_name", kind)))
+            continue
+        point = nearest_point()
+        if point is not None:
+            locate_point(point, points[point])
+            anchored_x = anchored_y = True
 
     return {"origin_relations": relations, "location_dimensions": dimensions}
 
