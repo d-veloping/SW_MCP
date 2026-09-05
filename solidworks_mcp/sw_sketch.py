@@ -332,12 +332,24 @@ def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
 def draw_rectangle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
+    x1, y1, x2, y2 = (to_m(args[k]) for k in ("x1_mm", "y1_mm", "x2_mm", "y2_mm"))
     with _direct_to_db(manager):
-        manager.CreateCornerRectangle(
-            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        )
+        _polyline(manager, [(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
     return _drawn(doc, before, "a rectangle")
+
+
+def _polyline(manager: Any, points_m: list[tuple[float, float]]) -> None:
+    """Closed run of lines through the points, added without inferencing.
+
+    CreateCornerRectangle, CreateSketchSlot and CreatePolygon are compound
+    creators that return nothing at all with AddToDB on, so the shapes built
+    from them are laid down as their lines and arcs instead.  Coincident
+    endpoints are still merged, so the contour closes.
+    """
+    for (x1, y1), (x2, y2) in zip(points_m, points_m[1:] + points_m[:1]):
+        if abs(x1 - x2) < 1e-12 and abs(y1 - y2) < 1e-12:
+            continue
+        manager.CreateLine(x1, y1, 0.0, x2, y2, 0.0)
 
 
 @tool(
@@ -423,12 +435,26 @@ def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
 def draw_polygon(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
+    import math
+
+    sides = max(3, int(args.get("sides", 6)))
+    cx, cy = to_m(args["center_x_mm"]), to_m(args["center_y_mm"])
+    px, py = to_m(args["point_x_mm"]), to_m(args["point_y_mm"])
+    distance = math.hypot(px - cx, py - cy)
+    if distance < 1e-9:
+        return result(False, "The polygon's point must differ from its centre.")
+    angle = math.atan2(py - cy, px - cx)
+    if bool(args.get("inscribed", True)):
+        radius = distance  # the point is a corner
+    else:
+        radius = distance / math.cos(math.pi / sides)  # the point is an edge midpoint
+        angle += math.pi / sides
+    corners = [
+        (cx + radius * math.cos(angle + 2 * math.pi * i / sides), cy + radius * math.sin(angle + 2 * math.pi * i / sides))
+        for i in range(sides)
+    ]
     with _direct_to_db(manager):
-        manager.CreatePolygon(
-            to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-            to_m(args["point_x_mm"]), to_m(args["point_y_mm"]), 0.0,
-            int(args.get("sides", 6)), bool(args.get("inscribed", True)),
-        )
+        _polyline(manager, corners)
     return _drawn(doc, before, "a polygon")
 
 
@@ -447,19 +473,29 @@ def draw_polygon(args: dict[str, Any]) -> dict[str, Any]:
 )
 def draw_slot(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
-    length_type = 0 if str(args.get("length_type", "center_center")) == "center_center" else 1
     before = _segment_count(doc)
+    import math
+
+    x1, y1, x2, y2 = (to_m(args[k]) for k in ("x1_mm", "y1_mm", "x2_mm", "y2_mm"))
+    half = to_m(args["width_mm"]) / 2.0
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 1e-9:
+        return result(False, "The slot's two points must differ.")
+    dx, dy = (x2 - x1) / length, (y2 - y1) / length
+    if str(args.get("length_type", "center_center")) != "center_center":
+        # full_length: the points are the slot's extremities, so the arc
+        # centres sit half a width inside them.
+        if length <= 2 * half:
+            return result(False, "A full_length slot must be longer than its width.")
+        x1, y1, x2, y2 = x1 + dx * half, y1 + dy * half, x2 - dx * half, y2 - dy * half
+    nx, ny = -dy * half, dx * half  # left-hand offset, looking from point 1 to point 2
     with _direct_to_db(manager):
-        manager.CreateSketchSlot(
-            0,  # swSketchSlotCreationType_line
-            length_type,
-            to_m(args["width_mm"]),
-            to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-            to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-            0.0, 0.0, 0.0,
-            1,  # arc direction, unused for a straight slot
-            bool(args.get("add_dimensions", False)),
-        )
+        manager.CreateLine(x1 + nx, y1 + ny, 0.0, x2 + nx, y2 + ny, 0.0)
+        manager.CreateLine(x1 - nx, y1 - ny, 0.0, x2 - nx, y2 - ny, 0.0)
+        # End caps: each arc runs from the left edge over the tip to the right
+        # edge, i.e. clockwise about its own centre.
+        manager.CreateArc(x2, y2, 0.0, x2 + nx, y2 + ny, 0.0, x2 - nx, y2 - ny, 0.0, -1)
+        manager.CreateArc(x1, y1, 0.0, x1 - nx, y1 - ny, 0.0, x1 + nx, y1 + ny, 0.0, -1)
     return _drawn(doc, before, "a slot")
 
 
