@@ -313,15 +313,19 @@ def chamfer(args: dict[str, Any]) -> dict[str, Any]:
     exit_active_sketch(doc)
     count = require_selection(doc, args["selection"])
     mode = str(args.get("mode", "equal_distance"))
+    # swChamferEqualDistance (16) is accepted by InsertFeatureChamfer on 2016
+    # and creates a feature that removes nothing -- measured: 0 mm³ instead of
+    # 270 on four 15 mm edges.  Two equal distances are the same geometry and
+    # work on every build, so that is what equal_distance sends.
     chamfer_type = {
-        "equal_distance": CHAMFER_EQUAL_DISTANCE,
+        "equal_distance": CHAMFER_DISTANCE_DISTANCE,
         "angle_distance": CHAMFER_ANGLE_DISTANCE,
         "distance_distance": CHAMFER_DISTANCE_DISTANCE,
     }[mode]
     options = CHAMFER_TANGENT_PROPAGATION if bool(args.get("propagate", True)) else 0
     if bool(args.get("flip", False)):
         options |= 1  # swFeatureChamferFlipDirection
-    other = to_m(args.get("other_distance_mm", args["distance_mm"]))
+    other = to_m(args["distance_mm"]) if mode == "equal_distance" else to_m(args.get("other_distance_mm", args["distance_mm"]))
 
     feature = feature_manager(doc).InsertFeatureChamfer(
         options, chamfer_type, to_m(args["distance_mm"]),

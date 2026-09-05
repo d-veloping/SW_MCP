@@ -83,10 +83,15 @@ RELATIONS = {
     "intersection": 13,
     "equal": 14,
     "fixed": 17,
+    # Aligning two points is its own pair of constraint types; the line
+    # variants above are silently ignored when every entity is a point.
+    "horizontal_points": 25,
+    "vertical_points": 26,
     "collinear": 27,
     "coradial": 28,
 }
 RELATION_NAMES = {code: name for name, code in RELATIONS.items()}
+_POINT_VARIANTS = {"horizontal": "horizontal_points", "vertical": "vertical_points"}
 
 DIMENSION_DIRECTIONS = {"right": 0, "up": 1, "left": 2, "down": 3}
 
@@ -787,17 +792,22 @@ def _relation_entities(doc: Any, spec: dict[str, Any]) -> list[Any]:
 def add_relation(args: dict[str, Any]) -> dict[str, Any]:
     doc, _ = _require_open_sketch()
     relation = str(args["relation"])
-    code = RELATIONS[relation]
     sketch = doc.SketchManager.ActiveSketch
     manager = value(sketch, "RelationManager")
     flag_methods(manager, "AddRelation", "GetRelationsCount", "GetAllowedRelations")
 
-    entities = _relation_entities(doc, args["selection"])
+    spec = args["selection"]
+    entities = _relation_entities(doc, spec)
     if not entities:
         raise RuntimeError(
             "add_relation needs sketch_segments, sketch_points, or origin in the selection. "
             "Call list_sketch_segments to see the indices."
         )
+    if relation in _POINT_VARIANTS and not spec.get("sketch_segments"):
+        # Only points selected: "horizontal" means "in line horizontally",
+        # which SOLIDWORKS files under a different constraint type.
+        relation = _POINT_VARIANTS[relation]
+    code = RELATIONS[relation]
 
     before = int(manager.GetRelationsCount(0))
     status_before = _sketch_status(doc)
@@ -1256,14 +1266,14 @@ def _anchor_sketch(doc: Any) -> dict[str, Any]:
         if abs(x) < _ANCHOR_TOL_M and abs(y) < _ANCHOR_TOL_M:
             return
         if abs(x) < _ANCHOR_TOL_M:
-            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["vertical"])
+            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["vertical_points"])
             relations += 1
         else:
             outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "horizontal", "place_x_mm": 0, "place_y_mm": 0})
             if outcome.get("ok"):
                 dimensions.append(str((outcome.get("data") or {}).get("full_name", "horizontal")))
         if abs(y) < _ANCHOR_TOL_M:
-            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["horizontal"])
+            manager.AddRelation(dispatch_array([point, origin]), RELATIONS["horizontal_points"])
             relations += 1
         else:
             outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "vertical", "place_x_mm": 0, "place_y_mm": 0})
