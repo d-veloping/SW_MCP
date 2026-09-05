@@ -724,6 +724,43 @@ def select_object(doc: Any, obj: Any, mark: int = 0, append: bool = True) -> boo
         return False
 
 
+ORIGIN_FEATURE_TYPE = "OriginProfileFeature"
+
+
+def origin_point_name(doc: Any) -> str:
+    """The SelectByID2 name of the origin's sketch point on this install.
+
+    The origin feature is localized -- Origin, Ursprung, 原点 -- while the
+    point inside it keeps its English name, so the feature name is read off
+    the tree rather than assumed.
+    """
+    for feature in iter_features(doc):
+        if feature["type"] == ORIGIN_FEATURE_TYPE and feature["name"]:
+            return f"Point1@{feature['name']}"
+    return "Point1@Origin"
+
+
+def select_origin(doc: Any, mark: int = 0, append: bool = True, ext: Any = None) -> bool:
+    """Select the sketch origin, the one point a sketch can be anchored to."""
+    for candidate in (origin_point_name(doc), "Point1@Origin"):
+        if select_by_id(doc, candidate, "EXTSKETCHPOINT", mark, append, ext):
+            return True
+    return False
+
+
+def origin_sketch_point(doc: Any) -> Any:
+    """The origin as a sketch-point object, for APIs that take entities rather than a selection."""
+    clear_selection(doc)
+    if not select_origin(doc, 0, False):
+        raise RuntimeError("Could not select the sketch origin. Is a sketch open?")
+    manager = flag_methods(doc.SelectionManager, "GetSelectedObject6")
+    point = manager.GetSelectedObject6(1, -1)
+    clear_selection(doc)
+    if point is None:
+        raise RuntimeError("SOLIDWORKS selected the origin but handed back no object for it.")
+    return point
+
+
 def resolve_plane_name(doc: Any, name: str, planes: Sequence[str] | None = None) -> str:
     """Accept either an exact localized plane name or front/top/right.
 
@@ -1199,6 +1236,10 @@ SELECTION_SCHEMA = {
         },
         "sketch_points": {"type": "array", "items": {"type": "integer"}, "description": "Sketch point indices."},
         "sketch_name": {"type": "string", "description": "Which sketch sketch_segments/sketch_points refer to. Defaults to the open sketch."},
+        "origin": {
+            "type": "boolean",
+            "description": "Select the sketch origin point, so a relation or dimension can anchor the sketch to it.",
+        },
         "bodies": {"type": "array", "items": {"type": "integer"}, "description": "Solid-body indices."},
         "components": {"type": "array", "items": {"type": "string"}, "description": "Assembly component names."},
         "points": {
@@ -1300,8 +1341,13 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
     # cross-process GetIDsOfNames, so eight named selections used to spend 64 of
     # them on nothing.  Taken once here, and only when something needs it.
     ext = extension(doc) if any(
-        spec.get(key) for key in ("features", "planes", "axes", "sketches", "components")
+        spec.get(key) for key in ("features", "planes", "axes", "sketches", "components", "origin")
     ) else None
+
+    if spec.get("origin"):
+        if not select_origin(doc, mark, True, ext):
+            raise RuntimeError("Could not select the sketch origin. Is a sketch open?")
+        count += 1
 
     if spec.get("faces"):
         count += _select_indexed_objects(
@@ -1447,6 +1493,13 @@ def split_selection(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
     singles: list[dict[str, Any]] = []
     for key, items in spec.items():
         if key == "sketch_name" or not items:
+            continue
+        if key == "origin":
+            # A flag, not a list: the origin is one entity.
+            single: dict[str, Any] = {"origin": True}
+            if sketch_name:
+                single["sketch_name"] = sketch_name
+            singles.append(single)
             continue
         for item in items:
             sub: dict[str, Any] = {key: [item]}

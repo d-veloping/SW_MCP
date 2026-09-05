@@ -41,6 +41,7 @@ from .sw_core import (
     iter_feature_objects,
     latest_sketch,
     logger,
+    origin_sketch_point,
     rebuild,
     require_part,
     require_selection,
@@ -727,6 +728,8 @@ def _relation_entities(doc: Any, spec: dict[str, Any]) -> list[Any]:
             if not 0 <= index < len(points):
                 raise RuntimeError(f"Sketch point index {index} is out of range (0..{len(points) - 1}).")
             entities.append(points[index])
+    if spec.get("origin"):
+        entities.append(origin_sketch_point(doc))
     return entities
 
 
@@ -734,7 +737,8 @@ def _relation_entities(doc: Any, spec: dict[str, Any]) -> list[Any]:
     "add_relation",
     "Add a geometric relation between the selected sketch entities. This is what makes a sketch "
     "fully defined and driveable, so add relations before dimensions. Select the entities via "
-    "selection (sketch_segments / sketch_points), then name the relation.",
+    "selection (sketch_segments / sketch_points / origin), then name the relation. A sketch is "
+    "only fully defined once it is anchored: make a point or a line coincident with the origin.",
     {
         "relation": {"type": "string", "enum": sorted(RELATIONS), "description": "Geometric relation to add."},
         "selection": SELECTION_SCHEMA,
@@ -752,7 +756,7 @@ def add_relation(args: dict[str, Any]) -> dict[str, Any]:
     entities = _relation_entities(doc, args["selection"])
     if not entities:
         raise RuntimeError(
-            "add_relation needs sketch_segments or sketch_points in the selection. "
+            "add_relation needs sketch_segments, sketch_points, or origin in the selection. "
             "Call list_sketch_segments to see the indices."
         )
 
@@ -778,6 +782,17 @@ def add_relation(args: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception:
             pass
+        if relation in allowed:
+            # SOLIDWORKS lists the relation as applicable yet added nothing,
+            # which is what a duplicate looks like: it refuses to add a
+            # relation the entities already carry, without saying so.
+            return result(
+                True,
+                f"The {relation} relation is already present on that selection; nothing was added.",
+                entities=len(entities),
+                already_present=True,
+                sketch_status=_sketch_status(doc),
+            )
         return result(
             False,
             f"SOLIDWORKS did not add a {relation} relation to that selection.",

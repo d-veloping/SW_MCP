@@ -380,6 +380,21 @@ class SelectionSpecTests(unittest.TestCase):
         self.assertTrue(all(sub["sketch_name"] == "Sketch1" for sub in singles))
         self.assertEqual(len(singles), 2)
 
+    def test_split_selection_treats_the_origin_flag_as_one_entity(self) -> None:
+        singles = sw_core.split_selection({"origin": True, "sketch_segments": [3], "sketch_name": "Profil"})
+        self.assertEqual(
+            singles,
+            [{"origin": True, "sketch_name": "Profil"}, {"sketch_segments": [3], "sketch_name": "Profil"}],
+        )
+        self.assertEqual(sw_core.split_selection({"origin": False}), [])
+
+    def test_origin_point_name_follows_the_localized_origin_feature(self) -> None:
+        tree = [{"name": "Ursprung", "type": "OriginProfileFeature"}, {"name": "Ebene vorne", "type": "RefPlane"}]
+        with unittest.mock.patch.object(sw_core, "iter_features", return_value=tree):
+            self.assertEqual(sw_core.origin_point_name(None), "Point1@Ursprung")
+        with unittest.mock.patch.object(sw_core, "iter_features", return_value=[]):
+            self.assertEqual(sw_core.origin_point_name(None), "Point1@Origin")
+
     def test_split_selection_of_nothing_is_empty(self) -> None:
         self.assertEqual(sw_core.split_selection(None), [])
         self.assertEqual(sw_core.split_selection({}), [])
