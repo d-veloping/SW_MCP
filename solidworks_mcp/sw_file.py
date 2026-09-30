@@ -232,6 +232,36 @@ def close_document(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "list_open_documents",
+    "Read-only: list every document open in SOLIDWORKS with its title, path (empty while unsaved) and whether "
+    "it is the active one. A document whose title or path cannot be read is listed as unreadable, not skipped.",
+    {},
+)
+def list_open_documents(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    try:
+        docs = as_list(value(app, "GetDocuments"))
+    except Exception as exc:
+        # An empty list would read as "nothing open"; a caller deciding whether
+        # SOLIDWORKS is clean has to see the failure instead.
+        return result(False, f"Could not list the open documents: {exc}")
+    try:
+        active_title = str(value(app.ActiveDoc, "GetTitle")) if app.ActiveDoc is not None else None
+    except Exception:
+        active_title = None
+    documents: list[dict[str, Any]] = []
+    for doc in docs:
+        try:
+            title = str(value(doc, "GetTitle"))
+            path = str(value(doc, "GetPathName") or "")
+        except Exception:
+            documents.append({"title": None, "path": None, "active": False, "unlesbar": True})
+            continue
+        documents.append({"title": title, "path": path, "active": title == active_title})
+    return result(True, f"{len(documents)} open document(s).", documents=documents, count=len(documents))
+
+
+@tool(
     "save_document",
     "Save the active document as a new .sldprt, .sldasm, or .slddrw file under the designated "
     "outputs folder. Existing files are never overwritten unless overwrite is true.",
