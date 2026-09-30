@@ -48,6 +48,12 @@ from .sw_core import (
 )
 
 
+# swSaveAsOptions_e: save without prompting.  Measured on 2016 SP3 (ClauSW
+# issue #20): with it, a save-as onto an existing SLDPRT or STEP returns
+# without the overwrite confirmation.
+SW_SAVE_AS_SILENT = 1
+
+
 def validated_output_path(path: str, allowed_extensions: set[str], allow_overwrite: bool = False) -> Path:
     candidate = Path(path).expanduser()
     # A relative path means "inside the output root", which is where everything
@@ -83,14 +89,20 @@ def _save_as(doc: Any, path: str) -> bool:
         except Exception:
             logger.info("Save3 on the document's own path failed; trying SaveAs")
 
+    # The one save-as path, and a silent one.  Overwriting an existing file
+    # used to show "... already exists. Do you want to replace it?" in a modal
+    # dialog, and the call did not return until someone answered (whether
+    # Extension.SaveAs with options 0 or the ModelDoc2.SaveAs fallback asked
+    # was not measured separately).  With swSaveAsOptions_Silent it returns
+    # without a dialog.  The overwrite was already allowed by
+    # validated_output_path, so there is no fallback to ModelDoc2.SaveAs,
+    # which takes no options and cannot be silenced; a failed silent save is
+    # reported as a failure instead.
     try:
-        if bool(extension(doc).SaveAs(str(output), 0, 0, nothing(), errors, warnings)) and int(errors.value) == 0:
-            return True
+        saved = extension(doc).SaveAs(str(output), 0, SW_SAVE_AS_SILENT, nothing(), errors, warnings)
+        return bool(saved) and int(errors.value) == 0
     except Exception:
-        logger.info("Extension.SaveAs failed; falling back to ModelDoc2.SaveAs")
-    try:
-        return bool(doc.SaveAs(str(output)))
-    except Exception:
+        logger.info("Extension.SaveAs failed", exc_info=True)
         return False
 
 
