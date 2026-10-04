@@ -728,24 +728,56 @@ def select_object(doc: Any, obj: Any, mark: int = 0, append: bool = True) -> boo
 ORIGIN_FEATURE_TYPE = "OriginProfileFeature"
 
 
-def origin_point_name(doc: Any) -> str:
+# Origin point names already read, by document title.  Reading one walks the
+# whole feature tree over COM, about a second on a part with a few features,
+# and the origin is selected several times per sketch.
+_ORIGIN_POINT_NAMES: dict[str, str] = {}
+
+
+def _document_key(doc: Any) -> str | None:
+    try:
+        return str(value(doc, "GetTitle")) or None
+    except Exception:
+        return None
+
+
+def origin_point_name(doc: Any, refresh: bool = False) -> str:
     """The SelectByID2 name of the origin's sketch point on this install.
 
     The origin feature is localized -- Origin, Ursprung, 原点 -- while the
     point inside it keeps its English name, so the feature name is read off
-    the tree rather than assumed.
+    the tree rather than assumed.  The name is kept per document title;
+    ``refresh`` reads the tree again.
     """
+    key = _document_key(doc)
+    if key is not None and not refresh and key in _ORIGIN_POINT_NAMES:
+        return _ORIGIN_POINT_NAMES[key]
+    name = "Point1@Origin"
     for feature in iter_features(doc):
         if feature["type"] == ORIGIN_FEATURE_TYPE and feature["name"]:
-            return f"Point1@{feature['name']}"
-    return "Point1@Origin"
+            name = f"Point1@{feature['name']}"
+            break
+    if key is not None:
+        _ORIGIN_POINT_NAMES[key] = name
+    return name
 
 
 def select_origin(doc: Any, mark: int = 0, append: bool = True, ext: Any = None) -> bool:
-    """Select the sketch origin, the one point a sketch can be anchored to."""
-    for candidate in (origin_point_name(doc), "Point1@Origin"):
-        if select_by_id(doc, candidate, "EXTSKETCHPOINT", mark, append, ext):
-            return True
+    """Select the sketch origin, the one point a sketch can be anchored to.
+
+    A kept name that no longer selects (the origin was renamed, or another
+    document took the title) is read off the tree once more before giving up.
+    """
+    key = _document_key(doc)
+    was_kept = key is not None and key in _ORIGIN_POINT_NAMES
+    tried: set[str] = set()
+    for refresh in (False, True) if was_kept else (False,):
+        for candidate in (origin_point_name(doc, refresh=refresh), "Point1@Origin"):
+            if candidate in tried:
+                continue
+            tried.add(candidate)
+            if select_by_id(doc, candidate, "EXTSKETCHPOINT", mark, append, ext):
+                return True
     return False
 
 

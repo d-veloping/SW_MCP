@@ -1166,6 +1166,25 @@ _DEFINE_RELATIONS = {
     "collinear": 32, "concentric": 64, "parallel": 128, "midpoint": 256, "coincident": 512,
 }
 
+def _sketch_dimension_count(sketch: Any) -> int | None:
+    """How many dimensions the open sketch carries, or None if unreadable.
+
+    Read from the sketch's own relation manager, where every dimension is a
+    relation that has a display dimension: one call per relation of this
+    sketch, where list_dimensions reads every display dimension of the whole
+    document and grows with the part.  Asking for the display dimension
+    rather than matching relation types also counts kinds no list here names,
+    such as the Rho dimension of a conic.
+    """
+    try:
+        manager = flag_methods(value(sketch, "RelationManager"), "GetRelations")
+        relations = as_list(manager.GetRelations(0))  # swAll
+        return sum(1 for relation in relations if value(relation, "GetDisplayDimension") is not None)
+    except Exception:
+        logger.info("Could not count the dimensions of the open sketch.")
+        return None
+
+
 # swAutodimStatus_e
 _DEFINE_STATUS = {
     0: "success", 1: "bad option value", 2: "no active document", 3: "document type not supported",
@@ -1374,7 +1393,7 @@ def _select_datum(doc: Any, spec: dict[str, Any] | None, mark: int) -> bool:
 )
 def fully_define_sketch(args: dict[str, Any]) -> dict[str, Any]:
     app, doc = active_document()
-    _active_sketch(doc)
+    sketch = _active_sketch(doc)
     manager = sketch_manager(doc)
     status_before = _sketch_status(doc)
     if status_before == "fully_defined":
@@ -1387,7 +1406,7 @@ def fully_define_sketch(args: dict[str, Any]) -> dict[str, Any]:
         relation_mask |= _DEFINE_RELATIONS[str(name)]
     use_dimensions = bool(args.get("dimensions", True))
 
-    dims_before = len(list_dimensions({})["data"]["dimensions"])
+    dims_before = _sketch_dimension_count(sketch)
     anchor = _anchor_sketch(doc) if use_dimensions else {"origin_relations": 0, "location_dimensions": []}
 
     # Datums travel as preselection marks (2 horizontal, 4 vertical); the
@@ -1412,17 +1431,19 @@ def fully_define_sketch(args: dict[str, Any]) -> dict[str, Any]:
             )
         )
     clear_selection(doc)
-    added = len(list_dimensions({})["data"]["dimensions"]) - dims_before
+    dims_after = _sketch_dimension_count(sketch)
+    added = dims_after - dims_before if dims_before is not None and dims_after is not None else None
+    counted = "" if added is None else f" ({added} dimensions added)"
     status_after = _sketch_status(doc)
     outcome = _DEFINE_STATUS.get(status_code, f"status {status_code}")
     ok = status_code == 0 and status_after == "fully_defined"
     if status_code != 0:
         message = f"SOLIDWORKS could not fully define the sketch: {outcome}. The sketch is {status_after}."
     elif ok:
-        message = f"The sketch is now fully defined ({added} dimensions added)."
+        message = f"The sketch is now fully defined{counted}."
     else:
         message = (
-            f"SOLIDWORKS added {added} dimensions but the sketch is still {status_after}. "
+            f"SOLIDWORKS defined what it could{counted}, but the sketch is still {status_after}. "
             "Check list_sketch_segments for geometry that no relation or dimension reaches."
         )
     return result(

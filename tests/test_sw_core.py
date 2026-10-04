@@ -370,6 +370,65 @@ class TopologyIndexOrderTests(unittest.TestCase):
         self.assertEqual([m for _, m in walked], [None, matrix])
 
 
+class FakeDocument:
+    def __init__(self, title: str) -> None:
+        self.title = title
+
+    def GetTitle(self) -> str:  # noqa: N802 - COM member name
+        return self.title
+
+
+class FakeRelation:
+    def __init__(self, kind: int, dimension: object | None = None) -> None:
+        self.kind = kind
+        self.dimension = dimension
+
+    def GetRelationType(self) -> int:  # noqa: N802 - COM member name
+        return self.kind
+
+    def GetDisplayDimension(self):  # noqa: N802 - COM member name
+        return self.dimension
+
+
+class FakeRelationManager(FakeDispatch):
+    def __init__(self, relations: list[FakeRelation]) -> None:
+        super().__init__({"GetRelations"})
+        self.relations = relations
+
+    def GetRelations(self, relation_filter: int):  # noqa: N802 - COM member name
+        return tuple(self.relations)
+
+
+class FakeSketch:
+    def __init__(self, relations: list[FakeRelation]) -> None:
+        self.RelationManager = FakeRelationManager(relations)
+
+
+class SketchDimensionCountTests(unittest.TestCase):
+    """fully_define_sketch counts what it added from the open sketch alone.
+
+    Reading list_dimensions twice per call walked every display dimension of
+    the document over COM and grew with the part: 21 of 40 s across the three
+    sketches of a brake disc with six features.
+    """
+
+    def test_relations_with_a_display_dimension_are_counted_whatever_their_type(self) -> None:
+        from solidworks_mcp.sw_sketch import _sketch_dimension_count
+
+        shown = object()
+        sketch = FakeSketch([
+            FakeRelation(9), FakeRelation(4), FakeRelation(14),          # coincident, horizontal, equal
+            FakeRelation(1, shown), FakeRelation(15, shown), FakeRelation(41, shown),  # distance, diameter, to a centerline
+            FakeRelation(82, shown),                                     # a conic's Rho
+        ])
+        self.assertEqual(_sketch_dimension_count(sketch), 4)
+
+    def test_an_unreadable_sketch_gives_no_count(self) -> None:
+        from solidworks_mcp.sw_sketch import _sketch_dimension_count
+
+        self.assertIsNone(_sketch_dimension_count(object()))
+
+
 class SelectionSpecTests(unittest.TestCase):
     def test_split_selection_yields_one_entity_per_sub_spec(self) -> None:
         singles = sw_core.split_selection({"faces": [1, 2], "planes": ["Front"]})
@@ -394,6 +453,38 @@ class SelectionSpecTests(unittest.TestCase):
             self.assertEqual(sw_core.origin_point_name(None), "Point1@Ursprung")
         with unittest.mock.patch.object(sw_core, "iter_features", return_value=[]):
             self.assertEqual(sw_core.origin_point_name(None), "Point1@Origin")
+
+    def test_origin_point_name_is_read_once_per_document(self) -> None:
+        tree = [{"name": "Ursprung", "type": "OriginProfileFeature"}]
+        with unittest.mock.patch.dict(sw_core._ORIGIN_POINT_NAMES, clear=True), \
+                unittest.mock.patch.object(sw_core, "iter_features", return_value=tree) as walk:
+            self.assertEqual(sw_core.origin_point_name(FakeDocument("Part7")), "Point1@Ursprung")
+            self.assertEqual(sw_core.origin_point_name(FakeDocument("Part7")), "Point1@Ursprung")
+            self.assertEqual(walk.call_count, 1)
+            sw_core.origin_point_name(FakeDocument("Part8"))
+            sw_core.origin_point_name(FakeDocument("Part7"), refresh=True)
+            self.assertEqual(walk.call_count, 3)
+
+    def test_select_origin_reads_the_tree_again_when_the_kept_name_no_longer_selects(self) -> None:
+        tried: list[str] = []
+
+        def select(doc, name, *args):
+            tried.append(name)
+            return name == "Point1@Origin2"
+
+        renamed = [{"name": "Origin2", "type": "OriginProfileFeature"}]
+        with unittest.mock.patch.dict(sw_core._ORIGIN_POINT_NAMES, {"Part7": "Point1@Ursprung"}, clear=True), \
+                unittest.mock.patch.object(sw_core, "iter_features", return_value=renamed), \
+                unittest.mock.patch.object(sw_core, "select_by_id", side_effect=select):
+            self.assertTrue(sw_core.select_origin(FakeDocument("Part7")))
+        self.assertEqual(tried, ["Point1@Ursprung", "Point1@Origin", "Point1@Origin2"])
+
+    def test_select_origin_does_not_walk_twice_on_a_first_lookup(self) -> None:
+        with unittest.mock.patch.dict(sw_core._ORIGIN_POINT_NAMES, clear=True), \
+                unittest.mock.patch.object(sw_core, "iter_features", return_value=[]) as walk, \
+                unittest.mock.patch.object(sw_core, "select_by_id", return_value=False):
+            self.assertFalse(sw_core.select_origin(FakeDocument("Part9")))
+        self.assertEqual(walk.call_count, 1)
 
     def test_split_selection_of_nothing_is_empty(self) -> None:
         self.assertEqual(sw_core.split_selection(None), [])
