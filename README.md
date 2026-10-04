@@ -1,4 +1,13 @@
-# solidworks-mcp
+# SW_MCP
+
+> **Origin.** SW_MCP continues [solidworks-mcp](https://github.com/Slacker-LLC/solidworks-mcp) by JIALE LIU
+> (Apache License 2.0), forked at commit 6019ce0 of 2026-08-16 after upstream went quiet. On top of it: fallbacks
+> to earlier COM method variants for older SOLIDWORKS releases (verified on 2016 SP3), sketch tooling
+> (`fully_define_sketch`, entities without inferencing, origin selections, diameter dimensions, rectangles and
+> slots from lines and arcs), `list_open_documents`, `close_document`, silent save and export, and fixes found
+> while driving the server from an automated build pipeline. The Python package and the console script keep
+> the names `solidworks_mcp` and `solidworks-mcp`, so existing configurations keep working. The compatibility
+> part was offered upstream as [PR #2](https://github.com/Slacker-LLC/solidworks-mcp/pull/2).
 
 An MCP server that drives a **running** SOLIDWORKS session over its COM API.
 
@@ -14,7 +23,7 @@ the model can see what it just built.
 A sibling server, [`autocad-mcp`](https://github.com/limuzi013/autocad-mcp),
 does the same for AutoCAD.
 
-<!-- mcp-name: io.github.limuzi013/solidworks-mcp -->
+<!-- mcp-name: io.github.d-veloping/sw_mcp -->
 
 ---
 
@@ -26,7 +35,7 @@ does the same for AutoCAD.
 ## Install
 
 ```powershell
-git clone https://github.com/limuzi013/solidworks-mcp.git
+git clone https://github.com/d-veloping/SW_MCP.git solidworks-mcp
 cd solidworks-mcp
 py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install .
@@ -36,7 +45,7 @@ That puts a `solidworks-mcp` command in the environment, which is what the MCP
 host runs. `uv` works too, if you prefer it:
 
 ```powershell
-uv tool install --from git+https://github.com/limuzi013/solidworks-mcp solidworks-mcp
+uv tool install --from git+https://github.com/d-veloping/SW_MCP solidworks-mcp
 ```
 
 ### Claude Code / Claude Desktop
@@ -344,7 +353,7 @@ def my_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 JIALE LIU.
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 JIALE LIU; modifications Copyright 2026 Christian Dengler (d-veloping), see [NOTICE](NOTICE).
 
 Use it, change it, ship it in a commercial product; that is all allowed. What
 the license does require, if you redistribute this or anything derived from it,

@@ -1,2 +1,9 @@
 solidworks-mcp
 Copyright 2026 JIALE LIU
+
+SW_MCP
+Modifications Copyright 2026 Christian Dengler (d-veloping)
+
+This repository continues solidworks-mcp by JIALE LIU
+(https://github.com/Slacker-LLC/solidworks-mcp, formerly limuzi013/solidworks-mcp),
+forked at commit 6019ce0 of 2026-08-16 under the Apache License 2.0.
