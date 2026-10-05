@@ -113,5 +113,71 @@ class SilentSaveTests(unittest.TestCase):
                 self.assertEqual(doc.interactive_calls, [])
 
 
+class TypedDocument(FakeDocument):
+    """A document of a given swDocumentTypes_e: part 1, assembly 2, drawing 3."""
+
+    def __init__(self, extension: FakeExtension, kind: int) -> None:
+        super().__init__(extension)
+        self.kind = kind
+
+    def GetType(self) -> int:  # noqa: N802 - COM member name
+        return self.kind
+
+
+class PdfExportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name).resolve()
+        self.pdf = self.root / "Zeichnung.pdf"
+
+    def export(self, doc: FakeDocument, path: Path, overwrite: bool = False) -> dict:
+        with unittest.mock.patch.object(sw_file, "OUTPUT_ROOT", self.root), \
+                unittest.mock.patch.object(sw_file, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_file, "clear_selection"):
+            return sw_file.export_document({"path": str(path), "overwrite": overwrite})
+
+    def test_a_drawing_exports_to_pdf_through_the_silent_save(self) -> None:
+        ext = FakeExtension()
+        answer = self.export(TypedDocument(ext, 3), self.pdf)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual([(Path(path), options) for path, _, options in ext.calls], [(self.pdf, sw_file.SW_SAVE_AS_SILENT)])
+
+    def test_a_part_or_assembly_is_refused_before_the_path_is_touched(self) -> None:
+        for kind in (1, 2):
+            with self.subTest(kind=kind):
+                ext = FakeExtension()
+                target = self.root / "neu" / "Teil.PDF"
+                with unittest.mock.patch.object(sw_file, "validated_output_path") as validated:
+                    answer = self.export(TypedDocument(ext, kind), target)
+                self.assertFalse(answer["ok"])
+                self.assertIn("drawings only", answer["message"])
+                self.assertEqual(ext.calls, [])
+                validated.assert_not_called()
+                self.assertFalse(target.parent.exists())
+
+    def test_the_refusal_wins_over_an_existing_target(self) -> None:
+        self.pdf.write_bytes(b"old")
+        answer = self.export(TypedDocument(FakeExtension(), 1), self.pdf)
+        self.assertIn("drawings only", answer["message"])
+        self.assertEqual(self.pdf.read_bytes(), b"old")
+
+    def test_an_existing_pdf_needs_overwrite(self) -> None:
+        self.pdf.write_bytes(b"old")
+        ext = FakeExtension()
+        with self.assertRaisesRegex(RuntimeError, "Refusing to overwrite"):
+            self.export(TypedDocument(ext, 3), self.pdf)
+        self.assertEqual(ext.calls, [])
+        answer = self.export(TypedDocument(ext, 3), self.pdf, overwrite=True)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual([options for _, _, options in ext.calls], [sw_file.SW_SAVE_AS_SILENT])
+
+    def test_a_pdf_outside_the_output_root_is_refused(self) -> None:
+        ext = FakeExtension()
+        with self.assertRaisesRegex(RuntimeError, "must be under"):
+            self.export(TypedDocument(ext, 3), self.root.parent / "anderswo.pdf")
+        self.assertEqual(ext.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
