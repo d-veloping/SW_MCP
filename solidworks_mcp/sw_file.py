@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -136,9 +137,25 @@ def get_active_document_info(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Read active document.", document=document_info(doc))
 
 
+# NewDocument can return while SOLIDWORKS still reports the previous document
+# as active (2016 SP3, ClauSW issue #83: one to two seconds).  The new document
+# is only reported as created once it is the active one; until then the tool
+# waits, but only while exactly the previous document is active.
+NEW_DOCUMENT_ACTIVATION_S = 3.0
+NEW_DOCUMENT_POLL_S = 0.1
+
+
+def _identity(doc: Any) -> tuple[str, str] | None:
+    if doc is None:
+        return None
+    return str(value(doc, "GetTitle")), str(value(doc, "GetPathName") or "")
+
+
 @tool(
     "create_new_document",
-    "Create a new SOLIDWORKS part, assembly, or drawing from the configured default template.",
+    "Create a new SOLIDWORKS part, assembly, or drawing from the configured default template and wait until "
+    "SOLIDWORKS reports it as the active document. Fails (with the new document in `document`) if another document "
+    "becomes active or the new one is not active within a few seconds; it never activates a document itself.",
     {"kind": {"type": "string", "enum": ["part", "assembly", "drawing"]}},
     ["kind"],
 )
@@ -161,10 +178,37 @@ def new_document(kind: str) -> dict[str, Any]:
                 "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
             )
         template = str(fallback)
+    previous = _identity(app.ActiveDoc)
     doc = app.NewDocument(template, 0, 0.0, 0.0)
     if doc is None:
         return result(False, f"SOLIDWORKS did not create a {kind} document.")
-    return result(True, f"Created new {kind} document.", document=document_info(doc))
+    created = document_info(doc)
+    own = (created["title"], created["path"])
+    started = time.monotonic()
+    # Never ActivateDoc3 here: a switch someone made by hand must not be undone.
+    while True:
+        active = app.ActiveDoc
+        identity = _identity(active)
+        waited = round((time.monotonic() - started) * 1000)
+        if identity == own:
+            return result(True, f"Created new {kind} document.", document=created, activated=True, wait_ms=waited)
+        if identity != previous:
+            return result(
+                False,
+                f"Created new {kind} document '{own[0]}', but SOLIDWORKS made another document active "
+                f"('{identity[0] if identity else 'none'}'); nothing should be done in either.",
+                document=created, activated=False, wait_ms=waited,
+                active_document=None if active is None else document_info(active),
+            )
+        if time.monotonic() - started >= NEW_DOCUMENT_ACTIVATION_S:
+            return result(
+                False,
+                f"Created new {kind} document '{own[0]}', but SOLIDWORKS still reports the previous document "
+                f"('{identity[0] if identity else 'none'}') as active after {waited} ms.",
+                document=created, activated=False, wait_ms=waited,
+                active_document=None if active is None else document_info(active),
+            )
+        time.sleep(NEW_DOCUMENT_POLL_S)
 
 
 @tool(
