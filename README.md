@@ -132,7 +132,7 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | `create_new_document` | New part / assembly / drawing from the default template. |
 | `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw`. |
 | `save_document` / `save_active_document` | Save-as under the output root / save in place. |
-| `export_document` | STEP, IGES, STL, Parasolid, 3MF, or an image. |
+| `export_document` | STEP, IGES, STL, Parasolid, 3MF, an image of the current view, or PDF of a drawing (every sheet, vector, true sheet size; an image of a drawing is only a window-sized capture). |
 | `rebuild_document` | Rebuild and report failing features. |
 | `set_appearance` / `set_material` | Display colour; real material (so mass properties mean something). |
 

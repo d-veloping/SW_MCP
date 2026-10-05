@@ -376,12 +376,18 @@ def save_active_document(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "export_document",
     "Export the active document to STEP/STP, IGES/IGS, STL, Parasolid X_T/X_B, 3MF, or an image of "
-    "the current view, under the designated outputs folder.",
+    "the current view, under the designated outputs folder. PNG/JPG/BMP capture the current view at window "
+    "size; for a drawing use PDF, which writes every sheet as a vector page at true sheet size, "
+    "whichever sheet is active. PDF is for drawings only.",
     {"path": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}},
     ["path"],
 )
 def export_document(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
+    # Checked before the path: a part with a .pdf target is refused for what it
+    # is, not for an existing file, and nothing is created on disk.
+    if Path(str(args["path"])).suffix.lower() == ".pdf" and document_type(doc) != 3:
+        return result(False, "PDF export is for drawings only; the active document is not a drawing.")
     output = validated_output_path(str(args["path"]), EXPORT_EXTENSIONS, bool(args.get("overwrite", False)))
     clear_selection(doc)
     exported = _save_as(doc, str(output))

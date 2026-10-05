@@ -139,7 +139,7 @@ OUTPUT_ROOT = Path(
     os.environ.get("SW_MCP_OUTPUT_ROOT") or (Path.home() / "Documents" / "solidworks-mcp")
 ).expanduser().resolve()
 
-EXPORT_EXTENSIONS = {".step", ".stp", ".iges", ".igs", ".stl", ".x_t", ".x_b", ".png", ".jpg", ".bmp", ".3mf"}
+EXPORT_EXTENSIONS = {".step", ".stp", ".iges", ".igs", ".stl", ".x_t", ".x_b", ".png", ".jpg", ".bmp", ".3mf", ".pdf"}
 
 TEMPLATE_SUFFIXES = {"part": ".prtdot", "assembly": ".asmdot", "drawing": ".drwdot"}
 
