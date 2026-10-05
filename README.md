@@ -179,6 +179,14 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
 `insert_centerlines`, `add_note`.
 
+`insert_standard_views`, `insert_model_view`, `insert_projected_view` and
+`set_drawing_view` take `display_mode`: `hidden_lines_removed` (SOLIDWORKS'
+default), `hidden_lines_visible` (hidden edges dashed, so bores and steps show
+without a section), `wireframe`, `shaded`, `shaded_with_edges`. The style counts
+as applied only when it reads back from the view; otherwise the tool returns
+`ok: false` with the style each view ended up in. `insert_standard_views`
+applies it only to the views it places.
+
 For section and detail views, call `create_drawing_sketch` after activating the
 parent view, then use the normal `draw_line` or `draw_circle` sketch tools.
 

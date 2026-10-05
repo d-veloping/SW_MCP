@@ -71,10 +71,26 @@ VIEW_TYPES = {
     6: "standard", 7: "named", 8: "relative", 9: "detached", 10: "alternate_position",
 }
 
-# swViewDisplayMode_e
+# swDisplayMode_e: the Mode IView.SetDisplayMode3 takes and IView.GetDisplayMode2
+# returns -- one enum both ways, measured on 2016 SP3 (issue #4).  Edges only
+# matters for shaded (3) and reads back through GetDisplayEdgesInShadedMode.
+# SetDisplayMode3 also returns True for modes it does not have (4 and 5 came
+# back as 0 and 1), so a mode counts as applied only once it reads back.
 DISPLAY_MODES = {
-    "wireframe": 1, "hidden_lines_removed": 2, "hidden_lines_grey": 3,
-    "shaded": 4, "shaded_with_edges": 5,
+    "wireframe": (0, False),
+    "hidden_lines_visible": (1, False),
+    "hidden_lines_removed": (2, False),
+    "shaded": (3, False),
+    "shaded_with_edges": (3, True),
+}
+# Accepted for existing callers, not advertised.
+DISPLAY_MODE_ALIASES = {"hidden_lines_grey": "hidden_lines_visible"}
+DISPLAY_MODE_SCHEMA = {
+    "type": "string",
+    "enum": sorted(DISPLAY_MODES) + sorted(DISPLAY_MODE_ALIASES),
+    "description": "Display style of the view, checked by reading it back. hidden_lines_visible draws hidden "
+                   "edges dashed, so bores and steps show without a section. (hidden_lines_grey is a legacy "
+                   "alias of hidden_lines_visible.)",
 }
 
 # swInsertAnnotation_e, the flags worth exposing on a mechanical drawing.
@@ -203,11 +219,52 @@ def _iter_views(doc: Any) -> list[Any]:
     return views
 
 
+def _is_sheet(view: Any) -> bool:
+    return int(safe(view, "Type", 1) or 1) == 1
+
+
+def _display_mode(view: Any) -> str | None:
+    """The display style a view actually has, by the names of DISPLAY_MODES."""
+    mode = safe(view, "GetDisplayMode2")
+    if mode is None:
+        return None
+    mode = int(mode)
+    if mode == 3:
+        return "shaded_with_edges" if bool(safe(view, "GetDisplayEdgesInShadedMode", False)) else "shaded"
+    return {0: "wireframe", 1: "hidden_lines_visible", 2: "hidden_lines_removed"}.get(mode, f"mode_{mode}")
+
+
+def _set_display_mode(view: Any, name: str) -> dict[str, Any]:
+    """Apply a display style and report whether it reads back."""
+    wanted = DISPLAY_MODE_ALIASES.get(name, name)
+    outcome: dict[str, Any] = {"view": str(safe(view, "GetName2", "") or ""), "requested": wanted}
+    if wanted not in DISPLAY_MODES:
+        outcome.update(actual=_display_mode(view), ok=False)
+        return outcome
+    mode, edges = DISPLAY_MODES[wanted]
+    try:
+        flag_methods(view, "SetDisplayMode3").SetDisplayMode3(False, mode, False, edges)
+    except Exception:
+        logger.info("SetDisplayMode3 failed on view %s", outcome["view"], exc_info=True)
+    outcome["actual"] = _display_mode(view)
+    outcome["ok"] = outcome["actual"] == wanted
+    return outcome
+
+
+def _display_failure(outcomes: list[dict[str, Any]]) -> str:
+    wrong = [f"{o['view']} is {o['actual']}" for o in outcomes if not o["ok"]]
+    return f"SOLIDWORKS did not apply display_mode '{outcomes[0]['requested']}': " + ", ".join(wrong) + "."
+
+
 def _view_entry(view: Any, index: int) -> dict[str, Any]:
     entry: dict[str, Any] = {"index": index, "name": str(safe(view, "GetName2", "") or "")}
     kind = safe(view, "Type")
     if kind is not None:
         entry["type"] = VIEW_TYPES.get(int(kind), f"type_{int(kind)}")
+        if int(kind) != 1:
+            mode = _display_mode(view)
+            if mode is not None:
+                entry["display_mode"] = mode
     position = safe(view, "Position")
     if position is not None and len(position) >= 2:
         entry["position_mm"] = [round(to_mm(position[0]), 4), round(to_mm(position[1]), 4)]
@@ -335,22 +392,31 @@ def activate_sheet(args: dict[str, Any]) -> dict[str, Any]:
     {
         "model_path": {"type": "string", "description": "Defaults to the only open saved part or assembly."},
         "first_angle": {"type": "boolean", "default": True},
+        "display_mode": {**DISPLAY_MODE_SCHEMA, "description": "Applied to the views this call places. "
+                         + DISPLAY_MODE_SCHEMA["description"]},
     },
 )
 def insert_standard_views(args: dict[str, Any]) -> dict[str, Any]:
     app, doc = require_drawing()
     model = _open_model_path(app, args.get("model_path"))
     first_angle = bool(args.get("first_angle", True))
+    before = {str(safe(v, "GetName2", "")) for v in _iter_views(doc) if not _is_sheet(v)}
     ok = bool(doc.Create1stAngleViews2(model) if first_angle else doc.Create3rdAngleViews2(model))
     rebuild(doc)
+    message = f"Placed the standard views for {Path(model).name}." if ok else "SOLIDWORKS did not place the standard views."
+    display = None
+    if ok and args.get("display_mode"):
+        placed = [v for v in _iter_views(doc) if not _is_sheet(v) and str(safe(v, "GetName2", "")) not in before]
+        display = [_set_display_mode(v, str(args["display_mode"])) for v in placed]
+        rebuild(doc)
+        if not display or not all(o["ok"] for o in display):
+            ok = False
+            message = _display_failure(display) if display else "No new view to apply display_mode to."
     views = [_view_entry(v, i) for i, v in enumerate(_iter_views(doc))]
-    return result(
-        ok,
-        f"Placed the standard views for {Path(model).name}." if ok
-        else "SOLIDWORKS did not place the standard views.",
-        model=model,
-        views=views,
-    )
+    data: dict[str, Any] = {"model": model, "views": views}
+    if display is not None:
+        data["display"] = display
+    return result(ok, message, **data)
 
 
 @tool(
@@ -368,7 +434,7 @@ def insert_standard_views(args: dict[str, Any]) -> dict[str, Any]:
         "y_mm": {"type": "number"},
         "model_path": {"type": "string", "description": "Defaults to the only open saved part or assembly."},
         "scale": {"type": "number", "description": "Override the sheet scale for this view, e.g. 0.25 for 1:4."},
-        "display_mode": {"type": "string", "enum": sorted(DISPLAY_MODES), "description": "Override the view's display style."},
+        "display_mode": DISPLAY_MODE_SCHEMA,
     },
     ["x_mm", "y_mm"],
 )
@@ -388,8 +454,11 @@ def insert_model_view(args: dict[str, Any]) -> dict[str, Any]:
             model=model,
             resolved_view_name=resolved,
         )
-    _apply_view_options(view, args)
+    display = _apply_view_options(view, args)
     rebuild(doc)
+    if display is not None and not display["ok"]:
+        return result(False, f"Placed the {wanted} view, but " + _display_failure([display]),
+                      view=_view_entry(view, -1), model=model, display=[display])
     return result(True, f"Placed the {wanted} view.", view=_view_entry(view, -1), model=model)
 
 
@@ -425,20 +494,16 @@ def _model_view_name(app: Any, model: str, wanted: str) -> str:
     return english[wanted]
 
 
-def _apply_view_options(view: Any, args: dict[str, Any]) -> None:
+def _apply_view_options(view: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Scale and display style of one view.  Returns the display outcome of
+    _set_display_mode when a display_mode was asked for, else None."""
     if args.get("scale"):
         try:
             view.ScaleDecimal = float(args["scale"])
         except Exception:
             logger.info("Could not override the view scale.")
     mode = args.get("display_mode")
-    if mode:
-        try:
-            flag_methods(view, "SetDisplayMode3").SetDisplayMode3(
-                False, DISPLAY_MODES[str(mode)], False, False
-            )
-        except Exception:
-            logger.info("Could not set the view display mode.")
+    return _set_display_mode(view, str(mode)) if mode else None
 
 
 @tool(
@@ -452,6 +517,7 @@ def _apply_view_options(view: Any, args: dict[str, Any]) -> None:
         "x_mm": {"type": "number", "description": "Exact placement, overriding direction/offset."},
         "y_mm": {"type": "number"},
         "not_aligned": {"type": "boolean", "default": False, "description": "Break alignment with the parent view."},
+        "display_mode": DISPLAY_MODE_SCHEMA,
     },
 )
 def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
@@ -499,7 +565,11 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
             parent=parent_name,
             point_mm=[round(to_mm(x), 2), round(to_mm(y), 2)],
         )
+    display = _apply_view_options(view, {"display_mode": args.get("display_mode")})
     rebuild(doc)
+    if display is not None and not display["ok"]:
+        return result(False, f"Projected a view from '{parent_name}', but " + _display_failure([display]),
+                      parent=parent_name, view=_view_entry(view, -1), display=[display])
     return result(True, f"Projected a view from '{parent_name}'.", parent=parent_name, view=_view_entry(view, -1))
 
 
@@ -719,7 +789,7 @@ def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
         "x_mm": {"type": "number"},
         "y_mm": {"type": "number"},
         "scale": {"type": "number", "description": "Decimal scale, e.g. 0.25 for 1:4."},
-        "display_mode": {"type": "string", "enum": sorted(DISPLAY_MODES)},
+        "display_mode": DISPLAY_MODE_SCHEMA,
         "tangent_edges": {
             "type": "string",
             "enum": ["visible", "hidden", "phantom"],
@@ -739,7 +809,7 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
 
     if args.get("x_mm") is not None and args.get("y_mm") is not None:
         target.Position = double_array([to_m(args["x_mm"]), to_m(args["y_mm"])])
-    _apply_view_options(target, args)
+    display = _apply_view_options(target, args)
     if args.get("tangent_edges"):
         mode = {"visible": 1, "hidden": 2, "phantom": 3}[str(args["tangent_edges"])]
         try:
@@ -747,6 +817,8 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             logger.info("Could not set tangent edge display.")
     rebuild(doc)
+    if display is not None and not display["ok"]:
+        return result(False, _display_failure([display]), view=_view_entry(target, -1), display=[display])
     return result(True, f"Updated view '{name}'.", view=_view_entry(target, -1))
 
 
