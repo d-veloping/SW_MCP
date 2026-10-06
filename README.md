@@ -333,10 +333,11 @@ every line into "unknown".
   (`SetUseGaugeTable` answers "not enabled on template"), and the 2016
   material database carries no sheet metal parameters, so neither route sets
   the K-factor either.
-- Weldments: `weldment_trim_extend` with `allow_extension` (the default, as in
-  the SOLIDWORKS dialog) shortens the trimmed member and grows the trimming
-  member by the same amount, so the part's `get_mass_properties` does not
-  move; `list_bodies` and the weldment tools report each body's own volume for
+- Weldments: `weldment_trim_extend` against a body shortens the trimmed member
+  and grows the trimming member by the same amount, whatever the API's
+  extension option bits say (measured with every combination on 2016), so the
+  part's `get_mass_properties` does not move and the tool offers no extension
+  switch; `list_bodies` and the weldment tools report each body's own volume for
   that reason (the part total is the plain sum of its bodies, overlaps
   included: two 20 x 20 x 10 boxes overlapping by half report 8000 mm³). The
   gusset's weld-bead chamfer and sketch-plane offset arguments of
@@ -360,7 +361,7 @@ corner removes, the bend lines in the exported DXF (32 checks on 2016 SP3).
 `tests\live_weldment.py` does the same for weldments: members measure profile
 area times length, the end cap its inset plate, the trimmed member its new
 length, the gussets a*b*t/2 and the polygon with its corner cut, a plane cut
-into two halves (21 checks).
+into two halves (24 checks).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved

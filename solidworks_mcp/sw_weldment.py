@@ -20,9 +20,10 @@ one IStructuralMemberGroup whose Segments are the sketch segments of a 3D (or
 2D) sketch, passed to InsertStructuralWeldment4 with the library profile path.
 Connected segments in one group are mitred, so the chain's volume is the
 profile area times the sum of the segment lengths -- which is how the live
-test checks it.  Trimming with extension allowed (the default) shortens one
-member and grows the trimming member by the same amount, so the part's total
-volume does not move; bodies are therefore measured one at a time through
+test checks it.  Trimming against a body shortens the trimmed member and
+grows the trimming member by the same amount, whatever the extension option
+bits say (measured with 0, 1, 2 and 3), so the part's total volume does not
+move; bodies are therefore measured one at a time through
 IBody2::GetMassProperties.
 A gusset (InsertGussetFeature3) takes its two supporting faces with mark 1;
 a triangle of legs a and b at thickness t measures a*b*t/2 exactly, a polygon
@@ -429,8 +430,9 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     "Trim (or extend) structural members against other bodies, faces or reference planes, so members that "
     "run into each other end flush. bodies are the indices from list_bodies of the members to trim; "
     "trimming_bodies are the indices of the bodies they stop at, or trimming_selection holds the faces or "
-    "planes (front/top/right or a created plane) they stop at. The trimmed bodies are reported with their "
-    "new bounding boxes and volumes.",
+    "planes (front/top/right or a created plane) they stop at. With a body boundary the trimming member grows "
+    "over the end of the trimmed one, so the part volume stays the same; check the per-body volumes and boxes "
+    "reported in bodies and trimmed_bodies, not the part total.",
     {
         "bodies": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
         "trimming_bodies": {"type": "array", "items": {"type": "integer"}},
@@ -441,7 +443,6 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
                            "and keeps both pieces. Defaults to butt1 with trimming_bodies and to trim otherwise.",
         },
         "coped_cut": {"type": "boolean", "default": False},
-        "allow_extension": {"type": "boolean", "default": True, "description": "Let a member grow to reach the trimming body."},
         "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming."},
         "name": {"type": "string"},
     },
@@ -462,9 +463,11 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
         trimming.extend(selected_objects(doc))
     if not trimming:
         return result(False, "Give trimming_bodies or trimming_selection (faces or planes): something for the members to stop at.")
-    options = 0
-    if bool(args.get("allow_extension", True)):
-        options |= TRIM_ALLOW_TRIMMED_EXTENSION | TRIM_ALLOW_TRIMMING_EXTENSION
+    # The two extension bits are set as the dialog does, and they change
+    # nothing on 2016 either way: with butt1 the trimming member always grows
+    # over the end of the trimmed one (measured with 0, 1, 2 and 3), so the
+    # tool does not offer a switch it cannot honour.
+    options = TRIM_ALLOW_TRIMMED_EXTENSION | TRIM_ALLOW_TRIMMING_EXTENSION
     if bool(args.get("coped_cut", False)):
         options |= TRIM_COPED_CUT
     gap = float(args.get("gap_mm", 0))
