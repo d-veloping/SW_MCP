@@ -191,7 +191,7 @@ nothing at all when they have not.
 | Tool | Purpose |
 | --- | --- |
 | `capture_screenshot` | Returns the view as an **image**, so the model can look at its own work. |
-| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. |
+| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
 | `check_errors` | What SOLIDWORKS thinks is wrong — see below. |
 | `set_view` | Named view plus zoom-to-fit. |
@@ -333,8 +333,12 @@ every line into "unknown".
   (`SetUseGaugeTable` answers "not enabled on template"), and the 2016
   material database carries no sheet metal parameters, so neither route sets
   the K-factor either.
-- Weldments: the part's mass properties do not change after `weldment_trim_extend`,
-  so the tools measure each body on its own (`IBody2::GetMassProperties`). The
+- Weldments: `weldment_trim_extend` with `allow_extension` (the default, as in
+  the SOLIDWORKS dialog) shortens the trimmed member and grows the trimming
+  member by the same amount, so the part's `get_mass_properties` does not
+  move; `list_bodies` and the weldment tools report each body's own volume for
+  that reason (the part total is the plain sum of its bodies, overlaps
+  included: two 20 x 20 x 10 boxes overlapping by half report 8000 mm³). The
   gusset's weld-bead chamfer and sketch-plane offset arguments of
   `InsertGussetFeature3` are accepted and change nothing on 2016, so
   `weldment_gusset` does not offer them.

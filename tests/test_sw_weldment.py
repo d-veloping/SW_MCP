@@ -160,6 +160,26 @@ class RenameReadbackTests(unittest.TestCase):
         self.assertIsNone(sw_core.rename_feature(None, "Rahmen"))
 
 
+class FakeBodyWithMass:
+    def __init__(self, volume_m3: float | None) -> None:
+        self.volume_m3 = volume_m3
+
+    def GetMassProperties(self, density: float):  # noqa: N802 - COM member name
+        if self.volume_m3 is None:
+            raise RuntimeError("no mass properties")
+        return (0.0, 0.0, 0.0, self.volume_m3, 0.0, self.volume_m3 * density)
+
+
+class BodyVolumeTests(unittest.TestCase):
+    """list_bodies and the weldment tools report each body's own volume in mm³."""
+
+    def test_body_volume_is_converted_to_cubic_millimetres(self) -> None:
+        self.assertEqual(sw_core.body_volume_mm3(FakeBodyWithMass(2.0054866e-5)), 20054.866)
+
+    def test_a_body_without_mass_properties_reports_none(self) -> None:
+        self.assertIsNone(sw_core.body_volume_mm3(FakeBodyWithMass(None)))
+
+
 class EnumTableTests(unittest.TestCase):
     def test_enum_tables_match_the_type_library(self) -> None:
         self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})

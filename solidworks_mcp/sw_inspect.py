@@ -31,6 +31,7 @@ from .sw_core import (
     active_document,
     apply_selection,
     apply_transform,
+    body_volume_mm3,
     byref_long,
     clear_selection,
     document_type,
@@ -173,7 +174,13 @@ def list_vertices(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Read {len(vertices)} vertices.", vertices=_strip_internal(vertices))
 
 
-@tool("list_bodies", "Read-only: list the solid bodies of the active part or assembly.", {})
+@tool(
+    "list_bodies",
+    "Read-only: list the solid bodies of the active part or assembly with their bounding boxes and each "
+    "body's own volume in mm³, plus their sum. Use the per-body volumes to check a multibody part feature "
+    "by feature; get_mass_properties only gives the total.",
+    {},
+)
 def list_bodies(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     bodies = []
@@ -183,8 +190,12 @@ def list_bodies(args: dict[str, Any]) -> dict[str, Any]:
         if box is not None and len(box) >= 6:
             entry["min_mm"] = mm_point(apply_transform(box[0:3], matrix))
             entry["max_mm"] = mm_point(apply_transform(box[3:6], matrix))
+        volume = body_volume_mm3(body)
+        if volume is not None:
+            entry["volume_mm3"] = volume
         bodies.append(entry)
-    return result(True, f"Read {len(bodies)} solid bodies.", bodies=bodies)
+    total = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    return result(True, f"Read {len(bodies)} solid bodies.", bodies=bodies, volume_sum_mm3=total)
 
 
 @tool("list_features", "Read-only: list the active document feature tree in order.", {})

@@ -939,6 +939,21 @@ def iter_body_context(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, 
         return []
 
 
+def body_volume_mm3(body: Any) -> float | None:
+    """The volume of one body, measured on the body itself.
+
+    A part's mass properties sum its bodies, so a trim that shortens one
+    member and lets the trimming member grow by the same amount (the default
+    extension) leaves the part volume unchanged; the per-body volumes show
+    what happened to each.
+    """
+    try:
+        properties = body.GetMassProperties(1.0)
+        return round(float(properties[3]) * 1e9, 4)
+    except Exception:
+        return None
+
+
 def get_bodies(doc: Any, body_type: int = BODY_SOLID) -> list[Any]:
     return [body for body, _, _ in iter_body_context(doc, body_type)]
 

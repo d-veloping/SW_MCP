@@ -20,8 +20,10 @@ one IStructuralMemberGroup whose Segments are the sketch segments of a 3D (or
 2D) sketch, passed to InsertStructuralWeldment4 with the library profile path.
 Connected segments in one group are mitred, so the chain's volume is the
 profile area times the sum of the segment lengths -- which is how the live
-test checks it.  Mass properties of the whole part do not change after a
-trim, so bodies are measured one at a time through IBody2::GetMassProperties.
+test checks it.  Trimming with extension allowed (the default) shortens one
+member and grows the trimming member by the same amount, so the part's total
+volume does not move; bodies are therefore measured one at a time through
+IBody2::GetMassProperties.
 A gusset (InsertGussetFeature3) takes its two supporting faces with mark 1;
 a triangle of legs a and b at thickness t measures a*b*t/2 exactly, a polygon
 a*b*t minus the cut-off corner.  Its chamfer and plane-offset arguments were
@@ -37,6 +39,7 @@ from typing import Any
 from .sw_core import (
     apply_selection,
     as_list,
+    body_volume_mm3,
     clear_selection,
     dispatch_array,
     exit_active_sketch,
@@ -103,11 +106,9 @@ def body_summary(body: Any) -> dict[str, Any]:
         entry["min_mm"] = mm_point(box[0:3])
         entry["max_mm"] = mm_point(box[3:6])
         entry["size_mm"] = [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)]
-    try:
-        properties = body.GetMassProperties(1.0)
-        entry["volume_mm3"] = round(float(properties[3]) * 1e9, 4)
-    except Exception:
-        pass
+    volume = body_volume_mm3(body)
+    if volume is not None:
+        entry["volume_mm3"] = volume
     return entry
 
 
