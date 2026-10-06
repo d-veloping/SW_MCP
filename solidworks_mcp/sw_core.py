@@ -286,7 +286,7 @@ invoke_no_arg = value
 _DOCUMENT_SPECIFIC_METHODS = frozenset(
     {
         # IPartDoc
-        "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
+        "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2", "ExportToDWG2",
         # IAssemblyDoc
         "GetBox", "AddComponent5", "AddMate5", "GetComponents",
         # Absent from some selectable interfaces
@@ -356,6 +356,8 @@ _FEATURE_MANAGER_METHODS = (
     # Newer builds keep the old names, so flagging them costs nothing there.
     "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
     "FeatureLinearPattern4", "FeatureCircularPattern4",
+    # Sheet metal
+    "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange", "CreateCustomBendAllowance",
 )
 
 _EXTENSION_METHODS = (
@@ -373,8 +375,12 @@ _MODEL_DOC_METHODS = (
     # IModelDoc2
     "ClearSelection2", "InsertSketch2", "SketchFillet2", "SketchChamfer", "SketchMirror", "SketchOffset2",
     "InsertFeatureShell", "InsertAxis2", "ShowNamedView2", "Parameter", "Save3", "SaveAs",
+    "EditSketch", "SetAddToDB", "SetDisplayWhenAdded", "CreateLine2",
+    # IModelDoc2, sheet metal
+    "InsertSheetMetalBaseFlange", "InsertSketchForEdgeFlange", "InsertSheetMetalHem",
+    "InsertSheetMetalClosedCorner", "InsertSheetMetalBreakCorner",
     # IPartDoc
-    "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
+    "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2", "ExportToDWG2",
     # IAssemblyDoc
     "GetBox", "AddComponent5", "AddMate5", "GetComponents",
 )
@@ -438,6 +444,15 @@ def nothing() -> Any:
 
 def empty_variant() -> Any:
     return win32com.client.VARIANT(pythoncom.VT_EMPTY, None)
+
+
+def null_variant() -> Any:
+    """A VT_NULL, which some SOLIDWORKS members want for 'no array' (VBA's Null).
+
+    IPartDoc::ExportToDWG2 returns False for VT_EMPTY, a typed null dispatch
+    and an empty string array in its Views argument; it exports with VT_NULL.
+    """
+    return win32com.client.VARIANT(pythoncom.VT_NULL, None)
 
 
 def double_array(values: Sequence[float]) -> Any:

@@ -30,6 +30,7 @@ sw_file      session status, documents, saving, exporting, appearance, material
 sw_refgeom   reference planes and axes
 sw_sketch    sketches, sketch geometry, relations, dimensions
 sw_feature   solid features
+sw_sheetmetal  sheet metal features, flat pattern, DXF/DWG export
 sw_inspect   topology listings, measurement, mass properties, screenshots
 sw_assembly  components and mates
 sw_drawing   drawing sheets, views, and annotation
@@ -55,6 +56,7 @@ from . import sw_file  # noqa: F401
 from . import sw_refgeom  # noqa: F401
 from . import sw_sketch  # noqa: F401
 from . import sw_feature  # noqa: F401
+from . import sw_sheetmetal  # noqa: F401
 from . import sw_inspect  # noqa: F401
 from . import sw_assembly  # noqa: F401
 from . import sw_drawing  # noqa: F401

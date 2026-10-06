@@ -15,8 +15,9 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-92 tools: sketching with real relations and driving dimensions, the solid
-features you actually reach for, reference geometry, assemblies and mates, and —
+104 tools: sketching with real relations and driving dimensions, the solid
+features you actually reach for, sheet metal with its flat pattern and DXF export,
+reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
 
@@ -158,6 +159,23 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 `rib`, `simple_hole`, `sweep`, `loft`, `linear_pattern`, `circular_pattern`,
 `mirror_feature`, `delete_feature`, `rename_feature`, `set_feature_suppression`.
 
+### Sheet metal
+| Tool | Purpose |
+| --- | --- |
+| `sheet_metal_base_flange` | First sheet metal body from a sketch: an open chain of lines is thickened and extruded (each corner a bend), a closed outline becomes a plate. Sets thickness and bend radius for the part. |
+| `sheet_metal_edge_flange` | Flange along one or more straight edges, with angle, length (inner/outer virtual sharp or bend tangent), bend position, radius and relief. The profile sketch is drawn for you. |
+| `sheet_metal_miter_flange` | Profile sketch swept along connected edges with mitred corners, rip gap and optional start/end offsets. |
+| `sheet_metal_hem` | Closed, open or rolled hem on selected edges. |
+| `sheet_metal_closed_corner` / `sheet_metal_break_corner` | Close the corner between two flanges (butt / overlap / underlap with a gap, read back); fillet or chamfer the corners of a sheet edge. |
+| `sheet_metal_flatten` | Unsuppress / suppress the Flat-Pattern feature and report the flat bounding box. |
+| `sheet_metal_info` | Thickness, bend radius, K-factor, relief, bend state, and every sheet metal feature with its bends. |
+| `export_flat_pattern` | Flat pattern as DXF or DWG with bend lines, without a dialog; a DXF result is summarised (entities, bend lines, extents). |
+
+Every one of these is judged by geometry: the tools report the body volume and
+bounding box after the feature, because several of the sheet metal API calls
+raise on return even when they have built the feature, and others return
+nothing at all when they have not.
+
 ### Inspection — the feedback channel
 | Tool | Purpose |
 | --- | --- |
@@ -294,6 +312,13 @@ every line into "unknown".
   pattern the body instead.
 - `save_document` cannot overwrite a file SOLIDWORKS currently has open, even
   with `overwrite: true`. The error says so when that is the cause.
+- Sheet metal (measured on 2016 SP3): the K-factor cannot be changed through
+  the API — `ISheetMetalFeatureData` and `ICustomBendAllowance` accept the
+  value and keep the document default — so `sheet_metal_info` reports what the
+  flat pattern actually uses. `tear_drop` and `double` hems are not accepted.
+  `export_flat_pattern` needs a saved part, because `ExportToDWG2` takes the
+  model path; `ExportFlatPatternView` is not used because it opens a file
+  dialog.
 
 ## Testing
 
@@ -305,7 +330,10 @@ cannot be mocked faithfully. With SOLIDWORKS already running, run:
 ```
 
 It verifies the P0 geometry/constraint regressions, including the full-volume
-`through_all_both` cut.
+`through_all_both` cut. `tests\live_sheet_metal.py` builds an L profile and a
+plate with every sheet metal tool and checks each against a closed-form number:
+flange volumes, the developed length from the K-factor, the material a break
+corner removes, the bend lines in the exported DXF (28 checks on 2016 SP3).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved
@@ -329,11 +357,13 @@ newer releases the newest name is always tried first, so nothing changes there.
 | `sw_refgeom.py` | Reference planes and axes |
 | `sw_sketch.py` | Sketches, geometry, editing, relations, dimensions |
 | `sw_feature.py` | Solid features |
+| `sw_sheetmetal.py` | Sheet metal features, flat pattern, DXF/DWG export |
 | `sw_inspect.py` | Topology listings, measurement, mass properties, screenshots |
 | `sw_assembly.py` | Components and mates |
 | `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |
 | `sw_demo.py` | Basketball demo, opt-in via `SW_MCP_DEMO_TOOLS` |
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
+| `tests/live_sheet_metal.py` | Live sheet metal checks against closed-form geometry |
 | `tools/tlb_probe.py` | Reads signatures and enums straight off your installed type library |
 | `server.py` | Registry assembly and stdio dispatch |
 
