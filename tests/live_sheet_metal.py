@@ -27,8 +27,8 @@ Part A, an L profile: base flange from an open sketch, flat length against
 the K-factor formula, a closed hem, a miter flange on the free leg, DXF export
 with three bend lines.
 
-Part B, a plate: two edge flanges, a closed corner with its gap read back, a
-break corner (fillet) that removes exactly (1 - pi/4) r^2 t, sheet_metal_info,
+Part B, a plate: three edge flanges, a square corner relief at one corner,
+a closed corner with its gap read back at the other, a break corner (fillet) that removes exactly (1 - pi/4) r^2 t, sheet_metal_info,
 and DXF/DWG exports with and without bend lines.
 
 The parts are saved under <output root>/live_sheet_metal and closed at the
@@ -55,6 +55,7 @@ from solidworks_mcp.sw_sheetmetal import (
     sheet_metal_base_flange,
     sheet_metal_break_corner,
     sheet_metal_closed_corner,
+    sheet_metal_corner_relief,
     sheet_metal_edge_flange,
     sheet_metal_flatten,
     sheet_metal_hem,
@@ -181,11 +182,24 @@ def part_b() -> None:
         flange2 = require(sheet_metal_edge_flange({"selection": {"edges": [edge_at([60, 0, -20])]}, "length_mm": 20}), "sheet_metal_edge_flange 2")
         check("edge flange 2 volume", flange2["data"]["volume_mm3"] - before, 40 * (t * (20 - r) + arc))
 
+        before = volume()
+        flange3 = require(sheet_metal_edge_flange({"selection": {"edges": [edge_at([0, 0, -20])]}, "length_mm": 20}), "sheet_metal_edge_flange 3")
+        check("edge flange 3 volume", flange3["data"]["volume_mm3"] - before, 40 * (t * (20 - r) + arc))
+
+        # The corner between flange 1 (bend along x at z = 0) and flange 3
+        # (bend along z at x = 0): their outer bend faces lie at x < 35.
+        bends = [f["index"] for f in require(list_faces({"surface_type": "cylinder"}), "list_faces")["data"]["faces"]
+                 if abs(f["radius_mm"] - 3.0) < 1e-6 and f["point_mm"][0] < 35]
+        check("two outer bend faces at the x = 0 corner", len(bends), 2)
+        relief = require(sheet_metal_corner_relief({"corners": [{"faces": bends}], "relief_type": "square", "size_mm": 3}), "sheet_metal_corner_relief")
+        check("corner relief removes material", relief["data"]["removed_mm3"] > 0, True)
+        check("corner relief accepted one corner", relief["data"]["corners"], 1)
+
         face = face_where([1, 0, 0], 38.0, lambda p: abs(p[0] - 60) < 1e-3 and 1 <= p[1] <= 20)
         corner = require(sheet_metal_closed_corner({"selection": {"faces": [face]}, "corner_type": "butt", "gap_mm": 0.5}), "sheet_metal_closed_corner")
         check("closed corner gap readback", corner["data"]["corner"]["gap_mm"], 0.5, 1e-6)
         check("closed corner type readback", corner["data"]["corner"]["corner_type"], "butt")
-        check("closed corner adds material", corner["data"]["volume_mm3"] > flange2["data"]["volume_mm3"], True)
+        check("closed corner adds material", corner["data"]["volume_mm3"] > relief["data"]["volume_mm3"], True)
 
         before = volume()
         broken = require(sheet_metal_break_corner({"selection": {"edges": [edge_at([0, 20, 2])]}, "mode": "fillet", "distance_mm": 3}), "sheet_metal_break_corner")
@@ -193,7 +207,7 @@ def part_b() -> None:
 
         info = require(sheet_metal_info({}), "sheet_metal_info")
         kinds = sorted({f["kind"] for f in info["data"]["features"]})
-        check("info lists the features", kinds, ["base_flange", "break_corner", "closed_corner", "edge_flange", "flat_pattern", "sheet_metal"])
+        check("info lists the features", kinds, ["base_flange", "break_corner", "closed_corner", "corner_relief", "edge_flange", "flat_pattern", "sheet_metal"])
         check("info thickness", info["data"]["parameters"]["thickness_mm"], 2.0, 1e-6)
 
         flat = require(sheet_metal_flatten({"flat": True}), "sheet_metal_flatten")
@@ -204,7 +218,7 @@ def part_b() -> None:
         check("export refuses an unsaved part", unsaved["ok"], False)
         require(save_document({"path": f"{FOLDER}/plate.sldprt", "overwrite": True}), "save_document")
         with_bends = require(export_flat_pattern({"path": f"{FOLDER}/plate.dxf", "overwrite": True}), "export_flat_pattern")
-        check("dxf bend lines (two flanges)", with_bends["data"]["dxf"]["bend_lines"], 2)
+        check("dxf bend lines (three flanges)", with_bends["data"]["dxf"]["bend_lines"], 3)
         without = require(export_flat_pattern({"path": f"{FOLDER}/plate_outline.dxf", "overwrite": True, "bend_lines": False}), "export_flat_pattern(no bends)")
         check("dxf without bend lines", without["data"]["dxf"]["bend_lines"], 0)
         check("dxf outline unchanged", without["data"]["dxf"]["outline_entities"], with_bends["data"]["dxf"]["outline_entities"])

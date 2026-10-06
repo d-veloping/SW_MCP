@@ -33,6 +33,11 @@ Measured on SOLIDWORKS 2016 SP3 (ClauSW, 2026-10-06):
 * IPartDoc::ExportFlatPatternView opens a file dialog, which would wedge the
   server; ExportToDWG2 with VT_NULL for the views argument exports silently
   and needs the document saved, because it takes the model path.
+* A corner relief is built corner by corner: the two bend faces (the
+  cylindrical faces) that meet at the corner are selected with mark 4,
+  AddCornerReliefCorner and AddCornerReliefType follow, and FinishCornerRelief
+  makes the feature.  Selecting the flat faces instead raises and builds
+  nothing.
 * The K-factor cannot be changed through ISheetMetalFeatureData or
   ICustomBendAllowance here: the setters are accepted and ignored.  The
   document default (0.48 on this install) is what the flat pattern uses.
@@ -57,6 +62,7 @@ from .sw_core import (
     feature_result,
     flag_methods,
     iter_edge_objects,
+    iter_face_objects,
     iter_feature_objects,
     iter_features,
     logger,
@@ -98,6 +104,8 @@ HEM_POSITIONS = {"inside": 0, "outside": 1}
 CLOSED_CORNER_TYPES = {"butt": 1, "overlap": 2, "underlap": 3}
 # swBreakCornerTypes_e
 BREAK_CORNER_TYPES = {"fillet": 0, "chamfer": 1}
+# swCornerReliefType_e
+CORNER_RELIEF_TYPES = {"circular": 0, "square": 1, "bend_waist": 2, "tear": 3, "constant_width": 4, "obround": 5}
 # swSMBendState_e
 BEND_STATES = {0: "none", 1: "sharps", 2: "flattened", 3: "folded"}
 # swBendAllowanceTypes_e
@@ -111,6 +119,7 @@ SHEET_METAL_FEATURE_TYPES = {
     "Hem": "hem",
     "CornerFeat": "closed_corner",
     "BreakCorner": "break_corner",
+    "CornerRelief": "corner_relief",
     "FlatPattern": "flat_pattern",
     "OneBend": "bend",
     "SketchBend": "sketched_bend",
@@ -773,6 +782,86 @@ def sheet_metal_break_corner(args: dict[str, Any]) -> dict[str, Any]:
         definition = _definition(feature)
         if definition is not None:
             payload["data"]["corners"] = int(safe(definition, "GetEntitiesCount", 0) or 0)
+    return payload
+
+
+@tool(
+    "sheet_metal_corner_relief",
+    "Cut a relief where two bends meet at a corner, so the flat pattern can be folded without tearing. "
+    "Each corner is given by its two bend faces: the cylindrical faces (list_faces surface_type cylinder) "
+    "of the two bends that meet there, outer or inner, as a pair in corners. size_mm is the side of a "
+    "square relief, the length of an obround one, or the radius of a circular one; width_mm is the slot "
+    "width of an obround relief or the fillet radius of a square one with filleted corners.",
+    {
+        "corners": {
+            "type": "array", "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {"faces": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}},
+                "required": ["faces"],
+            },
+            "description": "One entry per corner, each with the two bend face indices of that corner.",
+        },
+        "relief_type": {"type": "string", "enum": sorted(CORNER_RELIEF_TYPES), "default": "square"},
+        "size_mm": {"type": "number", "exclusiveMinimum": 0, "default": 2},
+        "width_mm": {"type": "number", "minimum": 0, "default": 0},
+        "center_on_bend_lines": {"type": "boolean", "default": False},
+        "ratio_to_thickness": {"type": "boolean", "default": False, "description": "Read size_mm and width_mm as multiples of the thickness."},
+        "tangent_to_bend": {"type": "boolean", "default": False},
+        "filleted_corners": {"type": "boolean", "default": False, "description": "Square relief only: round its corners with width_mm."},
+        "narrow_corner": {"type": "boolean", "default": False},
+        "name": {"type": "string"},
+    },
+    ["corners"],
+)
+def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    _require_sheet_metal(doc)
+    exit_active_sketch(doc)
+    relief = CORNER_RELIEF_TYPES[str(args.get("relief_type", "square"))]
+    ratio = bool(args.get("ratio_to_thickness", False))
+    size = float(args.get("size_mm", 2)) if ratio else to_m(args.get("size_mm", 2))
+    width = float(args.get("width_mm", 0)) if ratio else to_m(args.get("width_mm", 0))
+    faces = iter_face_objects(doc)
+    manager = feature_manager(doc)
+    volume_before = _volume_mm3(doc)
+    accepted = 0
+    for corner in args["corners"]:
+        pair = [int(i) for i in corner["faces"]]
+        clear_selection(doc)
+        for index in pair:
+            if not 0 <= index < len(faces):
+                raise RuntimeError(f"Face index {index} is out of range (0..{len(faces) - 1}); call list_faces first.")
+            if not select_object(doc, faces[index][0], 4, True):
+                raise RuntimeError(f"Could not select face {index}.")
+        try:
+            manager.AddCornerReliefCorner()
+            if bool(manager.AddCornerReliefType(
+                -1, relief, 0.0, size, width,
+                bool(args.get("center_on_bend_lines", False)), ratio,
+                bool(args.get("tangent_to_bend", False)), bool(args.get("filleted_corners", False)),
+                bool(args.get("narrow_corner", False)),
+            )):
+                accepted += 1
+        except Exception as exc:
+            if not is_server_fault(exc):
+                raise
+            # Flat faces instead of bend faces raise here and define no corner.
+            logger.info("Corner %s was not accepted as a bend corner: %s", pair, exc)
+    clear_selection(doc)
+    if accepted == 0:
+        return result(False, "SOLIDWORKS accepted none of the corners. Each corner needs the two cylindrical bend faces that meet there.")
+    feature, _ = _build(doc, "corner relief", lambda: manager.FinishCornerRelief(), ("CornerRelief",))
+    rename_feature(feature, args.get("name"))
+    payload = _sheet_result(doc, feature, "corner relief", corners=accepted, relief_type=str(args.get("relief_type", "square")))
+    if feature is not None and volume_before is not None and payload["data"].get("volume_mm3") is not None:
+        removed = round(volume_before - payload["data"]["volume_mm3"], 4)
+        payload["data"]["removed_mm3"] = removed
+        if removed <= 0:
+            payload["ok"] = False
+            payload["message"] += " The relief removed no material."
+    if accepted < len(args["corners"]):
+        payload["message"] += f" {len(args['corners']) - accepted} corner(s) were not accepted and left out."
     return payload
 
 

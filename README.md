@@ -15,9 +15,9 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-104 tools: sketching with real relations and driving dimensions, the solid
+110 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
-reference geometry, assemblies and mates, and —
+weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
 
@@ -167,6 +167,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `sheet_metal_miter_flange` | Profile sketch swept along connected edges with mitred corners, rip gap and optional start/end offsets. |
 | `sheet_metal_hem` | Closed, open or rolled hem on selected edges. |
 | `sheet_metal_closed_corner` / `sheet_metal_break_corner` | Close the corner between two flanges (butt / overlap / underlap with a gap, read back); fillet or chamfer the corners of a sheet edge. |
+| `sheet_metal_corner_relief` | Square, circular, obround, tear, bend-waist or constant-width relief where two bends meet, one or more corners per feature. |
 | `sheet_metal_flatten` | Unsuppress / suppress the Flat-Pattern feature and report the flat bounding box. |
 | `sheet_metal_info` | Thickness, bend radius, K-factor, relief, bend state, and every sheet metal feature with its bends. |
 | `export_flat_pattern` | Flat pattern as DXF or DWG with bend lines, without a dialog; a DXF result is summarised (entities, bend lines, extents). |
@@ -175,6 +176,15 @@ Every one of these is judged by geometry: the tools report the body volume and
 bounding box after the feature, because several of the sheet metal API calls
 raise on return even when they have built the feature, and others return
 nothing at all when they have not.
+
+### Weldments
+| Tool | Purpose |
+| --- | --- |
+| `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
+| `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
+| `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
+| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward. |
+| `weldment_trim_extend` | Trim members flush against other bodies or faces (butt / miter, coped cut, weld gap), reporting the trimmed bodies' new boxes and volumes. |
 
 ### Inspection — the feedback channel
 | Tool | Purpose |
@@ -318,7 +328,12 @@ every line into "unknown".
   flat pattern actually uses. `tear_drop` and `double` hems are not accepted.
   `export_flat_pattern` needs a saved part, because `ExportToDWG2` takes the
   model path; `ExportFlatPatternView` is not used because it opens a file
-  dialog.
+  dialog. A gauge table is refused on this install's templates
+  (`SetUseGaugeTable` answers "not enabled on template"), and the 2016
+  material database carries no sheet metal parameters, so neither route sets
+  the K-factor either.
+- Weldments: the part's mass properties do not change after `weldment_trim_extend`,
+  so the tools measure each body on its own (`IBody2::GetMassProperties`).
 
 ## Testing
 
@@ -333,7 +348,10 @@ It verifies the P0 geometry/constraint regressions, including the full-volume
 `through_all_both` cut. `tests\live_sheet_metal.py` builds an L profile and a
 plate with every sheet metal tool and checks each against a closed-form number:
 flange volumes, the developed length from the K-factor, the material a break
-corner removes, the bend lines in the exported DXF (28 checks on 2016 SP3).
+corner removes, the bend lines in the exported DXF (32 checks on 2016 SP3).
+`tests\live_weldment.py` does the same for weldments: members measure profile
+area times length, the end cap its inset plate, the trimmed member its new
+length (14 checks).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved
@@ -358,12 +376,14 @@ newer releases the newest name is always tried first, so nothing changes there.
 | `sw_sketch.py` | Sketches, geometry, editing, relations, dimensions |
 | `sw_feature.py` | Solid features |
 | `sw_sheetmetal.py` | Sheet metal features, flat pattern, DXF/DWG export |
+| `sw_weldment.py` | 3D sketches, structural members, end caps, trim/extend |
 | `sw_inspect.py` | Topology listings, measurement, mass properties, screenshots |
 | `sw_assembly.py` | Components and mates |
 | `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |
 | `sw_demo.py` | Basketball demo, opt-in via `SW_MCP_DEMO_TOOLS` |
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
 | `tests/live_sheet_metal.py` | Live sheet metal checks against closed-form geometry |
+| `tests/live_weldment.py` | Live weldment checks against closed-form geometry |
 | `tools/tlb_probe.py` | Reads signatures and enums straight off your installed type library |
 | `server.py` | Registry assembly and stdio dispatch |
 

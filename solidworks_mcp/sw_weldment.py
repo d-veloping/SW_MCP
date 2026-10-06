@@ -1,0 +1,472 @@
+# Copyright 2026 JIALE LIU
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Weldments: 3D sketches, structural members from profile libraries, end
+caps, and trim/extend.
+
+Measured on SOLIDWORKS 2016 SP3 (ClauSW, 2026-10-06): a structural member is
+one IStructuralMemberGroup whose Segments are the sketch segments of a 3D (or
+2D) sketch, passed to InsertStructuralWeldment4 with the library profile path.
+Connected segments in one group are mitred, so the chain's volume is the
+profile area times the sum of the segment lengths -- which is how the live
+test checks it.  Mass properties of the whole part do not change after a
+trim, so bodies are measured one at a time through IBody2::GetMassProperties.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+from .sw_core import (
+    apply_selection,
+    as_list,
+    clear_selection,
+    dispatch_array,
+    exit_active_sketch,
+    feature_manager,
+    feature_property,
+    feature_result,
+    flag_methods,
+    get_bodies,
+    iter_face_objects,
+    iter_features,
+    mm_point,
+    rename_feature,
+    require_part,
+    require_selection,
+    result,
+    running_app,
+    safe,
+    SELECTION_SCHEMA,
+    sketch_manager,
+    sketch_segment_objects,
+    to_deg,
+    to_m,
+    to_mm,
+    to_rad,
+    tool,
+    value,
+)
+
+
+# swConnectedSegmentsOption_e
+CONNECTED_SEGMENTS = {"simple_cut": 1, "coped_cut": 2}
+# swSolidworksWeldmentEndCondOptions_e
+CORNER_TREATMENTS = {"none": 0, "miter": 1, "butt1": 2, "butt2": 3, "trim": 4}
+# swWeldmentTrimExtendOptionType_e
+TRIM_ALLOW_TRIMMED_EXTENSION = 1
+TRIM_ALLOW_TRIMMING_EXTENSION = 2
+TRIM_COPED_CUT = 4
+TRIM_WELD_GAP = 8
+
+# swUserPreferenceStringValue_e.swFileLocationsWeldmentProfiles
+SW_FILE_LOCATIONS_WELDMENT_PROFILES = 29
+PROFILE_SUFFIX = ".sldlfp"
+
+SKETCH_3D_TYPE = "3DProfileFeature"
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def _feature_names(doc: Any) -> list[str]:
+    return [f["name"] for f in iter_features(doc)]
+
+
+def body_summary(body: Any) -> dict[str, Any]:
+    """Name, bounding box and volume of one body, measured on the body itself."""
+    entry: dict[str, Any] = {"name": str(safe(body, "Name", "") or "")}
+    box = safe(body, "GetBodyBox")
+    if box is not None and len(box) >= 6:
+        entry["min_mm"] = mm_point(box[0:3])
+        entry["max_mm"] = mm_point(box[3:6])
+        entry["size_mm"] = [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)]
+    try:
+        properties = body.GetMassProperties(1.0)
+        entry["volume_mm3"] = round(float(properties[3]) * 1e9, 4)
+    except Exception:
+        pass
+    return entry
+
+
+def bodies_summary(doc: Any) -> list[dict[str, Any]]:
+    return [dict(body_summary(body), index=index) for index, body in enumerate(get_bodies(doc))]
+
+
+def _ensure_weldment(doc: Any) -> bool:
+    """Add the Weldment feature when the part has none; True if it was added."""
+    if bool(safe(doc, "IsWeldment", False)):
+        return False
+    feature_manager(doc).InsertWeldmentFeature()
+    if not bool(safe(doc, "IsWeldment", False)):
+        raise RuntimeError("SOLIDWORKS did not turn the part into a weldment.")
+    return True
+
+
+def _resolve_profile(app: Any, args: dict[str, Any]) -> Path:
+    explicit = args.get("profile_path")
+    if explicit:
+        path = Path(str(explicit)).expanduser()
+        if path.suffix.lower() != PROFILE_SUFFIX or not path.is_file():
+            raise RuntimeError(f"profile_path must be an existing {PROFILE_SUFFIX} file; {path} is not.")
+        return path
+    standard, kind, size = (str(args.get(k) or "").strip().lower() for k in ("standard", "type", "size"))
+    if not (standard and kind and size):
+        raise RuntimeError("Pass profile_path, or standard, type and size as list_weldment_profiles reports them.")
+    for profile in iter_profiles(app):
+        if (profile["standard"].lower(), profile["type"].lower(), profile["size"].lower()) == (standard, kind, size):
+            return Path(profile["path"])
+    raise RuntimeError(f"No weldment profile {standard}/{kind}/{size}; call list_weldment_profiles for the available ones.")
+
+
+def profile_roots(app: Any) -> list[Path]:
+    """Where profile libraries live: the configured folders, then the install."""
+    roots: list[Path] = []
+    try:
+        configured = str(app.GetUserPreferenceStringValue(SW_FILE_LOCATIONS_WELDMENT_PROFILES) or "")
+    except Exception:
+        configured = ""
+    roots.extend(Path(p.strip()) for p in configured.split(";") if p.strip())
+    try:
+        install = Path(str(value(app, "GetExecutablePath") or ""))
+    except Exception:
+        install = Path()
+    if install.parts:
+        for lang in sorted((install / "lang").glob("*")) if (install / "lang").is_dir() else []:
+            roots.append(lang / "weldment profiles")
+    seen: set[str] = set()
+    unique = []
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen and root.is_dir():
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def iter_profiles(app: Any) -> list[dict[str, str]]:
+    """Every <root>/<standard>/<type>/<size>.sldlfp, first root wins on duplicates."""
+    profiles: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for root in profile_roots(app):
+        for path in sorted(root.glob(f"*/*/*{PROFILE_SUFFIX}")):
+            key = (path.parts[-3].lower(), path.parts[-2].lower(), path.stem.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            profiles.append({"standard": path.parts[-3], "type": path.parts[-2], "size": path.stem, "path": str(path)})
+    return profiles
+
+
+def _segment_objects(doc: Any, selection: dict[str, Any] | None) -> list[Any]:
+    spec = selection or {}
+    indices = spec.get("sketch_segments")
+    if not indices:
+        raise RuntimeError("selection.sketch_segments is required: the segment indices of the path sketch from list_sketch_segments.")
+    segments = sketch_segment_objects(doc, spec.get("sketch_name"))
+    chosen = []
+    for raw in indices:
+        index = int(raw)
+        if not 0 <= index < len(segments):
+            raise RuntimeError(f"Sketch segment {index} is out of range (0..{len(segments) - 1}).")
+        chosen.append(segments[index])
+    return chosen
+
+
+def _body_objects(doc: Any, indices: list[int]) -> list[Any]:
+    bodies = get_bodies(doc)
+    chosen = []
+    for raw in indices:
+        index = int(raw)
+        if not 0 <= index < len(bodies):
+            raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}); call list_bodies first.")
+        chosen.append(bodies[index])
+    return chosen
+
+
+# --------------------------------------------------------------------------
+# Tools
+# --------------------------------------------------------------------------
+
+
+@tool(
+    "create_3d_sketch",
+    "Create a 3D sketch of straight lines, given as model-space end points in millimetres, and close it. "
+    "Lines that share an end point are connected; the sketch is the path for weldment_structural_member. "
+    "Returns the sketch name and one segment index per line, in the order given.",
+    {
+        "lines": {
+            "type": "array", "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {k: {"type": "number"} for k in ("x1_mm", "y1_mm", "z1_mm", "x2_mm", "y2_mm", "z2_mm")},
+                "required": ["x1_mm", "y1_mm", "z1_mm", "x2_mm", "y2_mm", "z2_mm"],
+            },
+        },
+        "name": {"type": "string", "description": "Rename the sketch once created."},
+    },
+    ["lines"],
+)
+def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    clear_selection(doc)
+    manager = flag_methods(sketch_manager(doc), "Insert3DSketch")
+    before = _feature_names(doc)
+    manager.Insert3DSketch(True)
+    if doc.SketchManager.ActiveSketch is None:
+        return result(False, "SOLIDWORKS did not open a 3D sketch.")
+    created = 0
+    try:
+        manager.AddToDB = True
+        for line in args["lines"]:
+            segment = manager.CreateLine(
+                to_m(line["x1_mm"]), to_m(line["y1_mm"]), to_m(line["z1_mm"]),
+                to_m(line["x2_mm"]), to_m(line["y2_mm"]), to_m(line["z2_mm"]),
+            )
+            if segment is not None:
+                created += 1
+    finally:
+        manager.AddToDB = False
+        manager.Insert3DSketch(True)
+    new = [n for n in _feature_names(doc) if n not in before]
+    if not new:
+        return result(False, "The 3D sketch was not added to the feature tree.")
+    name = new[-1]
+    from .sw_core import find_feature
+
+    feature = find_feature(doc, name)
+    rename_feature(feature, args.get("name"))
+    name = str(args.get("name") or name)
+    segments = len(as_list(safe(value(feature, "GetSpecificFeature2"), "GetSketchSegments")))
+    ok = segments == len(args["lines"])
+    return result(
+        ok,
+        f"Created 3D sketch '{name}' with {segments} segments." if ok
+        else f"Created 3D sketch '{name}', but it holds {segments} segments instead of {len(args['lines'])}.",
+        sketch=name, segments=list(range(segments)), created=created,
+    )
+
+
+@tool(
+    "list_weldment_profiles",
+    "Read-only: the structural member profiles available on this install, as standard / type / size "
+    "with the .sldlfp path each, from the configured profile folders and the SOLIDWORKS install.",
+    {
+        "standard": {"type": "string", "description": "Only this standard, e.g. iso or 'ansi inch'."},
+        "type": {"type": "string", "description": "Only this profile type, e.g. 'square tube'."},
+    },
+)
+def list_weldment_profiles(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    profiles = iter_profiles(app)
+    standard = str(args.get("standard") or "").lower()
+    kind = str(args.get("type") or "").lower()
+    if standard:
+        profiles = [p for p in profiles if p["standard"].lower() == standard]
+    if kind:
+        profiles = [p for p in profiles if p["type"].lower() == kind]
+    return result(
+        bool(profiles),
+        f"{len(profiles)} profiles." if profiles else "No weldment profiles found; check Tools > Options > File Locations > Weldment Profiles.",
+        profiles=profiles, roots=[str(r) for r in profile_roots(app)],
+    )
+
+
+@tool(
+    "weldment_structural_member",
+    "Sweep a library profile along sketch segments (a 3D sketch from create_3d_sketch, or a 2D one) to make "
+    "structural members, one body per segment. Pick the profile by standard, type and size from "
+    "list_weldment_profiles, or give profile_path. Connected segments in one call form one group: their "
+    "corners are mitred (corner_treatment), and the whole chain's volume is profile area times total "
+    "length. Segments that are not connected or not parallel need separate calls. Adds the Weldment "
+    "feature to the part if it has none.",
+    {
+        "selection": SELECTION_SCHEMA,
+        "standard": {"type": "string"},
+        "type": {"type": "string"},
+        "size": {"type": "string"},
+        "profile_path": {"type": "string", "description": "Full path of a .sldlfp profile instead of standard/type/size."},
+        "corner_treatment": {"type": "string", "enum": sorted(CORNER_TREATMENTS), "default": "miter", "description": "How connected segments meet."},
+        "connected_segments": {"type": "string", "enum": sorted(CONNECTED_SEGMENTS), "default": "simple_cut"},
+        "allow_protrusion": {"type": "boolean", "default": False},
+        "angle_deg": {"type": "number", "default": 0, "description": "Rotate the profile about the path."},
+        "mirror_profile": {"type": "boolean", "default": False},
+        "gap_mm": {"type": "number", "default": 0, "minimum": 0, "description": "Gap between the segments of the group."},
+        "name": {"type": "string"},
+    },
+    ["selection"],
+)
+def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
+    app, doc = require_part()
+    exit_active_sketch(doc)
+    profile = _resolve_profile(app, args)
+    segments = _segment_objects(doc, args.get("selection"))
+    added_weldment = _ensure_weldment(doc)
+    manager = feature_manager(doc)
+    group = manager.CreateStructuralMemberGroup()
+    group.Segments = dispatch_array(segments)
+    treatment = str(args.get("corner_treatment", "miter"))
+    group.ApplyCornerTreatment = treatment != "none"
+    if treatment != "none":
+        group.CornerTreatmentType = CORNER_TREATMENTS[treatment]
+    angle = float(args.get("angle_deg", 0))
+    if angle:
+        group.Angle = to_rad(angle)
+    if bool(args.get("mirror_profile", False)):
+        group.MirrorProfile = True
+    gap = float(args.get("gap_mm", 0))
+    if gap:
+        group.GapWithinGroup = to_m(gap)
+
+    before_bodies = {str(safe(b, "Name", "")) for b in get_bodies(doc)}
+    clear_selection(doc)
+    feature = manager.InsertStructuralWeldment4(
+        str(profile), CONNECTED_SEGMENTS[str(args.get("connected_segments", "simple_cut"))],
+        bool(args.get("allow_protrusion", False)), dispatch_array([group]),
+    )
+    rename_feature(feature, args.get("name"))
+    payload = feature_result(doc, feature, "structural member", profile=str(profile), segments=len(segments))
+    if feature is None:
+        payload["message"] += (
+            " Segments of one call must be connected end to end or parallel; the profile must exist; "
+            "a segment that already carries a member of this profile is refused."
+        )
+        return payload
+    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
+    payload["data"]["bodies"] = bodies
+    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    payload["data"]["weldment_added"] = added_weldment
+    if len(bodies) != len(segments):
+        payload["ok"] = False
+        payload["message"] += f" Expected {len(segments)} new bodies and found {len(bodies)}."
+    return payload
+
+
+@tool(
+    "weldment_end_cap",
+    "Close the open ends of structural members with a plate. Put the planar end faces in selection.faces "
+    "(the ring-shaped end face of a tube, from list_faces). thickness_mm is the plate thickness; the plate is "
+    "inset from the outer profile by inset_ratio times the wall thickness, or by inset_mm when given.",
+    {
+        "selection": SELECTION_SCHEMA,
+        "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+        "inset_ratio": {"type": "number", "default": 0.5, "minimum": 0, "description": "Inset as a ratio of the wall thickness."},
+        "inset_mm": {"type": "number", "minimum": 0, "description": "Inset as a distance instead of a ratio."},
+        "chamfer_mm": {"type": "number", "minimum": 0, "description": "Chamfer the plate corners by this distance."},
+        "inward": {"type": "boolean", "default": False, "description": "Sink the plate into the member instead of adding it beyond the end."},
+        "reverse": {"type": "boolean", "default": False},
+        "name": {"type": "string"},
+    },
+    ["selection", "thickness_mm"],
+)
+def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    count = require_selection(doc, args["selection"])
+    inset_mm = args.get("inset_mm")
+    chamfer = args.get("chamfer_mm")
+    before_bodies = {str(safe(b, "Name", "")) for b in get_bodies(doc)}
+    feature = feature_manager(doc).InsertEndCapFeature3(
+        to_m(args["thickness_mm"]), inset_mm is not None, chamfer is not None,
+        to_m(inset_mm) if inset_mm is not None else 0.0, float(args.get("inset_ratio", 0.5)),
+        to_m(chamfer) if chamfer is not None else 0.0,
+        False, 0.0, bool(args.get("reverse", False)), bool(args.get("inward", False)),
+    )
+    rename_feature(feature, args.get("name"))
+    payload = feature_result(doc, feature, "end cap", faces=count, thickness_mm=args["thickness_mm"])
+    if feature is None:
+        payload["message"] += " Select the planar end face of a structural member."
+        return payload
+    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
+    payload["data"]["bodies"] = bodies
+    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    definition = safe(feature, "GetDefinition")
+    if definition is not None:
+        payload["data"]["end_cap"] = {
+            "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
+            "inset_ratio": safe(definition, "ThicknessRatioForOffset"),
+            "inset_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
+            "chamfered": bool(safe(definition, "UseChamferCorners", False)),
+            "inward": bool(safe(definition, "IsEndCapInward", False)),
+        }
+    return payload
+
+
+@tool(
+    "weldment_trim_extend",
+    "Trim (or extend) structural members against other bodies or faces, so members that run into each "
+    "other end flush. bodies are the indices from list_bodies of the members to trim; trimming_bodies are the "
+    "indices of the bodies they stop at (or put faces/planes in trimming_selection). The trimmed bodies "
+    "are reported with their new bounding boxes and volumes.",
+    {
+        "bodies": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+        "trimming_bodies": {"type": "array", "items": {"type": "integer"}},
+        "trimming_selection": SELECTION_SCHEMA,
+        "corner_type": {"type": "string", "enum": ["butt1", "butt2", "miter", "trim"], "default": "butt1"},
+        "coped_cut": {"type": "boolean", "default": False},
+        "allow_extension": {"type": "boolean", "default": True, "description": "Let a member grow to reach the trimming body."},
+        "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming."},
+        "name": {"type": "string"},
+    },
+    ["bodies"],
+)
+def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    to_trim = _body_objects(doc, list(args["bodies"]))
+    trimming: list[Any] = []
+    if args.get("trimming_bodies"):
+        trimming.extend(_body_objects(doc, list(args["trimming_bodies"])))
+    if args.get("trimming_selection"):
+        spec = args["trimming_selection"]
+        faces = iter_face_objects(doc)
+        for raw in spec.get("faces") or []:
+            index = int(raw)
+            if not 0 <= index < len(faces):
+                raise RuntimeError(f"Face index {index} is out of range (0..{len(faces) - 1}).")
+            trimming.append(faces[index][0])
+    if not trimming:
+        return result(False, "Give trimming_bodies or trimming_selection.faces: something for the members to stop at.")
+    options = 0
+    if bool(args.get("allow_extension", True)):
+        options |= TRIM_ALLOW_TRIMMED_EXTENSION | TRIM_ALLOW_TRIMMING_EXTENSION
+    if bool(args.get("coped_cut", False)):
+        options |= TRIM_COPED_CUT
+    gap = float(args.get("gap_mm", 0))
+    if gap:
+        options |= TRIM_WELD_GAP
+    names_before = [str(safe(b, "Name", "")) for b in to_trim]
+    clear_selection(doc)
+    feature = feature_manager(doc).InsertWeldmentTrimFeature2(
+        CORNER_TREATMENTS[str(args.get("corner_type", "butt1"))], options, to_m(gap),
+        dispatch_array(to_trim), dispatch_array(trimming),
+    )
+    rename_feature(feature, args.get("name"))
+    payload = feature_result(doc, feature, "trim/extend", trimmed=len(to_trim), against=len(trimming))
+    if feature is None:
+        payload["message"] += " The trimming bodies must actually cross or face the members being trimmed."
+        return payload
+    # Trimming renames the bodies after the feature; report every body so the
+    # caller sees the new boxes, and flag the ones that came from this feature.
+    feature_name = str(feature_property(feature, "Name", ""))
+    bodies = bodies_summary(doc)
+    payload["data"]["bodies"] = bodies
+    payload["data"]["trimmed_bodies"] = [b for b in bodies if b["name"].startswith(feature_name)]
+    payload["data"]["bodies_before"] = names_before
+    return payload

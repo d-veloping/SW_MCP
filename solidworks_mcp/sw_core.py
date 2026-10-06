@@ -343,7 +343,7 @@ _SKETCH_MANAGER_METHODS = (
     "CreateLine", "CreateCenterLine", "CreateCircleByRadius", "CreateArc", "Create3PointArc",
     "CreateTangentArc", "CreateEllipse", "CreatePolygon", "CreateSketchSlot", "CreatePoint",
     "CreateSpline", "CreateCornerRectangle", "InsertSketch", "SketchTrim", "SketchUseEdge3",
-    "FullyDefineSketch",
+    "FullyDefineSketch", "Insert3DSketch",
 )
 
 _FEATURE_MANAGER_METHODS = (
@@ -358,6 +358,10 @@ _FEATURE_MANAGER_METHODS = (
     "FeatureLinearPattern4", "FeatureCircularPattern4",
     # Sheet metal
     "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange", "CreateCustomBendAllowance",
+    "AddCornerReliefCorner", "AddCornerReliefType", "FinishCornerRelief",
+    # Weldments
+    "InsertWeldmentFeature", "CreateStructuralMemberGroup", "InsertStructuralWeldment4",
+    "InsertEndCapFeature3", "InsertWeldmentTrimFeature2",
 )
 
 _EXTENSION_METHODS = (
@@ -628,8 +632,13 @@ def reference_axes(doc: Any) -> list[str]:
     return [f["name"] for f in iter_features(doc) if f["type"] == "RefAxis" and f["name"]]
 
 
+# A 2D sketch and a 3D sketch; both carry sketch segments and both can be a
+# feature's profile or path.
+SKETCH_FEATURE_TYPES = frozenset({"ProfileFeature", "3DProfileFeature"})
+
+
 def sketch_features(doc: Any) -> list[Any]:
-    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") == "ProfileFeature"]
+    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in SKETCH_FEATURE_TYPES]
 
 
 def sketch_names(doc: Any) -> list[str]:
@@ -651,7 +660,7 @@ def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
         feature = find_feature(doc, sketch_name)
         if feature is None:
             raise RuntimeError(f"No feature named '{sketch_name}' exists in this document.")
-        if feature_property(feature, "GetTypeName2", "") != "ProfileFeature":
+        if feature_property(feature, "GetTypeName2", "") not in SKETCH_FEATURE_TYPES:
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
         return sketch_name, feature
     return latest_sketch(doc)
