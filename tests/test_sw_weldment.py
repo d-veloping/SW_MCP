@@ -77,3 +77,6 @@ def test_enum_tables_match_the_type_library() -> None:
     assert wm.CONNECTED_SEGMENTS == {"simple_cut": 1, "coped_cut": 2}
     assert wm.CORNER_TREATMENTS["miter"] == 1 and wm.CORNER_TREATMENTS["butt1"] == 2
     assert wm.TRIM_COPED_CUT == 4 and wm.TRIM_WELD_GAP == 8
+    assert wm.GUSSET_THICKNESS_DIRECTIONS == {"inner": 0, "both_sides": 1, "outer": 2}
+    assert wm.GUSSET_LOCATIONS == {"start": 0, "center": 1, "end": 2}
+    assert wm.GUSSET_PROFILES == {"triangle": False, "polygon": True}

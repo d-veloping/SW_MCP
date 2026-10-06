@@ -24,7 +24,9 @@ square tube 20 x 20 x 2 members.  The profile area A is read off a member's
 end face (rounded to 1e-4 mm2, hence the tolerances); the mitred pair must then measure A * 500, the third member A * 150,
 an end cap 3 mm thick on the open end measures 3 * 18 * 18 (inset half a
 wall), and after trimming the third member flush to the second its box ends
-10 mm lower and it measures A * 140.  The part is closed without saving.
+10 mm lower and it measures A * 140.  Two gussets in the first corner measure
+a*b*t/2 (triangle) and (a*b - cut corner)*t (polygon).  The part is closed
+without saving.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from solidworks_mcp.sw_weldment import (
     create_3d_sketch,
     list_weldment_profiles,
     weldment_end_cap,
+    weldment_gusset,
     weldment_structural_member,
     weldment_trim_extend,
 )
@@ -120,6 +123,23 @@ def main() -> int:
         check("end cap volume = 3 * 18 * 18", cap["data"]["volume_mm3"], 3 * 18 * 18)
         check("end cap thickness readback", cap["data"]["end_cap"]["thickness_mm"], 3.0, 1e-6)
         check("end cap sits beyond the end", cap["data"]["bodies"][0]["min_mm"][0], -3.0)
+
+        # Gussets in the inner corner between the first two members: the top
+        # face of member 1 (y = 10) and the inner face of member 2 (x = 290).
+        legs = [face_where([0, 1, 0], lambda p: abs(p[1] - 10) < 1e-3 and p[0] < 290),
+                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3)]
+        faces = [int(f["index"]) for f in legs]
+        tri = require(weldment_gusset({"selection": {"faces": faces}, "d1_mm": 50, "d2_mm": 30, "thickness_mm": 5}), "weldment_gusset(triangle)")
+        check("triangle gusset volume = 50 * 30 * 5 / 2", tri["data"]["volume_mm3"], 50 * 30 * 5 / 2)
+        check("triangle gusset centred on the corner edge", tri["data"]["bodies"][0]["min_mm"][2], -2.5)
+        legs = [face_where([0, 1, 0], lambda p: abs(p[1] - 10) < 1e-3 and p[0] < 240),
+                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3 and p[1] > 60)]
+        poly = require(weldment_gusset({
+            "selection": {"faces": [int(f["index"]) for f in legs]}, "profile": "polygon",
+            "d1_mm": 50, "d2_mm": 50, "d3_mm": 20, "d4_mm": 20, "thickness_mm": 4, "thickness_direction": "outer",
+        }), "weldment_gusset(polygon)")
+        check("polygon gusset volume = (50 * 50 - 30 * 30 / 2) * 4", poly["data"]["volume_mm3"], (2500 - 450) * 4)
+        check("polygon gusset readback", poly["data"]["gusset"]["profile"], "polygon")
 
         trimmed = require(weldment_trim_extend({
             "bodies": [body_index("(2)")], "trimming_bodies": [body_index("(1)[2]")], "corner_type": "butt1",

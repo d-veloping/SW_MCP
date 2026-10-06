@@ -361,7 +361,7 @@ _FEATURE_MANAGER_METHODS = (
     "AddCornerReliefCorner", "AddCornerReliefType", "FinishCornerRelief",
     # Weldments
     "InsertWeldmentFeature", "CreateStructuralMemberGroup", "InsertStructuralWeldment4",
-    "InsertEndCapFeature3", "InsertWeldmentTrimFeature2",
+    "InsertEndCapFeature3", "InsertWeldmentTrimFeature2", "InsertGussetFeature3",
 )
 
 _EXTENSION_METHODS = (

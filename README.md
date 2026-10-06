@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-110 tools: sketching with real relations and driving dimensions, the solid
+111 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -185,6 +185,7 @@ nothing at all when they have not.
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
 | `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward. |
 | `weldment_trim_extend` | Trim members flush against other bodies or faces (butt / miter, coped cut, weld gap), reporting the trimmed bodies' new boxes and volumes. |
+| `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
 ### Inspection — the feedback channel
 | Tool | Purpose |
@@ -333,7 +334,10 @@ every line into "unknown".
   material database carries no sheet metal parameters, so neither route sets
   the K-factor either.
 - Weldments: the part's mass properties do not change after `weldment_trim_extend`,
-  so the tools measure each body on its own (`IBody2::GetMassProperties`).
+  so the tools measure each body on its own (`IBody2::GetMassProperties`). The
+  gusset's weld-bead chamfer and sketch-plane offset arguments of
+  `InsertGussetFeature3` are accepted and change nothing on 2016, so
+  `weldment_gusset` does not offer them.
 
 ## Testing
 
@@ -351,7 +355,7 @@ flange volumes, the developed length from the K-factor, the material a break
 corner removes, the bend lines in the exported DXF (32 checks on 2016 SP3).
 `tests\live_weldment.py` does the same for weldments: members measure profile
 area times length, the end cap its inset plate, the trimmed member its new
-length (14 checks).
+length, the gussets a*b*t/2 and the polygon with its corner cut (18 checks).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved
@@ -376,7 +380,7 @@ newer releases the newest name is always tried first, so nothing changes there.
 | `sw_sketch.py` | Sketches, geometry, editing, relations, dimensions |
 | `sw_feature.py` | Solid features |
 | `sw_sheetmetal.py` | Sheet metal features, flat pattern, DXF/DWG export |
-| `sw_weldment.py` | 3D sketches, structural members, end caps, trim/extend |
+| `sw_weldment.py` | 3D sketches, structural members, end caps, trim/extend, gussets |
 | `sw_inspect.py` | Topology listings, measurement, mass properties, screenshots |
 | `sw_assembly.py` | Components and mates |
 | `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |

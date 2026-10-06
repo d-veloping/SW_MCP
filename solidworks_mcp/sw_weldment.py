@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Weldments: 3D sketches, structural members from profile libraries, end
-caps, and trim/extend.
+caps, trim/extend, and gussets.
 
 Measured on SOLIDWORKS 2016 SP3 (ClauSW, 2026-10-06): a structural member is
 one IStructuralMemberGroup whose Segments are the sketch segments of a 3D (or
@@ -22,6 +22,10 @@ Connected segments in one group are mitred, so the chain's volume is the
 profile area times the sum of the segment lengths -- which is how the live
 test checks it.  Mass properties of the whole part do not change after a
 trim, so bodies are measured one at a time through IBody2::GetMassProperties.
+A gusset (InsertGussetFeature3) takes its two supporting faces with mark 1;
+a triangle of legs a and b at thickness t measures a*b*t/2 exactly, a polygon
+a*b*t minus the cut-off corner.  Its chamfer and plane-offset arguments were
+accepted and changed nothing here, so the tool does not offer them.
 """
 
 from __future__ import annotations
@@ -66,6 +70,10 @@ from .sw_core import (
 CONNECTED_SEGMENTS = {"simple_cut": 1, "coped_cut": 2}
 # swSolidworksWeldmentEndCondOptions_e
 CORNER_TREATMENTS = {"none": 0, "miter": 1, "butt1": 2, "butt2": 3, "trim": 4}
+# swGussetThicknessType_e / swGussetProfileLocationType_e / swGussetProfileType_e
+GUSSET_THICKNESS_DIRECTIONS = {"inner": 0, "both_sides": 1, "outer": 2}
+GUSSET_LOCATIONS = {"start": 0, "center": 1, "end": 2}
+GUSSET_PROFILES = {"triangle": False, "polygon": True}
 # swWeldmentTrimExtendOptionType_e
 TRIM_ALLOW_TRIMMED_EXTENSION = 1
 TRIM_ALLOW_TRIMMING_EXTENSION = 2
@@ -469,4 +477,77 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     payload["data"]["bodies"] = bodies
     payload["data"]["trimmed_bodies"] = [b for b in bodies if b["name"].startswith(feature_name)]
     payload["data"]["bodies_before"] = names_before
+    return payload
+
+
+@tool(
+    "weldment_gusset",
+    "Add a gusset plate into the corner between two planar faces of structural members. Put the two "
+    "supporting faces in selection.faces (the faces that form the inner corner, from list_faces). A triangle "
+    "profile has legs d1_mm along the first face and d2_mm along the second; a polygon profile cuts the "
+    "outer corner off: d3_mm rises from the end of d1 and either angle_deg or d4_mm (from the end of d2) "
+    "closes it. thickness_mm grows inner, outer or to both sides of the profile plane, which sits at the "
+    "start, centre or end of the corner edge. The new body is reported with its volume.",
+    {
+        "selection": SELECTION_SCHEMA,
+        "profile": {"type": "string", "enum": sorted(GUSSET_PROFILES), "default": "triangle"},
+        "d1_mm": {"type": "number", "exclusiveMinimum": 0},
+        "d2_mm": {"type": "number", "exclusiveMinimum": 0},
+        "d3_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Polygon only."},
+        "d4_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Polygon only; used instead of angle_deg when given."},
+        "angle_deg": {"type": "number", "default": 45, "description": "Polygon only: angle of the cut-off edge."},
+        "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+        "thickness_direction": {"type": "string", "enum": sorted(GUSSET_THICKNESS_DIRECTIONS), "default": "both_sides"},
+        "location": {"type": "string", "enum": sorted(GUSSET_LOCATIONS), "default": "center"},
+        "swap_legs": {"type": "boolean", "default": False, "description": "Swap d1 with d2 (and d3 with d4)."},
+        "name": {"type": "string"},
+    },
+    ["selection", "d1_mm", "d2_mm", "thickness_mm"],
+)
+def weldment_gusset(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_part()
+    exit_active_sketch(doc)
+    profile = str(args.get("profile", "triangle"))
+    polygon = GUSSET_PROFILES[profile]
+    d3 = args.get("d3_mm")
+    d4 = args.get("d4_mm")
+    if polygon and not d3:
+        return result(False, "A polygon gusset needs d3_mm (and angle_deg or d4_mm).")
+    # InsertGussetFeature3 reads its two supporting faces from mark 1.
+    count = require_selection(doc, args["selection"], mark=1)
+    if count != 2:
+        return result(False, f"A gusset needs exactly two supporting faces; the selection resolved to {count}.")
+    before_bodies = {str(safe(b, "Name", "")) for b in get_bodies(doc)}
+    use_d4 = polygon and d4 is not None
+    feature = feature_manager(doc).InsertGussetFeature3(
+        to_m(args["thickness_mm"]),
+        GUSSET_THICKNESS_DIRECTIONS[str(args.get("thickness_direction", "both_sides"))],
+        GUSSET_LOCATIONS[str(args.get("location", "center"))],
+        polygon, to_m(args["d1_mm"]), to_m(args["d2_mm"]),
+        to_m(d3) if polygon else 0.0,
+        to_rad(args.get("angle_deg", 45)) if polygon and not use_d4 else 0.0,
+        to_m(d4) if use_d4 else 0.0,
+        False, 0.0, 0, False, bool(args.get("swap_legs", False)), use_d4,
+        0.0, 0.0, 0.0, False, False,
+    )
+    rename_feature(feature, args.get("name"))
+    payload = feature_result(doc, feature, "gusset", profile=profile, thickness_mm=args["thickness_mm"])
+    if feature is None:
+        payload["message"] += " The two faces must meet along one straight corner edge of the weldment."
+        return payload
+    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
+    payload["data"]["bodies"] = bodies
+    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    definition = safe(feature, "GetDefinition")
+    if definition is not None:
+        payload["data"]["gusset"] = {
+            "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
+            "d1_mm": round(to_mm(safe(definition, "ProfileDistance1", 0.0) or 0.0), 6),
+            "d2_mm": round(to_mm(safe(definition, "ProfileDistance2", 0.0) or 0.0), 6),
+            "d3_mm": round(to_mm(safe(definition, "ProfileDistance3", 0.0) or 0.0), 6),
+            "profile": "polygon" if int(safe(definition, "ProfileType", 1) or 0) == 0 else "triangle",
+        }
+    if not bodies:
+        payload["ok"] = False
+        payload["message"] += " No new body appeared."
     return payload
