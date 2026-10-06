@@ -184,7 +184,7 @@ nothing at all when they have not.
 | `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
 | `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward. |
-| `weldment_trim_extend` | Trim members flush against other bodies or faces (butt / miter, coped cut, weld gap), reporting the trimmed bodies' new boxes and volumes. |
+| `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
 | `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
 ### Inspection — the feedback channel
@@ -355,7 +355,8 @@ flange volumes, the developed length from the K-factor, the material a break
 corner removes, the bend lines in the exported DXF (32 checks on 2016 SP3).
 `tests\live_weldment.py` does the same for weldments: members measure profile
 area times length, the end cap its inset plate, the trimmed member its new
-length, the gussets a*b*t/2 and the polygon with its corner cut (18 checks).
+length, the gussets a*b*t/2 and the polygon with its corner cut, a plane cut
+into two halves (21 checks).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved

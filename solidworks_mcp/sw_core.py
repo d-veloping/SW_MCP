@@ -364,6 +364,8 @@ _FEATURE_MANAGER_METHODS = (
     "InsertEndCapFeature3", "InsertWeldmentTrimFeature2", "InsertGussetFeature3",
 )
 
+_SELECTION_MANAGER_METHODS = ("GetSelectedObjectCount2", "GetSelectedObject6", "CreateSelectData")
+
 _EXTENSION_METHODS = (
     "SelectByID2", "SelectByRay", "AddDimension", "DeleteSelection2", "SaveAs", "SaveAs3",
     "GetMassProperties2", "GetWhatsWrong",
@@ -406,6 +408,18 @@ def extension(doc: Any) -> Any:
 
 def selectable(obj: Any) -> Any:
     return flag_methods(obj, "Select2", "Select4")
+
+
+def selected_objects(doc: Any, mark: int = -1) -> list[Any]:
+    """The objects currently selected, in selection order (any mark by default)."""
+    manager = flag_methods(doc.SelectionManager, *_SELECTION_MANAGER_METHODS)
+    count = int(manager.GetSelectedObjectCount2(mark) or 0)
+    objects = []
+    for index in range(1, count + 1):
+        obj = manager.GetSelectedObject6(index, mark)
+        if obj is not None:
+            objects.append(obj)
+    return objects
 
 
 def call_versioned(obj: Any, *candidates: tuple[str, Sequence[Any]]) -> Any:
@@ -632,30 +646,39 @@ def reference_axes(doc: Any) -> list[str]:
     return [f["name"] for f in iter_features(doc) if f["type"] == "RefAxis" and f["name"]]
 
 
-# A 2D sketch and a 3D sketch; both carry sketch segments and both can be a
-# feature's profile or path.
-SKETCH_FEATURE_TYPES = frozenset({"ProfileFeature", "3DProfileFeature"})
+# A 2D sketch and a 3D sketch.  Both carry sketch segments, so both can be
+# named explicitly as a path or a segment source; only a 2D sketch is a
+# profile, so the unnamed default of a profile feature never picks a 3D one.
+SKETCH_2D_TYPE = "ProfileFeature"
+SKETCH_3D_TYPE = "3DProfileFeature"
+SKETCH_FEATURE_TYPES = frozenset({SKETCH_2D_TYPE, SKETCH_3D_TYPE})
 
 
-def sketch_features(doc: Any) -> list[Any]:
-    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in SKETCH_FEATURE_TYPES]
+def sketch_features(doc: Any, include_3d: bool = False) -> list[Any]:
+    wanted = SKETCH_FEATURE_TYPES if include_3d else {SKETCH_2D_TYPE}
+    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in wanted]
 
 
-def sketch_names(doc: Any) -> list[str]:
-    return [str(feature_property(f, "Name", "")) for f in sketch_features(doc)]
+def sketch_names(doc: Any, include_3d: bool = False) -> list[str]:
+    return [str(feature_property(f, "Name", "")) for f in sketch_features(doc, include_3d)]
 
 
-def latest_sketch(doc: Any) -> tuple[str, Any]:
-    """Return the most recently created sketch feature in tree order."""
-    sketches = sketch_features(doc)
+def latest_sketch(doc: Any, include_3d: bool = False) -> tuple[str, Any]:
+    """Return the most recently created sketch feature in tree order.
+
+    2D sketches only unless ``include_3d`` is set: an extrude, revolve or
+    base flange that omits its sketch name must get the newest profile, not
+    the 3D path drawn for a structural member after it.
+    """
+    sketches = sketch_features(doc, include_3d)
     if not sketches:
         raise RuntimeError("No sketch was found in the feature tree.")
     feature = sketches[-1]
     return str(feature_property(feature, "Name", "")), feature
 
 
-def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
-    """Resolve an explicit sketch name, or fall back to the newest sketch."""
+def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
+    """Resolve an explicit sketch name (2D or 3D), or fall back to the newest sketch."""
     if sketch_name:
         feature = find_feature(doc, sketch_name)
         if feature is None:
@@ -663,7 +686,7 @@ def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
         if feature_property(feature, "GetTypeName2", "") not in SKETCH_FEATURE_TYPES:
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
         return sketch_name, feature
-    return latest_sketch(doc)
+    return latest_sketch(doc, include_3d)
 
 
 def exit_active_sketch(doc: Any) -> None:
@@ -1643,10 +1666,16 @@ def feature_result(doc: Any, feature: Any, action: str, **data: Any) -> dict[str
     return payload
 
 
-def rename_feature(feature: Any, name: str | None) -> None:
-    if not name:
-        return
+def rename_feature(feature: Any, name: str | None) -> str | None:
+    """Rename a feature and return the name it actually carries afterwards.
+
+    SOLIDWORKS refuses a name that is already taken, and the refusal only
+    logs here; the caller must report the returned name, never the wanted one.
+    """
+    if not name or feature is None:
+        return None
     try:
         feature.Name = name
     except Exception:
         logger.info("Could not rename feature to %s", name)
+    return str(feature_property(feature, "Name", "")) or None

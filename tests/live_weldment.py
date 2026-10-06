@@ -25,8 +25,9 @@ end face (rounded to 1e-4 mm2, hence the tolerances); the mitred pair must then 
 an end cap 3 mm thick on the open end measures 3 * 18 * 18 (inset half a
 wall), and after trimming the third member flush to the second its box ends
 10 mm lower and it measures A * 140.  Two gussets in the first corner measure
-a*b*t/2 (triangle) and (a*b - cut corner)*t (polygon).  The part is closed
-without saving.
+a*b*t/2 (triangle) and (a*b - cut corner)*t (polygon); the first member cut at
+a reference plane falls into two pieces, the free one A * 150 (the other
+keeps its mitre).  The part is closed without saving.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ if str(ROOT) not in sys.path:
 from solidworks_mcp.sw_core import active_document, running_app, value
 from solidworks_mcp.sw_file import create_new_document
 from solidworks_mcp.sw_inspect import list_bodies, list_faces
+from solidworks_mcp.sw_refgeom import create_plane
 from solidworks_mcp.sw_weldment import (
     create_3d_sketch,
     list_weldment_profiles,
@@ -149,6 +151,24 @@ def main() -> int:
         if third_after:
             check("trimmed member top at z = -10", third_after[0]["max_mm"][2], -10.0)
             check("trimmed member volume = A * 140", third_after[0]["volume_mm3"], area * 140, 0.3)
+
+        # Trimming against a reference plane: the first member, 300 mm along
+        # x, cut at a plane 150 mm from the right plane (x = 0) keeps 150 mm.
+        plane = require(create_plane({"mode": "offset", "selection": {"planes": ["right"]}, "distance_mm": 150, "name": "Schnitt"}), "create_plane")
+        butt = weldment_trim_extend({
+            "bodies": [body_index("(1)[1]")], "trimming_selection": {"planes": [plane["data"]["feature"]]}, "corner_type": "butt1",
+        })
+        check("butt against a plane is reported as trimming nothing", butt["ok"], False)
+        plane_trim = require(weldment_trim_extend({
+            "bodies": [body_index("(1)[1]")], "trimming_selection": {"planes": [plane["data"]["feature"]]},
+        }), "weldment_trim_extend(plane)")
+        check("plane boundary defaults to corner_type trim", plane_trim["data"]["corner_type"], "trim")
+        pieces = plane_trim["data"]["trimmed_bodies"]
+        check("member cut at the plane into two pieces", len(pieces), 2)
+        left = [b for b in pieces if abs(b["size_mm"][0] - 150) < 0.01]
+        check("the free piece is 150 mm long", len(left), 1)
+        if left:
+            check("free piece volume = A * 150", left[0]["volume_mm3"], area * 150, 0.3)
     finally:
         running_app().CloseDoc(str(value(doc, "GetTitle") or title))
 

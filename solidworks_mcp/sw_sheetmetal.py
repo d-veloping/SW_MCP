@@ -45,6 +45,7 @@ Measured on SOLIDWORKS 2016 SP3 (ClauSW, 2026-10-06):
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -377,17 +378,15 @@ def _delete_features(doc: Any, features: list[Any]) -> None:
     clear_selection(doc)
 
 
-def summarize_dxf(path: Path) -> dict[str, Any]:
-    """Count the entities of a DXF file and tell the bend lines from the outline.
+def _dxf_entities(text: list[str]) -> list[dict[str, list[str]]]:
+    """The ENTITIES section as one dict per entity, every group code a list.
 
-    SOLIDWORKS writes everything on layer 0 and marks bend lines only by
-    their line type (CENTER*), so that is what is counted.  Extents come from
-    the LINE and ARC end points, in the drawing's millimetre units.
+    A polyline repeats group 10/20 for each vertex, so values are never
+    collapsed to the first occurrence.
     """
-    text = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    entities: list[dict[str, str]] = []
+    entities: list[dict[str, list[str]]] = []
     section = None
-    current: dict[str, str] | None = None
+    current: dict[str, list[str]] | None = None
     for index in range(0, len(text) - 1, 2):
         code, raw = text[index].strip(), text[index + 1].strip()
         if code == "2" and index >= 2 and text[index - 1].strip() == "SECTION":
@@ -401,27 +400,80 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
             if raw == "ENDSEC":
                 current, section = None, None
             else:
-                current = {"type": raw}
-        elif current is not None and code not in current:
-            current[code] = raw
+                current = {"type": [raw]}
+        elif current is not None:
+            current.setdefault(code, []).append(raw)
     if current is not None:
         entities.append(current)
+    return entities
 
-    kinds = Counter(e["type"] for e in entities)
-    bend_lines = sum(1 for e in entities if e["type"] == "LINE" and e.get("6", "").upper().startswith("CENTER"))
-    xs: list[float] = []
-    ys: list[float] = []
-    for e in entities:
-        for cx, cy in (("10", "20"), ("11", "21")):
-            if cx in e and cy in e:
-                try:
-                    xs.append(float(e[cx]))
-                    ys.append(float(e[cy]))
-                except ValueError:
-                    pass
+
+def _floats(entity: dict[str, list[str]], code: str) -> list[float]:
+    values = []
+    for raw in entity.get(code, []):
+        try:
+            values.append(float(raw))
+        except ValueError:
+            pass
+    return values
+
+
+def dxf_entity_points(entity: dict[str, list[str]]) -> list[tuple[float, float]]:
+    """The extreme points of one entity's geometry, for the drawing extents.
+
+    LINE: both ends.  CIRCLE: the four axis points.  ARC: both ends plus
+    every axis crossing inside the swept angle (DXF arcs run counterclockwise
+    from group 50 to group 51).  Polylines: every vertex.  Other entities
+    contribute nothing rather than a misleading centre point.
+    """
+    kind = entity["type"][0]
+    xs, ys = _floats(entity, "10"), _floats(entity, "20")
+    if kind == "LINE":
+        return list(zip(xs + _floats(entity, "11"), ys + _floats(entity, "21")))
+    if kind in ("LWPOLYLINE", "POLYLINE", "VERTEX", "SPLINE"):
+        return list(zip(xs, ys))
+    if kind in ("CIRCLE", "ARC") and xs and ys:
+        cx, cy = xs[0], ys[0]
+        radii = _floats(entity, "40")
+        if not radii:
+            return []
+        r = radii[0]
+        if kind == "CIRCLE":
+            return [(cx + r, cy), (cx - r, cy), (cx, cy + r), (cx, cy - r)]
+        start = (_floats(entity, "50") or [0.0])[0] % 360.0
+        end = (_floats(entity, "51") or [360.0])[0] % 360.0
+        sweep = (end - start) % 360.0 or 360.0
+        points = [
+            (cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a)))
+            for a in (start, start + sweep)
+        ]
+        for axis in (0.0, 90.0, 180.0, 270.0):
+            if (axis - start) % 360.0 <= sweep:
+                points.append((cx + r * math.cos(math.radians(axis)), cy + r * math.sin(math.radians(axis))))
+        return points
+    return []
+
+
+def summarize_dxf(path: Path) -> dict[str, Any]:
+    """Count the entities of a DXF file and tell the bend lines from the outline.
+
+    SOLIDWORKS writes everything on layer 0 and marks bend lines only by
+    their line type (CENTER*), so that is what is counted.  Extents come from
+    the geometry of lines, arcs, circles and polylines, in the drawing's
+    millimetre units.
+    """
+    entities = _dxf_entities(Path(path).read_text(encoding="utf-8", errors="ignore").splitlines())
+    kinds = Counter(e["type"][0] for e in entities)
+    bend_lines = sum(
+        1 for e in entities
+        if e["type"][0] == "LINE" and (e.get("6") or [""])[0].upper().startswith("CENTER")
+    )
+    points = [point for e in entities for point in dxf_entity_points(e)]
     outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
     summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline}
-    if xs and ys:
+    if points:
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
         summary["extents_mm"] = [round(max(xs) - min(xs), 4), round(max(ys) - min(ys), 4)]
     return summary
 

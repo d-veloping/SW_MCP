@@ -45,8 +45,8 @@ from .sw_core import (
     feature_result,
     flag_methods,
     get_bodies,
-    iter_face_objects,
     iter_features,
+    latest_sketch,
     mm_point,
     rename_feature,
     require_part,
@@ -54,6 +54,7 @@ from .sw_core import (
     result,
     running_app,
     safe,
+    selected_objects,
     SELECTION_SCHEMA,
     sketch_manager,
     sketch_segment_objects,
@@ -83,8 +84,6 @@ TRIM_WELD_GAP = 8
 # swUserPreferenceStringValue_e.swFileLocationsWeldmentProfiles
 SW_FILE_LOCATIONS_WELDMENT_PROFILES = 29
 PROFILE_SUFFIX = ".sldlfp"
-
-SKETCH_3D_TYPE = "3DProfileFeature"
 
 
 # --------------------------------------------------------------------------
@@ -186,7 +185,12 @@ def _segment_objects(doc: Any, selection: dict[str, Any] | None) -> list[Any]:
     indices = spec.get("sketch_segments")
     if not indices:
         raise RuntimeError("selection.sketch_segments is required: the segment indices of the path sketch from list_sketch_segments.")
-    segments = sketch_segment_objects(doc, spec.get("sketch_name"))
+    sketch_name = spec.get("sketch_name")
+    if not sketch_name and doc.SketchManager.ActiveSketch is None:
+        # The unnamed default of a path is the newest sketch of either kind;
+        # the 2D-only default belongs to profile features.
+        sketch_name, _ = latest_sketch(doc, include_3d=True)
+    segments = sketch_segment_objects(doc, sketch_name)
     chosen = []
     for raw in indices:
         index = int(raw)
@@ -259,16 +263,19 @@ def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
     from .sw_core import find_feature
 
     feature = find_feature(doc, name)
-    rename_feature(feature, args.get("name"))
-    name = str(args.get("name") or name)
+    wanted = args.get("name")
+    # The name reported is the one the tree carries, which differs from the
+    # wanted one when SOLIDWORKS refuses the rename (a taken name, say).
+    name = rename_feature(feature, wanted) or name
     segments = len(as_list(safe(value(feature, "GetSpecificFeature2"), "GetSketchSegments")))
     ok = segments == len(args["lines"])
-    return result(
-        ok,
+    message = (
         f"Created 3D sketch '{name}' with {segments} segments." if ok
-        else f"Created 3D sketch '{name}', but it holds {segments} segments instead of {len(args['lines'])}.",
-        sketch=name, segments=list(range(segments)), created=created,
+        else f"Created 3D sketch '{name}', but it holds {segments} segments instead of {len(args['lines'])}."
     )
+    if wanted and name != str(wanted):
+        message += f" SOLIDWORKS kept the name '{name}' instead of '{wanted}'."
+    return result(ok, message, sketch=name, segments=list(range(segments)), created=created)
 
 
 @tool(
@@ -418,15 +425,20 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "weldment_trim_extend",
-    "Trim (or extend) structural members against other bodies or faces, so members that run into each "
-    "other end flush. bodies are the indices from list_bodies of the members to trim; trimming_bodies are the "
-    "indices of the bodies they stop at (or put faces/planes in trimming_selection). The trimmed bodies "
-    "are reported with their new bounding boxes and volumes.",
+    "Trim (or extend) structural members against other bodies, faces or reference planes, so members that "
+    "run into each other end flush. bodies are the indices from list_bodies of the members to trim; "
+    "trimming_bodies are the indices of the bodies they stop at, or trimming_selection holds the faces or "
+    "planes (front/top/right or a created plane) they stop at. The trimmed bodies are reported with their "
+    "new bounding boxes and volumes.",
     {
         "bodies": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
         "trimming_bodies": {"type": "array", "items": {"type": "integer"}},
-        "trimming_selection": SELECTION_SCHEMA,
-        "corner_type": {"type": "string", "enum": ["butt1", "butt2", "miter", "trim"], "default": "butt1"},
+        "trimming_selection": SELECTION_SCHEMA,  # faces and planes are what a trim boundary can be
+        "corner_type": {
+            "type": "string", "enum": ["butt1", "butt2", "miter", "trim"],
+            "description": "How the member ends: butt1, butt2 or miter against a body; trim cuts it at a face or plane "
+                           "and keeps both pieces. Defaults to butt1 with trimming_bodies and to trim otherwise.",
+        },
         "coped_cut": {"type": "boolean", "default": False},
         "allow_extension": {"type": "boolean", "default": True, "description": "Let a member grow to reach the trimming body."},
         "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming."},
@@ -442,15 +454,13 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("trimming_bodies"):
         trimming.extend(_body_objects(doc, list(args["trimming_bodies"])))
     if args.get("trimming_selection"):
-        spec = args["trimming_selection"]
-        faces = iter_face_objects(doc)
-        for raw in spec.get("faces") or []:
-            index = int(raw)
-            if not 0 <= index < len(faces):
-                raise RuntimeError(f"Face index {index} is out of range (0..{len(faces) - 1}).")
-            trimming.append(faces[index][0])
+        # Whatever the selection resolves to -- faces, reference planes,
+        # bodies -- is read back from the selection set, so every kind the
+        # schema offers reaches SOLIDWORKS.
+        require_selection(doc, args["trimming_selection"])
+        trimming.extend(selected_objects(doc))
     if not trimming:
-        return result(False, "Give trimming_bodies or trimming_selection.faces: something for the members to stop at.")
+        return result(False, "Give trimming_bodies or trimming_selection (faces or planes): something for the members to stop at.")
     options = 0
     if bool(args.get("allow_extension", True)):
         options |= TRIM_ALLOW_TRIMMED_EXTENSION | TRIM_ALLOW_TRIMMING_EXTENSION
@@ -459,14 +469,17 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     gap = float(args.get("gap_mm", 0))
     if gap:
         options |= TRIM_WELD_GAP
-    names_before = [str(safe(b, "Name", "")) for b in to_trim]
+    # A body boundary wants butt or miter; a face or plane boundary wants
+    # trim, which the butt and miter types silently leave uncut (measured:
+    # butt1 against a plane builds a feature that changes nothing).
+    corner_type = str(args.get("corner_type") or ("butt1" if args.get("trimming_bodies") else "trim"))
+    before = {b["name"]: b for b in bodies_summary(doc)}
     clear_selection(doc)
     feature = feature_manager(doc).InsertWeldmentTrimFeature2(
-        CORNER_TREATMENTS[str(args.get("corner_type", "butt1"))], options, to_m(gap),
-        dispatch_array(to_trim), dispatch_array(trimming),
+        CORNER_TREATMENTS[corner_type], options, to_m(gap), dispatch_array(to_trim), dispatch_array(trimming),
     )
     rename_feature(feature, args.get("name"))
-    payload = feature_result(doc, feature, "trim/extend", trimmed=len(to_trim), against=len(trimming))
+    payload = feature_result(doc, feature, "trim/extend", trimmed=len(to_trim), against=len(trimming), corner_type=corner_type)
     if feature is None:
         payload["message"] += " The trimming bodies must actually cross or face the members being trimmed."
         return payload
@@ -476,7 +489,18 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     bodies = bodies_summary(doc)
     payload["data"]["bodies"] = bodies
     payload["data"]["trimmed_bodies"] = [b for b in bodies if b["name"].startswith(feature_name)]
-    payload["data"]["bodies_before"] = names_before
+    payload["data"]["bodies_before"] = list(before)
+    unchanged = all(
+        b["name"] in before and before[b["name"]].get("size_mm") == b.get("size_mm")
+        and before[b["name"]].get("volume_mm3") == b.get("volume_mm3")
+        for b in bodies
+    ) and len(bodies) == len(before)
+    if unchanged:
+        payload["ok"] = False
+        payload["message"] += (
+            f" No body changed: with corner_type {corner_type} nothing was trimmed. A face or plane boundary "
+            "needs corner_type trim; a body boundary must cross the member."
+        )
     return payload
 
 
