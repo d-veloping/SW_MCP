@@ -160,7 +160,7 @@ def profile_roots(app: Any) -> list[Path]:
 
 
 def iter_profiles(app: Any) -> list[dict[str, str]]:
-    """Every <root>/<standard>/<type>/<size>.sldlfp, first root wins on duplicates."""
+    """Every <root>/<standard>/<type>/<size>.sldlfp, sorted; the first root wins on duplicates."""
     profiles: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for root in profile_roots(app):
@@ -170,7 +170,7 @@ def iter_profiles(app: Any) -> list[dict[str, str]]:
                 continue
             seen.add(key)
             profiles.append({"standard": path.parts[-3], "type": path.parts[-2], "size": path.stem, "path": str(path)})
-    return profiles
+    return sorted(profiles, key=lambda p: (p["standard"].lower(), p["type"].lower(), p["size"].lower()))
 
 
 def _segment_objects(doc: Any, selection: dict[str, Any] | None) -> list[Any]:
