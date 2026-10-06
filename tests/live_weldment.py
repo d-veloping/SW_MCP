@@ -146,7 +146,7 @@ def main() -> int:
         trimmed = require(weldment_trim_extend({
             "bodies": [body_index("(2)")], "trimming_bodies": [body_index("(1)[2]")], "corner_type": "butt1",
         }), "weldment_trim_extend")
-        grown = [b for b in trimmed["data"]["trimmed_bodies"] if abs(b["max_mm"][1] - 210) < 0.01]
+        grown = [b for b in trimmed["data"]["trimmed_bodies"] if abs(b["size_mm"][1] - 220) < 0.01]
         check("the trimming member grows over the trimmed end (200 -> 210)", len(grown), 1)
         third_after = [b for b in trimmed["data"]["trimmed_bodies"] if abs(b["size_mm"][2] - 140) < 1]
         check("third member trimmed flush to the second", bool(third_after), True)
