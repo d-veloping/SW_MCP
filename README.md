@@ -129,9 +129,10 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | Tool | Purpose |
 | --- | --- |
 | `solidworks_status` | Verify the connection; report version and active document. |
-| `get_active_document_info` | Title, path, type, unsaved state. |
+| `get_active_document_info` | Title, path, type, unsaved state (`dirty`, null when it cannot be read). |
 | `create_new_document` | New part / assembly / drawing from the default template. |
-| `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw`. |
+| `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw` and wait until it is the active document; reports the opened document and `already_open` (was the file open before the call). |
+| `list_open_documents` / `close_document` | Every open document with title and path; close one without saving, with `only_if_clean` only if it has no unsaved changes. |
 | `save_document` / `save_active_document` | Save-as under the output root / save in place. |
 | `export_document` | STEP, IGES, STL, Parasolid, 3MF, an image of the current view, or PDF of a drawing (every sheet, vector, true sheet size; an image of a drawing is only a window-sized capture). |
 | `rebuild_document` | Rebuild and report failing features. |

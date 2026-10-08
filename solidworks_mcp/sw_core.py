@@ -575,9 +575,9 @@ def require_assembly() -> tuple[Any, Any]:
 def document_info(doc: Any) -> dict[str, Any]:
     doc_type_num = document_type(doc)
     try:
-        dirty = bool(value(doc, "GetSaveFlag"))
+        dirty: bool | None = bool(value(doc, "GetSaveFlag"))
     except Exception:
-        dirty = False
+        dirty = None   # unknown, never "unchanged": a caller may decide to discard on it
     return {
         "title": str(value(doc, "GetTitle")),
         "path": str(value(doc, "GetPathName") or ""),
