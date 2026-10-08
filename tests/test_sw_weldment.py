@@ -250,6 +250,10 @@ class EnumTableTests(unittest.TestCase):
         self.assertEqual(wm.GUSSET_LOCATIONS, {"start": 0, "center": 1, "end": 2})
         self.assertEqual(wm.GUSSET_PROFILES, {"triangle": False, "polygon": True})
 
+    def test_member_corners_leave_trim_to_trim_extend(self) -> None:
+        self.assertEqual(set(wm.MEMBER_CORNER_TREATMENTS), {"none", "miter", "butt1", "butt2"})
+        self.assertTrue(set(wm.MEMBER_CORNER_TREATMENTS) <= set(wm.CORNER_TREATMENTS))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ from .sw_core import (
     clear_selection,
     dispatch_array,
     exit_active_sketch,
+    extension,
     feature_manager,
     feature_property,
     feature_result,
@@ -51,6 +52,7 @@ from .sw_core import (
     get_bodies,
     iter_features,
     latest_sketch,
+    logger,
     mm_point,
     rename_feature,
     require_part,
@@ -58,6 +60,7 @@ from .sw_core import (
     result,
     running_app,
     safe,
+    selectable,
     selected_objects,
     SELECTION_SCHEMA,
     sketch_manager,
@@ -76,6 +79,9 @@ from .sw_core import (
 CONNECTED_SEGMENTS = {"simple_cut": 1, "coped_cut": 2}
 # swSolidworksWeldmentEndCondOptions_e
 CORNER_TREATMENTS = {"none": 0, "miter": 1, "butt1": 2, "butt2": 3, "trim": 4}
+# Corners within a member group: trim needs a trimming boundary and belongs
+# to weldment_trim_extend.
+MEMBER_CORNER_TREATMENTS = ("butt1", "butt2", "miter", "none")
 # swGussetThicknessType_e / swGussetProfileLocationType_e / swGussetProfileType_e
 GUSSET_THICKNESS_DIRECTIONS = {"inner": 0, "both_sides": 1, "outer": 2}
 GUSSET_LOCATIONS = {"start": 0, "center": 1, "end": 2}
@@ -118,14 +124,30 @@ def bodies_summary(doc: Any) -> list[dict[str, Any]]:
     return [dict(body_summary(body), index=index) for index, body in enumerate(get_bodies(doc))]
 
 
-def _ensure_weldment(doc: Any) -> bool:
-    """Add the Weldment feature when the part has none; True if it was added."""
+def _ensure_weldment(doc: Any) -> Any:
+    """Add the Weldment feature when the part has none.
+
+    Returns the added feature, or None when the part already was a weldment,
+    so a failed member can take the feature back out again.
+    """
     if bool(safe(doc, "IsWeldment", False)):
-        return False
-    feature_manager(doc).InsertWeldmentFeature()
+        return None
+    feature = feature_manager(doc).InsertWeldmentFeature()
     if not bool(safe(doc, "IsWeldment", False)):
         raise RuntimeError("SOLIDWORKS did not turn the part into a weldment.")
-    return True
+    return feature
+
+
+def _remove_weldment(doc: Any, feature: Any) -> bool:
+    """Delete a Weldment feature this call added; True if the part is plain again."""
+    clear_selection(doc)
+    try:
+        if bool(selectable(feature).Select2(False, 0)):
+            extension(doc).DeleteSelection2(0)
+    except Exception:
+        logger.info("Could not remove the Weldment feature added for a failed member")
+    clear_selection(doc)
+    return not bool(safe(doc, "IsWeldment", False))
 
 
 def _resolve_profile(app: Any, args: dict[str, Any]) -> Path:
@@ -324,7 +346,7 @@ def list_weldment_profiles(args: dict[str, Any]) -> dict[str, Any]:
         "type": {"type": "string"},
         "size": {"type": "string"},
         "profile_path": {"type": "string", "description": "Full path of a .sldlfp profile instead of standard/type/size."},
-        "corner_treatment": {"type": "string", "enum": sorted(CORNER_TREATMENTS), "default": "miter", "description": "How connected segments meet."},
+        "corner_treatment": {"type": "string", "enum": list(MEMBER_CORNER_TREATMENTS), "default": "miter", "description": "How connected segments meet."},
         "connected_segments": {"type": "string", "enum": sorted(CONNECTED_SEGMENTS), "default": "simple_cut"},
         "allow_protrusion": {"type": "boolean", "default": False},
         "angle_deg": {"type": "number", "default": 0, "description": "Rotate the profile about the path."},
@@ -339,7 +361,37 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
     exit_active_sketch(doc)
     profile = _resolve_profile(app, args)
     segments = _segment_objects(doc, args.get("selection"))
-    added_weldment = _ensure_weldment(doc)
+    if str(args.get("corner_treatment", "miter")) not in MEMBER_CORNER_TREATMENTS:
+        return result(False, f"corner_treatment must be one of {', '.join(MEMBER_CORNER_TREATMENTS)}; trimming is weldment_trim_extend.")
+    weldment = _ensure_weldment(doc)
+    added_weldment = weldment is not None
+    try:
+        feature, before_bodies = _insert_member_group(doc, profile, segments, args)
+    except Exception:
+        if added_weldment:
+            _remove_weldment(doc, weldment)
+        raise
+    rename_feature(feature, args.get("name"))
+    payload = feature_result(doc, feature, "structural member", profile=str(profile), segments=len(segments))
+    if feature is None:
+        payload["message"] += (
+            " Segments of one call must be connected end to end or parallel; the profile must exist; "
+            "a segment that already carries a member of this profile is refused."
+        )
+        if added_weldment:
+            payload["data"]["weldment_removed"] = _remove_weldment(doc, weldment)
+        return payload
+    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
+    payload["data"]["bodies"] = bodies
+    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
+    payload["data"]["weldment_added"] = added_weldment
+    if len(bodies) != len(segments):
+        payload["ok"] = False
+        payload["message"] += f" Expected {len(segments)} new bodies and found {len(bodies)}."
+    return payload
+
+
+def _insert_member_group(doc: Any, profile: Path, segments: list[Any], args: dict[str, Any]) -> tuple[Any, set[str]]:
     manager = feature_manager(doc)
     group = manager.CreateStructuralMemberGroup()
     group.Segments = dispatch_array(segments)
@@ -362,22 +414,7 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
         str(profile), CONNECTED_SEGMENTS[str(args.get("connected_segments", "simple_cut"))],
         bool(args.get("allow_protrusion", False)), dispatch_array([group]),
     )
-    rename_feature(feature, args.get("name"))
-    payload = feature_result(doc, feature, "structural member", profile=str(profile), segments=len(segments))
-    if feature is None:
-        payload["message"] += (
-            " Segments of one call must be connected end to end or parallel; the profile must exist; "
-            "a segment that already carries a member of this profile is refused."
-        )
-        return payload
-    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
-    payload["data"]["bodies"] = bodies
-    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
-    payload["data"]["weldment_added"] = added_weldment
-    if len(bodies) != len(segments):
-        payload["ok"] = False
-        payload["message"] += f" Expected {len(segments)} new bodies and found {len(bodies)}."
-    return payload
+    return feature, before_bodies
 
 
 @tool(
