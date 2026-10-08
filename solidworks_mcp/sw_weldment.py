@@ -155,6 +155,10 @@ def profile_roots(app: Any) -> list[Path]:
         install = Path(str(value(app, "GetExecutablePath") or ""))
     except Exception:
         install = Path()
+    # 2016 SP3 returns the install folder (measured 2026-10-08); the API
+    # documents the path of sldworks.exe, so a file path means its folder.
+    if install.suffix.lower() == ".exe":
+        install = install.parent
     if install.parts:
         for lang in sorted((install / "lang").glob("*")) if (install / "lang").is_dir() else []:
             roots.append(lang / "weldment profiles")

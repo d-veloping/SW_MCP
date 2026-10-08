@@ -74,6 +74,12 @@ class ProfileDiscoveryTests(unittest.TestCase):
         square = next(p for p in profiles if p["type"] == "square tube")
         self.assertEqual(Path(square["path"]).parent.parent.parent, custom)
 
+    def test_profile_roots_accepts_the_executable_path(self) -> None:
+        install = self.tmp / "install"
+        _profile(install / "lang" / "english" / "weldment profiles", "iso", "pipe", "21.3 x 2.3")
+        app = FakeApp("", install / "sldworks.exe")
+        self.assertEqual(wm.profile_roots(app), [install / "lang" / "english" / "weldment profiles"])
+
     def test_profile_roots_skips_missing_folders(self) -> None:
         app = FakeApp(str(self.tmp / "nowhere"), self.tmp / "no-install")
         self.assertEqual(wm.profile_roots(app), [])
