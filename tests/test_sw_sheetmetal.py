@@ -143,6 +143,29 @@ class DxfSummaryTests(unittest.TestCase):
         self.assertEqual(summary["extents_mm"], [5.0, 5.0])
 
 
+class EdgeFlangeCleanupTests(unittest.TestCase):
+    """A failing later edge must not leave the earlier profile sketches behind."""
+
+    def test_earlier_profiles_are_deleted_when_a_later_edge_fails(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        doc = SimpleNamespace(SketchManager=SimpleNamespace(ActiveSketch=None))
+        first = object()
+        draws = [(first, object()), RuntimeError("no profile for that edge")]
+
+        def draw(*_args):
+            outcome = draws.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with mock.patch.object(sm, "require_part", return_value=(None, doc)),                 mock.patch.object(sm, "_require_sheet_metal"),                 mock.patch.object(sm, "_edge_objects", return_value=["e1", "e2"]),                 mock.patch.object(sm, "_draw_flange_profile", side_effect=draw),                 mock.patch.object(sm, "_delete_features") as delete:
+            with self.assertRaises(RuntimeError):
+                sm.sheet_metal_edge_flange({"selection": {"edges": [1, 2]}, "length_mm": 10})
+        delete.assert_called_once_with(doc, [first])
+
+
 class OptionTests(unittest.TestCase):
     def test_export_options_default_to_geometry_and_bend_lines(self) -> None:
         self.assertEqual(sm.export_options({}), sm.EXPORT_GEOMETRY | sm.EXPORT_BEND_LINES)

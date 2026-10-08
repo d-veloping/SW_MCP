@@ -404,6 +404,10 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     inset_mm = args.get("inset_mm")
     chamfer = args.get("chamfer_mm")
     before_bodies = {str(safe(b, "Name", "")) for b in get_bodies(doc)}
+    # BIsChamfer picks chamfer over fillet; BIsCornerTreatment switches the
+    # corner treatment on.  The API help calls corner treatment invalid with
+    # a given offset, but on 2016 SP3 inset_mm 1 with chamfer_mm 2 builds a
+    # chamfered 18 x 18 x 3 plate of 948 mm³ (measured 2026-10-08).
     feature = feature_manager(doc).InsertEndCapFeature3(
         to_m(args["thickness_mm"]), inset_mm is not None, chamfer is not None,
         to_m(inset_mm) if inset_mm is not None else 0.0, float(args.get("inset_ratio", 0.5)),

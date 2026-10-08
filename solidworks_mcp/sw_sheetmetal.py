@@ -333,6 +333,16 @@ def _draw_flange_profile(app: Any, doc: Any, edge: Any, angle_rad: float, flip: 
     sketch_feature = doc.InsertSketchForEdgeFlange(edge, angle_rad, bool(flip))
     if sketch_feature is None:
         raise RuntimeError("SOLIDWORKS could not create the flange profile sketch for that edge.")
+    try:
+        return sketch_feature, _fill_flange_profile(app, doc, sketch_feature, edge, length_m)
+    except Exception:
+        # A sketch that could not be filled is no profile; leave none behind.
+        exit_active_sketch(doc)
+        _delete_features(doc, [sketch_feature])
+        raise
+
+
+def _fill_flange_profile(app: Any, doc: Any, sketch_feature: Any, edge: Any, length_m: float) -> Any:
     sketch = value(sketch_feature, "GetSpecificFeature2")
     start_m, end_m = _edge_endpoints_m(edge)
     start = _to_sketch_space(app, sketch, start_m)
@@ -355,7 +365,7 @@ def _draw_flange_profile(app: Any, doc: Any, edge: Any, angle_rad: float, flip: 
         doc.SetDisplayWhenAdded(True)
         doc.SetAddToDB(False)
         doc.InsertSketch2(True)
-    return sketch_feature, sketch
+    return sketch
 
 
 def _delete_features(doc: Any, features: list[Any]) -> None:
@@ -623,10 +633,15 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
 
     sketch_features: list[Any] = []
     sketches: list[Any] = []
-    for edge in edges:
-        sketch_feature, sketch = _draw_flange_profile(app, doc, edge, angle, bool(args.get("flip", False)), length)
-        sketch_features.append(sketch_feature)
-        sketches.append(sketch)
+    try:
+        for edge in edges:
+            sketch_feature, sketch = _draw_flange_profile(app, doc, edge, angle, bool(args.get("flip", False)), length)
+            sketch_features.append(sketch_feature)
+            sketches.append(sketch)
+    except Exception:
+        # The profiles of the earlier edges are useless without the flange.
+        _delete_features(doc, sketch_features)
+        raise
 
     clear_selection(doc)
     feature, created = _build(
