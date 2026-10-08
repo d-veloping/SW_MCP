@@ -40,7 +40,9 @@ from typing import Any
 from .sw_core import (
     apply_selection,
     as_list,
+    body_extents,
     body_volume_mm3,
+    box_mm,
     clear_selection,
     dispatch_array,
     exit_active_sketch,
@@ -53,7 +55,6 @@ from .sw_core import (
     iter_features,
     latest_sketch,
     logger,
-    mm_point,
     rename_feature,
     require_part,
     require_selection,
@@ -107,13 +108,11 @@ def _feature_names(doc: Any) -> list[str]:
 
 
 def body_summary(body: Any) -> dict[str, Any]:
-    """Name, bounding box and volume of one body, measured on the body itself."""
+    """Name, exact bounding box and volume of one body, measured on the body itself."""
     entry: dict[str, Any] = {"name": str(safe(body, "Name", "") or "")}
-    box = safe(body, "GetBodyBox")
-    if box is not None and len(box) >= 6:
-        entry["min_mm"] = mm_point(box[0:3])
-        entry["max_mm"] = mm_point(box[3:6])
-        entry["size_mm"] = [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)]
+    box = body_extents(body)
+    if box is not None:
+        entry.update(box_mm(box))
     volume = body_volume_mm3(body)
     if volume is not None:
         entry["volume_mm3"] = volume
@@ -122,6 +121,25 @@ def body_summary(body: Any) -> dict[str, Any]:
 
 def bodies_summary(doc: Any) -> list[dict[str, Any]]:
     return [dict(body_summary(body), index=index) for index, body in enumerate(get_bodies(doc))]
+
+
+def bodies_unchanged(before: dict[str, dict[str, Any]], after: list[dict[str, Any]]) -> bool:
+    """True when a feature provably left every body as it was.
+
+    The judge is the per-body volume: a trim that cuts moves volume between
+    the two members, a trim that splits adds a body, and SOLIDWORKS renames
+    the bodies it touched.  Boxes are not consulted, and a body whose volume
+    is unknown on either side cannot be called unchanged.
+    """
+    if len(after) != len(before):
+        return False
+    for body in after:
+        previous = before.get(body["name"])
+        if previous is None or "volume_mm3" not in previous or "volume_mm3" not in body:
+            return False
+        if abs(previous["volume_mm3"] - body["volume_mm3"]) > 1e-3:
+            return False
+    return True
 
 
 def _ensure_weldment(doc: Any) -> Any:
@@ -541,12 +559,7 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     payload["data"]["bodies"] = bodies
     payload["data"]["trimmed_bodies"] = [b for b in bodies if b["name"].startswith(feature_name)]
     payload["data"]["bodies_before"] = list(before)
-    unchanged = all(
-        b["name"] in before and before[b["name"]].get("size_mm") == b.get("size_mm")
-        and before[b["name"]].get("volume_mm3") == b.get("volume_mm3")
-        for b in bodies
-    ) and len(bodies) == len(before)
-    if unchanged:
+    if bodies_unchanged(before, bodies):
         payload["ok"] = False
         payload["message"] += (
             f" No body changed: with corner_type {corner_type} nothing was trimmed. A face or plane boundary "

@@ -490,6 +490,10 @@ def byref_long(initial: int = 0) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
 
 
+def byref_double(initial: float = 0.0) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_R8, initial)
+
+
 def as_list(com_array: Any) -> list[Any]:
     """Normalise the several shapes SOLIDWORKS uses for 'array or nothing'."""
     if com_array is None:
@@ -978,6 +982,51 @@ def body_volume_mm3(body: Any) -> float | None:
         return round(float(properties[3]) * 1e9, 4)
     except Exception:
         return None
+
+
+def body_extents(body: Any) -> list[float] | None:
+    """Exact bounding box of one body, [xmin, ymin, zmin, xmax, ymax, zmax] in metres.
+
+    IBody2::GetExtremePoint evaluates the body's farthest point along a
+    direction on the exact geometry (six calls, one per half-axis).
+    IBody2::GetBodyBox and IPartDoc::GetPartBox are documented as approximate
+    and may shift between rebuilds, so no size a caller compares comes from
+    them.  None when SOLIDWORKS finds no extreme point or refuses the call.
+    """
+    flag_methods(body, "GetExtremePoint")
+    low: list[float] = []
+    high: list[float] = []
+    for axis in range(3):
+        for sign, target in ((-1.0, low), (1.0, high)):
+            direction = [0.0, 0.0, 0.0]
+            direction[axis] = sign
+            point = [byref_double() for _ in range(3)]
+            try:
+                found = body.GetExtremePoint(*direction, *point)
+            except Exception:
+                return None
+            if not found:
+                return None
+            target.append(float(point[axis].value))
+    return low + high
+
+
+def bodies_extents(bodies: Sequence[Any]) -> list[float] | None:
+    """Union of the exact boxes of several bodies; None without bodies or when one is unknown."""
+    boxes = [body_extents(body) for body in bodies]
+    if not boxes or any(box is None for box in boxes):
+        return None
+    known = [box for box in boxes if box is not None]
+    return [min(box[i] for box in known) for i in range(3)] + [max(box[i + 3] for box in known) for i in range(3)]
+
+
+def box_mm(box: Sequence[float]) -> dict[str, list[float]]:
+    """min_mm, max_mm and size_mm of a metre box, rounded as the tools report them."""
+    return {
+        "min_mm": mm_point(box[0:3]),
+        "max_mm": mm_point(box[3:6]),
+        "size_mm": [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)],
+    }
 
 
 def volume_total_mm3(bodies: list[dict[str, Any]]) -> float | None:

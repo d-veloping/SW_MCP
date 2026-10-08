@@ -53,6 +53,8 @@ from typing import Any
 import pythoncom
 
 from .sw_core import (
+    bodies_extents,
+    box_mm,
     clear_selection,
     dispatch_array,
     double_array,
@@ -62,6 +64,7 @@ from .sw_core import (
     feature_property,
     feature_result,
     flag_methods,
+    get_bodies,
     iter_edge_objects,
     iter_face_objects,
     iter_feature_objects,
@@ -205,11 +208,12 @@ def _volume_mm3(doc: Any) -> float | None:
 
 
 def _size_mm(doc: Any) -> list[float] | None:
+    """Exact overall size of the part's solid bodies, from their extreme points."""
     try:
-        box = doc.GetPartBox(True)
-        return [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)]
+        box = bodies_extents(get_bodies(doc))
     except Exception:
         return None
+    return None if box is None else box_mm(box)["size_mm"]
 
 
 def _sheet_result(doc: Any, feature: Any, action: str, **data: Any) -> dict[str, Any]:

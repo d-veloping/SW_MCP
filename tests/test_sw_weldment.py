@@ -241,6 +241,84 @@ class BodyVolumeTests(unittest.TestCase):
         self.assertEqual(data["bodies"][0]["volume_mm3"], 1000.0)
 
 
+class FakeBodyWithExtremes:
+    """A body that answers GetExtremePoint from a box and has no GetBodyBox at all."""
+
+    def __init__(self, box_m: list[float] | None, volume_m3: float | None = None) -> None:
+        self.box_m = box_m
+        self.volume_m3 = volume_m3
+        self.Name = "Body1"
+
+    def _FlagAsMethod(self, name: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def GetExtremePoint(self, dx, dy, dz, x, y, z):  # noqa: N802 - COM member name
+        if self.box_m is None:
+            return False
+        for axis, (direction, out) in enumerate(((dx, x), (dy, y), (dz, z))):
+            out.value = self.box_m[axis + 3] if direction > 0 else self.box_m[axis]
+        return True
+
+    def GetMassProperties(self, density: float):  # noqa: N802 - COM member name
+        if self.volume_m3 is None:
+            raise RuntimeError("no mass properties")
+        return (0.0, 0.0, 0.0, self.volume_m3, 0.0, self.volume_m3 * density)
+
+
+class BodyExtentsTests(unittest.TestCase):
+    """Boxes come from the exact extreme points, never from the approximate GetBodyBox."""
+
+    def test_body_extents_reads_the_six_extreme_points(self) -> None:
+        body = FakeBodyWithExtremes([0.0, -0.002, 0.0, 0.052, 0.030, 0.040])
+        self.assertEqual(sw_core.body_extents(body), [0.0, -0.002, 0.0, 0.052, 0.030, 0.040])
+
+    def test_body_extents_is_unknown_when_no_extreme_point_is_found(self) -> None:
+        self.assertIsNone(sw_core.body_extents(FakeBodyWithExtremes(None)))
+
+    def test_bodies_extents_is_the_union_and_unknown_when_one_body_is(self) -> None:
+        first = FakeBodyWithExtremes([0.0, 0.0, 0.0, 0.010, 0.010, 0.010])
+        second = FakeBodyWithExtremes([-0.005, 0.0, 0.0, 0.004, 0.020, 0.010])
+        self.assertEqual(sw_core.bodies_extents([first, second]), [-0.005, 0.0, 0.0, 0.010, 0.020, 0.010])
+        self.assertIsNone(sw_core.bodies_extents([first, FakeBodyWithExtremes(None)]))
+        self.assertIsNone(sw_core.bodies_extents([]))
+
+    def test_body_summary_reports_the_exact_box_in_millimetres(self) -> None:
+        entry = wm.body_summary(FakeBodyWithExtremes([0.0, -0.002, 0.0, 0.052, 0.030, 0.040], 1e-6))
+        self.assertEqual(entry["min_mm"], [0.0, -2.0, 0.0])
+        self.assertEqual(entry["max_mm"], [52.0, 30.0, 40.0])
+        self.assertEqual(entry["size_mm"], [52.0, 32.0, 40.0])
+        self.assertEqual(entry["volume_mm3"], 1000.0)
+
+    def test_body_summary_omits_the_box_when_unknown(self) -> None:
+        entry = wm.body_summary(FakeBodyWithExtremes(None, 1e-6))
+        self.assertNotIn("size_mm", entry)
+        self.assertEqual(entry["volume_mm3"], 1000.0)
+
+
+class TrimNoOpTests(unittest.TestCase):
+    """A trim that changed nothing is judged by the per-body volumes alone."""
+
+    before = {"a": {"name": "a", "volume_mm3": 1000.0, "size_mm": [10.0, 10.0, 10.0]},
+              "b": {"name": "b", "volume_mm3": 2000.0, "size_mm": [10.0, 10.0, 20.0]}}
+
+    def test_same_volumes_are_unchanged_even_when_boxes_moved(self) -> None:
+        after = [{"name": "a", "volume_mm3": 1000.0, "size_mm": [10.0, 10.000003, 10.0]},
+                 {"name": "b", "volume_mm3": 2000.0004, "size_mm": [10.0, 10.0, 20.0]}]
+        self.assertTrue(wm.bodies_unchanged(self.before, after))
+
+    def test_a_moved_volume_is_a_change(self) -> None:
+        after = [{"name": "a", "volume_mm3": 900.0}, {"name": "b", "volume_mm3": 2100.0}]
+        self.assertFalse(wm.bodies_unchanged(self.before, after))
+
+    def test_a_new_or_renamed_body_is_a_change(self) -> None:
+        self.assertFalse(wm.bodies_unchanged(self.before, [{"name": "a", "volume_mm3": 1000.0}]))
+        self.assertFalse(wm.bodies_unchanged(self.before, [{"name": "a", "volume_mm3": 1000.0}, {"name": "Trim1[1]", "volume_mm3": 2000.0}]))
+
+    def test_an_unknown_volume_cannot_prove_no_change(self) -> None:
+        after = [{"name": "a", "volume_mm3": 1000.0}, {"name": "b"}]
+        self.assertFalse(wm.bodies_unchanged(self.before, after))
+
+
 class EnumTableTests(unittest.TestCase):
     def test_enum_tables_match_the_type_library(self) -> None:
         self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})

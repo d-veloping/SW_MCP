@@ -175,7 +175,9 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 Every one of these is judged by geometry: the tools report the body volume and
 bounding box after the feature, because several of the sheet metal API calls
 raise on return even when they have built the feature, and others return
-nothing at all when they have not.
+nothing at all when they have not. The box comes from `IBody2::GetExtremePoint`
+(six calls per body, exact on the geometry); `GetPartBox` and `GetBodyBox` are
+documented as approximate and are not used for a size anybody compares.
 
 ### Weldments
 | Tool | Purpose |
