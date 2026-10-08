@@ -63,6 +63,7 @@ from .sw_core import (
     SELECTION_SCHEMA,
     sketch_manager,
     sketch_segment_objects,
+    to_deg,
     to_m,
     to_mm,
     to_rad,
@@ -74,6 +75,9 @@ from .sw_core import (
 
 # swConnectedSegmentsOption_e
 CONNECTED_SEGMENTS = {"simple_cut": 1, "coped_cut": 2}
+# swEndCapExtend_e, as InsertEndCapFeature3 takes it and IsEndCapInward returns it
+END_CAP_OUTWARD = 0
+END_CAP_INWARD = 1
 # swSolidworksWeldmentEndCondOptions_e
 CORNER_TREATMENTS = {"none": 0, "miter": 1, "butt1": 2, "butt2": 3, "trim": 4}
 # Corners within a member group: trim needs a trimming boundary and belongs
@@ -444,7 +448,53 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
     if len(bodies) != len(segments):
         payload["ok"] = False
         payload["message"] += f" Expected {len(segments)} new bodies and found {len(bodies)}."
+    applied = member_readback(feature)
+    if applied is not None:
+        payload["data"]["member"] = applied
+    treatment = str(args.get("corner_treatment", "miter"))
+    wanted = {
+        "profile_path": str(profile),
+        "connected_segments": str(args.get("connected_segments", "simple_cut")),
+        "allow_protrusion": bool(args.get("allow_protrusion", False)),
+        "groups": 1,
+        "corner_treatment": treatment,
+        "angle_deg": float(args.get("angle_deg", 0)),
+        "mirror_profile": bool(args.get("mirror_profile", False)),
+        "gap_mm": float(args.get("gap_mm", 0)),
+    }
+    mismatches = readback_mismatches(wanted, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload
+
+
+def member_readback(feature: Any) -> dict[str, Any] | None:
+    """What the structural member feature says it holds, from its definition and its one group.
+
+    The groups are the ``Groups`` property of IStructuralMemberFeatureData
+    (``GetGroups`` does not resolve through late binding on 2016 SP3).
+    """
+    definition = safe(feature, "GetDefinition")
+    if definition is None:
+        return None
+    connected_names = {v: k for k, v in CONNECTED_SEGMENTS.items()}
+    applied: dict[str, Any] = {
+        "profile_path": str(safe(definition, "WeldmentProfilePath", "") or ""),
+        "connected_segments": connected_names.get(int(safe(definition, "ConnectedSegmentsOption", 0) or 0)),
+        "allow_protrusion": bool(safe(definition, "AllowProtrusion", False)),
+    }
+    groups = as_list(safe(definition, "Groups"))
+    applied["groups"] = len(groups)
+    if groups:
+        group = groups[0]
+        treatment_names = {v: k for k, v in CORNER_TREATMENTS.items()}
+        apply = bool(safe(group, "ApplyCornerTreatment", False))
+        applied["corner_treatment"] = treatment_names.get(int(safe(group, "CornerTreatmentType", 0) or 0)) if apply else "none"
+        applied["angle_deg"] = round(to_deg(safe(group, "Angle", 0.0) or 0.0), 6)
+        applied["mirror_profile"] = bool(safe(group, "MirrorProfile", False))
+        applied["gap_mm"] = round(to_mm(safe(group, "GapWithinGroup", 0.0) or 0.0), 6)
+    return applied
 
 
 def _insert_member_group(doc: Any, profile: Path, segments: list[Any], args: dict[str, Any]) -> tuple[Any, set[str]]:
@@ -484,8 +534,8 @@ def _insert_member_group(doc: Any, profile: Path, segments: list[Any], args: dic
         "inset_ratio": {"type": "number", "default": 0.5, "minimum": 0, "description": "Inset as a ratio of the wall thickness."},
         "inset_mm": {"type": "number", "minimum": 0, "description": "Inset as a distance instead of a ratio."},
         "chamfer_mm": {"type": "number", "minimum": 0, "description": "Chamfer the plate corners by this distance."},
-        "inward": {"type": "boolean", "default": False, "description": "Sink the plate into the member instead of adding it beyond the end."},
-        "reverse": {"type": "boolean", "default": False},
+        "inward": {"type": "boolean", "default": False, "description": "Sink the plate into the member instead of adding it beyond the end; the member is cut back and reported among the changed bodies."},
+        "reverse": {"type": "boolean", "default": False, "description": "Read back as set; on 2016 SP3 it did not move the plate (measured)."},
         "name": {"type": "string"},
     },
     ["selection", "thickness_mm"],
@@ -496,45 +546,61 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     count = require_selection(doc, args["selection"])
     inset_mm = args.get("inset_mm")
     chamfer = args.get("chamfer_mm")
+    inward = bool(args.get("inward", False))
     before_bodies = {str(safe(b, "Name", "")) for b in get_bodies(doc)}
     # BIsChamfer picks chamfer over fillet; BIsCornerTreatment switches the
     # corner treatment on.  The API help calls corner treatment invalid with
     # a given offset, but on 2016 SP3 inset_mm 1 with chamfer_mm 2 builds a
-    # chamfered 18 x 18 x 3 plate of 948 mm³ (measured 2026-10-08).
+    # chamfered 18 x 18 x 3 plate of 948 mm³ (measured 2026-10-08).  The last
+    # argument is swEndCapExtend_e, an integer (0 outward, 1 inward), and
+    # IsEndCapInward reads it back as that integer.
     feature = feature_manager(doc).InsertEndCapFeature3(
         to_m(args["thickness_mm"]), inset_mm is not None, chamfer is not None,
         to_m(inset_mm) if inset_mm is not None else 0.0, float(args.get("inset_ratio", 0.5)),
         to_m(chamfer) if chamfer is not None else 0.0,
-        chamfer is not None, 0.0, bool(args.get("reverse", False)), bool(args.get("inward", False)),
+        chamfer is not None, 0.0, bool(args.get("reverse", False)), END_CAP_INWARD if inward else END_CAP_OUTWARD,
     )
     rename_feature(feature, args.get("name"))
     payload = feature_result(doc, feature, "end cap", faces=count, thickness_mm=args["thickness_mm"])
     if feature is None:
         payload["message"] += " Select the planar end face of a structural member."
         return payload
-    bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
+    after = bodies_summary(doc)
+    bodies = [b for b in after if b["name"] not in before_bodies]
     payload["data"]["bodies"] = bodies
-    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
+    # An inward cap cuts the member back, which renames that body too, so the
+    # plate volume is only the sum of the new bodies for an outward cap.
+    added = len(after) - len(before_bodies)
+    payload["data"]["bodies_added"] = added
+    if not inward:
+        payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     definition = safe(feature, "GetDefinition")
     applied = None
     if definition is not None:
         applied = {
             "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
+            "inset_by_ratio": bool(safe(definition, "UseThicknessRatioForOffset", False)),
             "inset_ratio": safe(definition, "ThicknessRatioForOffset"),
             "inset_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
             "chamfered": bool(safe(definition, "UseChamferCorners", False)),
-            "inward": bool(safe(definition, "IsEndCapInward", False)),
+            "chamfer_mm": round(to_mm(safe(definition, "ChamferDistance", 0.0) or 0.0), 6),
+            "reverse": bool(safe(definition, "UseReverse", False)),
+            "inward": int(safe(definition, "IsEndCapInward", 0) or 0),
         }
         payload["data"]["end_cap"] = applied
     # One plate per selected end face, and the plate as asked for.
-    if len(bodies) != count:
+    if added != count:
         payload["ok"] = False
-        payload["message"] += f" Expected {count} new end cap bodies and found {len(bodies)}."
+        payload["message"] += f" Expected {count} new end cap bodies and found {added}."
     wanted = {
         "thickness_mm": float(args["thickness_mm"]),
+        "inset_by_ratio": inset_mm is None,
+        "inset_ratio": float(args.get("inset_ratio", 0.5)) if inset_mm is None else None,
         "inset_mm": float(inset_mm) if inset_mm is not None else None,
         "chamfered": chamfer is not None,
-        "inward": bool(args["inward"]) if args.get("inward") is not None else None,
+        "chamfer_mm": float(chamfer) if chamfer is not None else None,
+        "reverse": bool(args.get("reverse", False)),
+        "inward": END_CAP_INWARD if inward else END_CAP_OUTWARD,
     }
     mismatches = readback_mismatches(wanted, applied)
     if mismatches:

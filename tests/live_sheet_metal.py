@@ -229,9 +229,53 @@ def part_b() -> None:
         running_app().CloseDoc(str(value(doc, "GetTitle") or title))
 
 
+def part_c() -> None:
+    """The option surface: an edge flange and a miter flange with nothing left at its default."""
+    print("Part C: options")
+    require(create_new_document({"kind": "part"}), "create_new_document")
+    _, doc = active_document()
+    title = str(value(doc, "GetTitle"))
+    try:
+        require(create_sketch({"plane": "front"}), "create_sketch")
+        require(draw_line({"x1_mm": 0, "y1_mm": 0, "x2_mm": 50, "y2_mm": 0}), "draw_line")
+        require(draw_line({"x1_mm": 50, "y1_mm": 0, "x2_mm": 50, "y2_mm": 30}), "draw_line")
+        require(close_sketch({}), "close_sketch")
+        require(sheet_metal_base_flange({"thickness_mm": 2, "bend_radius_mm": 1, "depth_mm": 40}), "sheet_metal_base_flange")
+        flange = require(sheet_metal_edge_flange({
+            "selection": {"edges": [edge_at([0, 0, 20])]}, "length_mm": 12, "angle_deg": 60, "bend_radius_mm": 2,
+            "position": "material_inside", "relief_type": "obround", "relief_ratio": 0.4,
+        }), "sheet_metal_edge_flange(options)")
+        applied = flange["data"]["flange"]
+        check("edge flange angle read back", applied["angle_deg"], 60.0, 1e-6)
+        check("edge flange radius read back", applied["bend_radius_mm"], 2.0, 1e-6)
+        check("edge flange position read back", applied["position"], "material_inside")
+        check("edge flange length read back from the inner virtual sharp", applied["length_mm"], 12.0, 1e-6)
+        check("edge flange relief ratio read back", applied["relief_ratio"], 0.4, 1e-6)
+        # A 60-degree flange of 12 mm from the inner sharp, material inside, radius 2, on a 2 mm sheet
+        # reaches 57.42265 mm in x (measured 2026-10-08); the default bend_outside reaches 60.309401.
+        check("edge flange reach with material inside", flange["data"]["size_mm"][0], 57.42265)
+
+        require(create_sketch({"plane": "front"}), "create_sketch(front)")
+        require(draw_line({"x1_mm": 52, "y1_mm": 30, "x2_mm": 67, "y2_mm": 30}), "draw_line(miter)")
+        require(close_sketch({}), "close_sketch")
+        miter = require(sheet_metal_miter_flange({
+            "selection": {"edges": [edge_at([52, 30, 20])]}, "bend_radius_mm": 2, "gap_mm": 1, "position": "material_outside",
+            "trim_side_bends": False, "start_offset_mm": 5, "end_offset_mm": 3, "relief_type": "obround", "relief_ratio": 0.6,
+        }), "sheet_metal_miter_flange(options)")
+        applied = miter["data"]["flange"]
+        check("miter flange radius, gap, offsets read back", [applied["bend_radius_mm"], applied["gap_mm"], applied["start_offset_mm"], applied["end_offset_mm"]], [2.0, 1.0, 5.0, 3.0])
+        check("miter flange position and relief read back", [applied["position"], applied["relief_type"], applied["relief_ratio"]], ["material_outside", "obround", 0.6])
+        check("miter flange leaves the offsets free: depth 40 - 5 - 3", miter["data"]["size_mm"][2], 40.0)
+        # The part box: the miter reaches x = 67, the edge flange 5.42265 beyond x = 0.
+        check("miter flange reach 67 plus the edge flange beyond x = 0", miter["data"]["size_mm"][0], 67.0 + (57.42265 - 52.0))
+    finally:
+        running_app().CloseDoc(str(value(doc, "GetTitle") or title))
+
+
 def main() -> int:
     part_a()
     part_b()
+    part_c()
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")
     for label, _, detail in failed:

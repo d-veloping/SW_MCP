@@ -367,6 +367,20 @@ class TrimBodyAccountingTests(unittest.TestCase):
         self.assertEqual(wm.untouched_targets({"m3": None}, after), [])
 
 
+class ReadmeToolCountTests(unittest.TestCase):
+    """The tool count in the README is the registry's count, not a number somebody typed."""
+
+    def test_readme_names_the_registered_tool_count(self) -> None:
+        import re
+
+        from solidworks_mcp import server
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        match = re.search(r"^(\d+) tools:", readme, re.MULTILINE)
+        self.assertIsNotNone(match, "README.md has no '<n> tools:' line")
+        self.assertEqual(int(match.group(1)), len(server.TOOLS))
+
+
 class EnumTableTests(unittest.TestCase):
     def test_enum_tables_hold_the_measured_values(self) -> None:
         self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})

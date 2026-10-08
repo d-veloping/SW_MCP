@@ -33,6 +33,7 @@ keeps its mitre).  The part is closed without saving.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,39 @@ def main() -> int:
         if third_after:
             check("trimmed member top at z = -10", third_after[0]["max_mm"][2], -10.0)
             check("trimmed member volume = A * 140", third_after[0]["volume_mm3"], area * 140, 0.3)
+
+        # The option surface of members and end caps, on a second pair: butt2
+        # corner, profile turned 30 degrees and mirrored, 2 mm gap; a cap with
+        # ratio inset, chamfer and reverse, and one inset by distance, inward.
+        sketch2 = require(create_3d_sketch({"lines": [
+            {"x1_mm": 0, "y1_mm": 400, "z1_mm": 0, "x2_mm": 300, "y2_mm": 400, "z2_mm": 0},
+            {"x1_mm": 300, "y1_mm": 400, "z1_mm": 0, "x2_mm": 300, "y2_mm": 600, "z2_mm": 0},
+        ]}), "create_3d_sketch(options)")
+        turned = require(weldment_structural_member({
+            "selection": {"sketch_segments": [0, 1], "sketch_name": sketch2["data"]["sketch"]},
+            "standard": "iso", "type": "square tube", "size": "20 x 20 x 2",
+            "corner_treatment": "butt2", "angle_deg": 30, "mirror_profile": True, "gap_mm": 2,
+            "connected_segments": "coped_cut", "allow_protrusion": True,
+        }), "weldment_structural_member(options)")
+        member = turned["data"]["member"]
+        check("member options read back", [member["corner_treatment"], member["angle_deg"], member["mirror_profile"], member["gap_mm"], member["connected_segments"], member["allow_protrusion"]],
+              ["butt2", 30.0, True, 2.0, "coped_cut", True])
+        check("member profile path read back", member["profile_path"].lower().endswith("20 x 20 x 2.sldlfp"), True)
+        # A 20 x 20 tube with 4 mm outer corner radius turned 30 degrees spans 2 * (6 * (cos 30 + sin 30) + 4) = 24.3923 mm.
+        turned_side = 2 * (6 * (math.cos(math.radians(30)) + math.sin(math.radians(30))) + 4)
+        check("turned profile widens the member box", turned["data"]["bodies"][0]["size_mm"][2], turned_side)
+        far_end = face_where([-1, 0, 0], lambda p: abs(p[0]) < 1e-3 and p[1] > 300)
+        cap2 = require(weldment_end_cap({"selection": {"faces": [int(far_end["index"])]}, "thickness_mm": 4, "inset_ratio": 0.3, "chamfer_mm": 2, "reverse": True}), "weldment_end_cap(ratio, chamfer, reverse)")
+        applied = cap2["data"]["end_cap"]
+        check("end cap ratio inset, chamfer and reverse read back", [applied["inset_by_ratio"], applied["inset_ratio"], applied["chamfer_mm"], applied["chamfered"], applied["reverse"], applied["inward"]],
+              [True, 0.3, 2.0, True, True, 0])
+        # reverse is read back as set, but on 2016 SP3 the plate stays beyond the end (measured 2026-10-08).
+        check("end cap with reverse still sits beyond the end", cap2["data"]["bodies"][0]["min_mm"][0], -4.0)
+        top_end = face_where([0, 1, 0], lambda p: abs(p[1] - 600) < 1e-3)
+        cap3 = require(weldment_end_cap({"selection": {"faces": [int(top_end["index"])]}, "thickness_mm": 4, "inset_mm": 1.5, "inward": True}), "weldment_end_cap(distance, inward)")
+        applied = cap3["data"]["end_cap"]
+        check("end cap distance inset and inward read back", [applied["inset_by_ratio"], applied["inset_mm"], applied["inward"]], [False, 1.5, 1])
+        check("inward end cap adds one body and recuts the member", cap3["data"]["bodies_added"], 1)
 
         # Trimming against a reference plane: the first member, 300 mm along
         # x, cut at a plane 150 mm from the right plane (x = 0) keeps 150 mm.

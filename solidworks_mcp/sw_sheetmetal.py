@@ -95,8 +95,12 @@ from .sw_core import (
 
 # swFlangePositionTypes_e
 FLANGE_POSITIONS = {"material_inside": 1, "material_outside": 2, "bend_outside": 3}
-# swFlangeDimTypes_e
-FLANGE_LENGTH_REFERENCES = {"outer_virtual_sharp": 1, "inner_virtual_sharp": 2, "bend_tangent": 3}
+# swFlangeDimTypes_e.  InsertSheetMetalEdgeFlange2 measures its length from
+# the inner virtual sharp whatever dim type it is given: outer_virtual_sharp
+# builds the same geometry and only reads back length + t*tan(angle/2), and
+# bend_tangent builds nothing (measured on 2016 SP3, 2026-10-08).  The tool
+# therefore always passes the inner virtual sharp.
+FLANGE_LENGTH_INNER_VIRTUAL_SHARP = 2
 # swSheetMetalReliefTypes_e
 RELIEF_TYPES = {"rectangular": 1, "tear": 2, "obround": 3, "none": 4}
 # swInsertEdgeFlangeOptions_e
@@ -625,7 +629,7 @@ def sheet_metal_base_flange(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "sheet_metal_edge_flange",
     "Add a flange along one or more straight edges of the sheet metal body, bent up from the face the "
-    "edge belongs to. length_mm is the flange height measured as length_reference says; angle_deg is the "
+    "edge belongs to. length_mm is the flange height measured from the inner virtual sharp of the bend; angle_deg is the "
     "bend angle (90 = perpendicular). Put the edges in selection.edges from list_edges; use an edge of "
     "the face the flange should rise from, and flip when it goes the wrong way. Several edges give one "
     "feature with one flange each.",
@@ -639,11 +643,7 @@ def sheet_metal_base_flange(args: dict[str, Any]) -> dict[str, Any]:
             "description": "Where the bend sits relative to the edge: material_inside keeps the outer face flush with the edge, "
                            "material_outside keeps the inner face flush, bend_outside puts the whole bend beyond the edge.",
         },
-        "length_reference": {
-            "type": "string", "enum": sorted(FLANGE_LENGTH_REFERENCES), "default": "inner_virtual_sharp",
-            "description": "What length_mm is measured from: the inner or outer virtual sharp of the bend, or the bend tangent line.",
-        },
-        "flip": {"type": "boolean", "default": False, "description": "Bend towards the other side of the sheet."},
+        "flip": {"type": "boolean", "default": False, "description": "Bend towards the other side of the sheet (not read back; check the box)."},
         "relief_type": {"type": "string", "enum": sorted(RELIEF_TYPES), "description": "Bend relief. Defaults to the part's automatic relief."},
         "relief_ratio": {"type": "number", "default": 0.5, "description": "Relief width as a ratio of the thickness, when relief_type is given."},
         "name": {"type": "string"},
@@ -661,7 +661,7 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
     angle = to_rad(args.get("angle_deg", 90))
     length = to_m(args["length_mm"])
     position = FLANGE_POSITIONS[str(args.get("position", "bend_outside"))]
-    reference = FLANGE_LENGTH_REFERENCES[str(args.get("length_reference", "inner_virtual_sharp"))]
+    reference = FLANGE_LENGTH_INNER_VIRTUAL_SHARP
 
     options = 0
     radius_mm = args.get("bend_radius_mm")
@@ -716,7 +716,37 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
             payload["message"] += " The profile sketches could not all be removed; see list_sketches."
         return payload
     rename_feature(feature, args.get("name"))
-    return _sheet_result(doc, feature, "edge flange", edges=indices, length_mm=args["length_mm"], angle_deg=args.get("angle_deg", 90))
+    payload = _sheet_result(doc, feature, "edge flange", edges=indices, length_mm=args["length_mm"], angle_deg=args.get("angle_deg", 90))
+    definition = _definition(feature)
+    applied = None
+    if definition is not None:
+        position_names = {v: k for k, v in FLANGE_POSITIONS.items()}
+        applied = {
+            "angle_deg": round(to_deg(safe(definition, "BendAngle", 0.0) or 0.0), 6),
+            "bend_radius_mm": round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6),
+            "default_radius": bool(safe(definition, "UseDefaultBendRadius", False)),
+            "position": position_names.get(int(safe(definition, "PositionType", 0) or 0)),
+            "length_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
+            "length_reference": int(safe(definition, "OffsetDimType", 0) or 0),
+            "relief_ratio": safe(definition, "ReliefRatio"),
+        }
+        payload["data"]["flange"] = applied
+    # Everything the call set is held against the readback; flip and the
+    # relief type have no readback on 2016 and are left to the geometry.
+    wanted = {
+        "angle_deg": float(args.get("angle_deg", 90)),
+        "bend_radius_mm": float(radius_mm) if radius_mm else None,
+        "default_radius": not radius_mm,
+        "position": str(args.get("position", "bend_outside")),
+        "length_mm": float(args["length_mm"]),
+        "length_reference": FLANGE_LENGTH_INNER_VIRTUAL_SHARP,
+        "relief_ratio": ratio if relief_name else None,
+    }
+    mismatches = readback_mismatches(wanted, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
+    return payload
 
 
 @tool(
@@ -731,7 +761,7 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
         "bend_radius_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Defaults to the part's sheet metal radius."},
         "gap_mm": {"type": "number", "default": 0.5, "minimum": 0, "description": "Rip gap at the mitred corners."},
         "position": {"type": "string", "enum": sorted(FLANGE_POSITIONS), "default": "material_inside"},
-        "trim_side_bends": {"type": "boolean", "default": True},
+        "trim_side_bends": {"type": "boolean", "default": True, "description": "Not read back on 2016; judge it by the geometry."},
         "start_offset_mm": {"type": "number", "default": 0, "minimum": 0, "description": "Leave this much of the edge free at its start."},
         "end_offset_mm": {"type": "number", "default": 0, "minimum": 0},
         "relief_type": {"type": "string", "enum": ["rectangular", "tear", "obround"], "description": "Defaults to the part's automatic relief."},
@@ -774,6 +804,37 @@ def sheet_metal_miter_flange(args: dict[str, Any]) -> dict[str, Any]:
             " The profile must be an open chain of lines on a plane perpendicular to the first edge, "
             "starting on that edge, and the edges must be straight and connected."
         )
+        return payload
+    definition = _definition(feature)
+    applied = None
+    if definition is not None:
+        position_names = {v: k for k, v in FLANGE_POSITIONS.items()}
+        relief_names = {v: k for k, v in RELIEF_TYPES.items()}
+        applied = {
+            "bend_radius_mm": round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6),
+            "default_radius": bool(safe(definition, "UseDefaultBendRadius", False)),
+            "gap_mm": round(to_mm(safe(definition, "GapDistance", 0.0) or 0.0), 6),
+            "position": position_names.get(int(safe(definition, "PositionType", 0) or 0)),
+            "start_offset_mm": round(to_mm(safe(definition, "StartOffset", 0.0) or 0.0), 6),
+            "end_offset_mm": round(to_mm(safe(definition, "EndOffset", 0.0) or 0.0), 6),
+            "relief_type": relief_names.get(int(safe(definition, "ReliefType", 0) or 0)),
+            "relief_ratio": safe(definition, "ReliefRatio"),
+        }
+        payload["data"]["flange"] = applied
+    wanted = {
+        "bend_radius_mm": float(radius_mm) if radius_mm else None,
+        "default_radius": not radius_mm,
+        "gap_mm": float(args.get("gap_mm", 0.5)),
+        "position": str(args.get("position", "material_inside")),
+        "start_offset_mm": float(args.get("start_offset_mm", 0)),
+        "end_offset_mm": float(args.get("end_offset_mm", 0)),
+        "relief_type": str(relief_name) if relief_name else None,
+        "relief_ratio": float(args.get("relief_ratio", 0.5)) if relief_name else None,
+    }
+    mismatches = readback_mismatches(wanted, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload
 
 

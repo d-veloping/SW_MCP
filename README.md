@@ -196,7 +196,7 @@ metal parts only.
 | `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
 | `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
-| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward; one new body per selected face, readback held against the request. |
+| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered, reversed or inward (the member is cut back); one new body per selected face, every option held against the readback. |
 | `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
 | `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
@@ -344,6 +344,12 @@ every line into "unknown".
   the API — `ISheetMetalFeatureData` and `ICustomBendAllowance` accept the
   value and keep the document default — so `sheet_metal_info` reports what the
   flat pattern actually uses. `tear_drop` and `double` hems are not accepted.
+  `InsertSheetMetalEdgeFlange2` measures the flange length from the inner
+  virtual sharp whatever dimension type it is given (the outer virtual sharp
+  builds the same flange and only reads back `length + t·tan(angle/2)`, the
+  bend tangent builds nothing), so `sheet_metal_edge_flange` offers no
+  length reference. `trim_side_bends` of the miter flange and `flip` of the
+  edge flange have no readback on 2016; the box tells.
   `export_flat_pattern` needs a saved part, because `ExportToDWG2` takes the
   model path; `ExportFlatPatternView` is not used because it opens a file
   dialog. A gauge table is refused on this install's templates
@@ -377,11 +383,15 @@ the break corner against a closed-form number: flange volumes, the developed
 length from the K-factor, the material a break corner removes, the bend lines
 in the exported DXF; the hem, the closed corner and the corner relief are
 checked by readback, added or removed material and the DXF (32 checks on
-2016 SP3). `tests\live_weldment.py` does the same for weldments: members
+2016 SP3, plus 10 for the third part). `tests\live_weldment.py` does the same for weldments: members
 measure profile area times length and reach the mitred outer corner, the end
 cap its inset plate, the trimmed member its new length, the gussets a*b*t/2
 with their leg lengths and the polygon with its corner cut, a plane cut into
-two halves, and a degenerate 3D line leaves no sketch behind (31 checks).
+two halves, and a degenerate 3D line leaves no sketch behind; a second pair
+with butt corners, a turned and mirrored profile and a gap, and end caps with
+ratio inset, chamfer, reverse and inward, are checked by readback and box
+(38 checks). A third sheet metal part checks an edge flange and a miter flange
+with every option off its default by readback and reach.
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved
