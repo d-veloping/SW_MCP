@@ -678,13 +678,21 @@ def latest_sketch(doc: Any, include_3d: bool = False) -> tuple[str, Any]:
 
 
 def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
-    """Resolve an explicit sketch name (2D or 3D), or fall back to the newest sketch."""
+    """Resolve an explicit sketch name, or fall back to the newest sketch.
+
+    Without ``include_3d`` only 2D sketches qualify, named or not: profile
+    features and ``edit_sketch`` cannot use a 3D path.  Readers of segments
+    and points pass ``include_3d`` so a weldment path stays reachable.
+    """
     if sketch_name:
         feature = find_feature(doc, sketch_name)
         if feature is None:
             raise RuntimeError(f"No feature named '{sketch_name}' exists in this document.")
-        if feature_property(feature, "GetTypeName2", "") not in SKETCH_FEATURE_TYPES:
+        kind = feature_property(feature, "GetTypeName2", "")
+        if kind not in SKETCH_FEATURE_TYPES:
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
+        if kind != SKETCH_2D_TYPE and not include_3d:
+            raise RuntimeError(f"Sketch '{sketch_name}' is a 3D sketch; this operation needs a 2D sketch.")
         return sketch_name, feature
     return latest_sketch(doc, include_3d)
 
@@ -1219,10 +1227,10 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
         # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        # the open sketch is always the newest sketch feature in the tree.
+        resolved_name, _ = latest_sketch(doc, include_3d=True)
     else:
-        resolved_name, feature = resolve_sketch(doc, sketch_name)
+        resolved_name, feature = resolve_sketch(doc, sketch_name, include_3d=True)
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
@@ -1268,7 +1276,7 @@ def sketch_segment_objects(doc: Any, sketch_name: str | None = None) -> list[Any
         if sketch is None:
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
     elif sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=True)
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
@@ -1279,7 +1287,7 @@ def sketch_point_objects(doc: Any, sketch_name: str | None = None) -> list[Any]:
     manager = sketch_manager(doc)
     sketch = manager.ActiveSketch
     if sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=True)
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")

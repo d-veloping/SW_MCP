@@ -256,7 +256,7 @@ def close_sketch(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "No sketch is open.")
     name = ""
     try:
-        name, _ = latest_sketch(doc)
+        name, _ = latest_sketch(doc, include_3d=True)
     except Exception:
         pass
     sketch_manager(doc).InsertSketch(True)

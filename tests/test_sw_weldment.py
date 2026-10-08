@@ -135,9 +135,14 @@ class SketchDefaultTests(unittest.TestCase):
         self.assertEqual(sw_core.latest_sketch(self.doc, include_3d=True)[0], "3DSketch1")
         self.assertEqual(sw_core.resolve_sketch(self.doc, None, include_3d=True)[0], "3DSketch1")
 
-    def test_a_3d_sketch_resolves_by_its_explicit_name(self) -> None:
-        name, feature = sw_core.resolve_sketch(self.doc, "3DSketch1")
+    def test_a_3d_sketch_resolves_by_its_explicit_name_for_path_readers(self) -> None:
+        name, feature = sw_core.resolve_sketch(self.doc, "3DSketch1", include_3d=True)
         self.assertEqual((name, feature), ("3DSketch1", self.path))
+
+    def test_a_named_3d_sketch_is_refused_where_a_profile_is_needed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "3D sketch"):
+            sw_core.resolve_sketch(self.doc, "3DSketch1")
+        self.assertEqual(sw_core.resolve_sketch(self.doc, "Sketch1")[0], "Sketch1")
 
     def test_a_non_sketch_name_is_refused(self) -> None:
         with self.assertRaises(RuntimeError):

@@ -107,6 +107,26 @@ class DxfSummaryTests(unittest.TestCase):
         ]))
         self.assertEqual(summary["extents_mm"], [30.0, 12.0])
 
+    def test_a_spline_leaves_the_extents_out(self) -> None:
+        summary = self.summarize(_dxf([
+            _line(0, 0, 5, 5),
+            _entity("SPLINE", [("10", 0), ("20", 0), ("10", 50), ("20", 80), ("10", 100), ("20", 0)]),
+        ]))
+        self.assertNotIn("extents_mm", summary)
+        self.assertIn("extents_note", summary)
+
+    def test_a_bulged_polyline_leaves_the_extents_out(self) -> None:
+        summary = self.summarize(_dxf([
+            _entity("LWPOLYLINE", [("90", 2), ("10", 0), ("20", 0), ("42", 1), ("10", 20), ("20", 0)]),
+        ]))
+        self.assertNotIn("extents_mm", summary)
+
+    def test_a_zero_bulge_keeps_the_extents(self) -> None:
+        summary = self.summarize(_dxf([
+            _entity("LWPOLYLINE", [("90", 2), ("10", 0), ("20", 0), ("42", 0), ("10", 20), ("20", 7)]),
+        ]))
+        self.assertEqual(summary["extents_mm"], [20.0, 7.0])
+
     def test_unknown_entities_do_not_pollute_the_extents(self) -> None:
         summary = self.summarize(_dxf([
             _line(0, 0, 5, 5),

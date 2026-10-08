@@ -423,14 +423,15 @@ def dxf_entity_points(entity: dict[str, list[str]]) -> list[tuple[float, float]]
 
     LINE: both ends.  CIRCLE: the four axis points.  ARC: both ends plus
     every axis crossing inside the swept angle (DXF arcs run counterclockwise
-    from group 50 to group 51).  Polylines: every vertex.  Other entities
-    contribute nothing rather than a misleading centre point.
+    from group 50 to group 51).  Polylines: every vertex, which bounds the
+    geometry only while no vertex carries a bulge (see ``dxf_curved_unparsed``).
+    Other entities contribute nothing rather than a misleading centre point.
     """
     kind = entity["type"][0]
     xs, ys = _floats(entity, "10"), _floats(entity, "20")
     if kind == "LINE":
         return list(zip(xs + _floats(entity, "11"), ys + _floats(entity, "21")))
-    if kind in ("LWPOLYLINE", "POLYLINE", "VERTEX", "SPLINE"):
+    if kind in ("LWPOLYLINE", "POLYLINE", "VERTEX"):
         return list(zip(xs, ys))
     if kind in ("CIRCLE", "ARC") and xs and ys:
         cx, cy = xs[0], ys[0]
@@ -454,13 +455,26 @@ def dxf_entity_points(entity: dict[str, list[str]]) -> list[tuple[float, float]]
     return []
 
 
+def dxf_curved_unparsed(entity: dict[str, list[str]]) -> bool:
+    """True for geometry whose 10/20 points do not bound it.
+
+    A spline's points are control points, and a polyline vertex with a
+    bulge (group 42) starts an arc that can swell past both of its ends.
+    """
+    kind = entity["type"][0]
+    if kind == "SPLINE":
+        return True
+    return kind in ("LWPOLYLINE", "POLYLINE", "VERTEX") and any(b != 0.0 for b in _floats(entity, "42"))
+
+
 def summarize_dxf(path: Path) -> dict[str, Any]:
     """Count the entities of a DXF file and tell the bend lines from the outline.
 
     SOLIDWORKS writes everything on layer 0 and marks bend lines only by
     their line type (CENTER*), so that is what is counted.  Extents come from
     the geometry of lines, arcs, circles and polylines, in the drawing's
-    millimetre units.
+    millimetre units.  A spline or a bulged polyline leaves the extents
+    out instead of reporting a box that may be wrong.
     """
     entities = _dxf_entities(Path(path).read_text(encoding="utf-8", errors="ignore").splitlines())
     kinds = Counter(e["type"][0] for e in entities)
@@ -471,7 +485,9 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
     points = [point for e in entities for point in dxf_entity_points(e)]
     outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
     summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline}
-    if points:
+    if any(dxf_curved_unparsed(e) for e in entities):
+        summary["extents_note"] = "Extents left out: the outline has splines or bulged polylines."
+    elif points:
         xs = [x for x, _ in points]
         ys = [y for _, y in points]
         summary["extents_mm"] = [round(max(xs) - min(xs), 4), round(max(ys) - min(ys), 4)]
@@ -799,6 +815,13 @@ def sheet_metal_closed_corner(args: dict[str, Any]) -> dict[str, Any]:
             mismatches.append("corner_type")
         if wanted["GapDistance"] is not None and abs(applied["gap_mm"] - float(args["gap_mm"])) > 1e-6:
             mismatches.append("gap_mm")
+        if wanted["OverlapUnderlapRatio"] is not None and (
+            applied["overlap_ratio"] is None
+            or abs(float(applied["overlap_ratio"]) - wanted["OverlapUnderlapRatio"]) > 1e-6
+        ):
+            mismatches.append("overlap_ratio")
+        if wanted["OpenBendRegion"] is not None and applied["open_bend_region"] != wanted["OpenBendRegion"]:
+            mismatches.append("open_bend_region")
         if mismatches:
             payload["ok"] = False
             payload["message"] += f" SOLIDWORKS did not apply {', '.join(mismatches)}; see data.corner for what it kept."
