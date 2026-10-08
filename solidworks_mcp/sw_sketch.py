@@ -267,7 +267,7 @@ def close_sketch(args: dict[str, Any]) -> dict[str, Any]:
 def list_sketches(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     open_sketch = doc.SketchManager.ActiveSketch is not None
-    return result(True, "Read sketches.", sketches=sketch_names(doc), sketch_open=open_sketch)
+    return result(True, "Read sketches.", sketches=sketch_names(doc, include_3d=True), sketch_open=open_sketch)
 
 
 @tool(

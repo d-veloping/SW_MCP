@@ -141,6 +141,17 @@ class SketchDefaultTests(unittest.TestCase):
         self.assertEqual(sw_core.sketch_names(self.doc), ["Sketch1"])
         self.assertEqual(sw_core.sketch_names(self.doc, include_3d=True), ["Sketch1", "3DSketch1"])
 
+    def test_list_sketches_shows_3d_paths_too(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from solidworks_mcp import sw_sketch
+
+        self.doc.SketchManager = SimpleNamespace(ActiveSketch=None)
+        with mock.patch.object(sw_sketch, "active_document", return_value=(None, self.doc)):
+            listed = sw_sketch.list_sketches({})
+        self.assertEqual(listed["data"]["sketches"], ["Sketch1", "3DSketch1"])
+
 
 class RenameReadbackTests(unittest.TestCase):
     """create_3d_sketch reports the name the tree carries, not the one asked for."""

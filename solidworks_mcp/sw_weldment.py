@@ -470,9 +470,10 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     options = TRIM_ALLOW_TRIMMED_EXTENSION | TRIM_ALLOW_TRIMMING_EXTENSION
     if bool(args.get("coped_cut", False)):
         options |= TRIM_COPED_CUT
+    # The weld-gap bit is always set: without it SOLIDWORKS takes the last
+    # gap from the dialog instead of the value passed here, zero included.
+    options |= TRIM_WELD_GAP
     gap = float(args.get("gap_mm", 0))
-    if gap:
-        options |= TRIM_WELD_GAP
     # A body boundary wants butt or miter; a face or plane boundary wants
     # trim, which the butt and miter types silently leave uncut (measured:
     # butt1 against a plane builds a feature that changes nothing).
