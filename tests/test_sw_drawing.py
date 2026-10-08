@@ -200,10 +200,6 @@ class DisplayModeTests(unittest.TestCase):
                 target.broken = False
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # --------------------------------------------------------------------------
 # create_drawing and the document that is active afterwards (ClauSW #115)
 # --------------------------------------------------------------------------
@@ -310,12 +306,14 @@ class CreateDrawingActivationTests(unittest.TestCase):
         self.assertEqual(data["active_document"]["title"], "Test_Rahmen")
         self.assertIn("became active again", answer["message"])
 
-    def test_part_still_active_in_new_document_returns_its_answer_without_sheet_setup(self) -> None:
-        """Case B: the drawing never showed as active within the wait."""
-        answer = self.create([self.part], {"paper_size": "A3"})
+    def test_part_still_active_in_new_document_returns_its_answer_with_the_sheet_set_up(self) -> None:
+        """Case B: the drawing never showed as active within the wait; its sheet is still set up on the own object,
+        so a caller that activates it later gets the sheet it asked for."""
+        answer = self.create([self.part], {"paper_size": "A3", "first_angle": True})
         self.assertFalse(answer["ok"], answer)
         self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", False))
-        self.assertEqual(self.drawing.setups, [])
+        self.assertEqual(len(self.drawing.setups), 1)
+        self.assertEqual(self.drawing.setups[0][1], sw_drawing.PAPER_SIZES["A3"])
 
     def test_part_active_right_after_new_document_never_raises_and_sets_up_the_own_drawing(self) -> None:
         """Case C: ActiveDoc is the part between new_document and the sheet setup; the sheet setup goes to the own
@@ -330,3 +328,7 @@ class CreateDrawingActivationTests(unittest.TestCase):
         answer = self.create([self.part])
         self.assertFalse(answer["ok"])
         self.assertNotIn("data", answer)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -290,9 +290,10 @@ def _view_entry(view: Any, index: int) -> dict[str, Any]:
 @tool(
     "create_drawing",
     "Create a new drawing document from the configured default template, optionally sized and "
-    "scaled. Then use insert_standard_views or insert_model_view to place views. Succeeds only while the new "
-    "drawing is still the active document at the end; otherwise it fails with the drawing in `document` and the "
-    "document SOLIDWORKS made active in `active_document`, and never raises because of a switch.",
+    "scaled. Then use insert_standard_views or insert_model_view to place views. The sheet is set up on the new "
+    "drawing itself, also when it is not the active document. Succeeds only while the new drawing is still the "
+    "active document at the end; otherwise it fails with the drawing in `document` and the document SOLIDWORKS made "
+    "active in `active_document`, and never raises because of a switch. A switch after this check is not reported.",
     {
         "paper_size": {"type": "string", "enum": sorted(PAPER_SIZES), "description": "Override the template's paper size."},
         "scale_numerator": {"type": "number", "default": 1},
@@ -302,12 +303,11 @@ def _view_entry(view: Any, index: int) -> dict[str, Any]:
 )
 def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
     created, raw = _new_document("drawing")
-    if raw is None or not created.get("ok"):
-        # no drawing at all, or one that never became active (SOLIDWORKS kept or switched back to another document):
-        # the answer names it, the sheet is left alone
+    if raw is None:
         return created
     # work on the drawing that was created, never on whatever ActiveDoc reports by now: right after open_document of
-    # a part, SOLIDWORKS can make that part active again a moment later (ClauSW #115)
+    # a part, SOLIDWORKS can make that part active again a moment later (ClauSW #115). The sheet is set up on this
+    # object even when the drawing never became active, so a caller that brings it back gets the sheet it asked for.
     doc = flag_methods(raw, *_DRAWING_METHODS)
     own = (created["data"]["document"]["title"], created["data"]["document"]["path"])
 
@@ -323,6 +323,9 @@ def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as exc:
             logger.info("Sheet setup was declined: %s", exc)
+    if not created.get("ok"):
+        # the drawing never became active (SOLIDWORKS kept or switched back to another document): the answer names it
+        return created
     active = running_app().ActiveDoc
     identity = _identity(active)
     if identity != own:
