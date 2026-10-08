@@ -58,6 +58,8 @@ from .sw_core import (
     clear_selection,
     delete_features,
     dispatch_array,
+    feature_names,
+    features_added,
     double_array,
     exit_active_sketch,
     feature_manager,
@@ -68,9 +70,9 @@ from .sw_core import (
     iter_edge_objects,
     iter_face_objects,
     iter_feature_objects,
-    iter_features,
     logger,
     null_variant,
+    readback_mismatches,
     rebuild,
     rename_feature,
     require_part,
@@ -159,41 +161,32 @@ def is_server_fault(exc: Exception) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _feature_names(doc: Any) -> list[str]:
-    return [f["name"] for f in iter_features(doc)]
-
-
-def _new_features(doc: Any, before: list[str]) -> list[Any]:
-    previous = set(before)
-    created = []
-    for feature in iter_feature_objects(doc):
-        name = str(feature_property(feature, "Name", ""))
-        if name and name not in previous:
-            created.append(feature)
-    return created
-
-
 def _build(doc: Any, action: str, call: Any, wanted_types: tuple[str, ...]) -> tuple[Any, list[Any]]:
     """Run a sheet-metal creating call and recover the feature from the tree.
 
     Returns the created feature of one of ``wanted_types`` (or None) and
     every feature the call added.  A server fault on return is swallowed when
-    the tree shows the feature, and logged when it does not.
+    the tree shows the feature, and logged when it does not.  When the call
+    built no such feature, or raised any other error, whatever it did add is
+    deleted again before returning or re-raising, so a failed call leaves
+    nothing of its own in the tree.
     """
-    before = _feature_names(doc)
+    before = feature_names(doc)
     fault: Exception | None = None
     try:
         call()
     except Exception as exc:
         if not is_server_fault(exc):
+            delete_features(doc, features_added(doc, before))
             raise
         fault = exc
-    created = _new_features(doc, before)
+    created = features_added(doc, before)
     for feature in created:
         if str(feature_property(feature, "GetTypeName2", "")) in wanted_types:
             return feature, created
     if fault is not None:
         logger.info("SOLIDWORKS raised on %s and built nothing: %s", action, fault)
+    delete_features(doc, created)
     return None, created
 
 
@@ -232,6 +225,13 @@ def _definition(feature: Any) -> Any:
         return None
 
 
+def _release_selection_access(definition: Any) -> None:
+    try:
+        definition.ReleaseSelectionAccess()
+    except Exception:
+        logger.info("Could not release the selection access of a feature definition")
+
+
 def _modify(feature: Any, doc: Any, definition: Any) -> bool:
     """IFeature::ModifyDefinition; the caller judges it by reading the definition back."""
     try:
@@ -240,6 +240,32 @@ def _modify(feature: Any, doc: Any, definition: Any) -> bool:
         if is_server_fault(exc):
             return True
         raise
+
+
+def corner_face_pairs(corners: list[dict[str, Any]], face_count: int) -> list[list[int]]:
+    """The face index pairs of a corner-relief request, checked before any COM call.
+
+    AddCornerReliefCorner starts a build inside SOLIDWORKS; an index found bad
+    only at the second corner would leave that build open, so every index is
+    validated first.
+    """
+    pairs = []
+    for corner in corners:
+        pair = [int(i) for i in corner["faces"]]
+        if len(pair) != 2:
+            raise RuntimeError(f"Each corner needs exactly two bend faces; got {pair}.")
+        for index in pair:
+            if not 0 <= index < face_count:
+                raise RuntimeError(f"Face index {index} is out of range (0..{face_count - 1}); call list_faces first.")
+        pairs.append(pair)
+    return pairs
+
+
+def _finish_corner_relief_quietly(manager: Any) -> None:
+    try:
+        manager.FinishCornerRelief()
+    except Exception:
+        pass
 
 
 def _features_of_type(doc: Any, *type_names: str) -> list[Any]:
@@ -259,14 +285,17 @@ def _flat_pattern_features(doc: Any) -> list[Any]:
 def _single_flat_pattern(doc: Any) -> Any | None:
     """The part's one Flat-Pattern feature, or None when it has none.
 
-    A multibody sheet metal part carries one Flat-Pattern per body; flattening
-    or exporting such a part would have to address every body, which these
-    tools do not, so they refuse it rather than report one body as the part.
+    A multibody sheet metal part carries one Flat-Pattern per body, and a
+    sheet body next to a plain solid body would be measured together with it;
+    flattening or exporting either would have to address bodies one by one,
+    which these tools do not, so they refuse any part with more than one solid
+    body or more than one Flat-Pattern rather than report one body as the part.
     """
     features = _flat_pattern_features(doc)
-    if len(features) > 1:
+    bodies = len(get_bodies(doc))
+    if len(features) > 1 or bodies > 1:
         raise RuntimeError(
-            f"The part has {len(features)} Flat-Pattern features, one per sheet metal body; "
+            f"The part has {bodies} solid bodies and {len(features)} Flat-Pattern features; "
             "sheet_metal_flatten and export_flat_pattern handle single-body sheet metal parts only."
         )
     return features[0] if features else None
@@ -357,7 +386,7 @@ def _draw_flange_profile(app: Any, doc: Any, edge: Any, angle_rad: float, flip: 
     except Exception:
         # A sketch that could not be filled is no profile; leave none behind.
         exit_active_sketch(doc)
-        _delete_features(doc, [sketch_feature])
+        delete_features(doc, [sketch_feature])
         raise
 
 
@@ -385,9 +414,6 @@ def _fill_flange_profile(app: Any, doc: Any, sketch_feature: Any, edge: Any, len
         doc.SetAddToDB(False)
         doc.InsertSketch2(True)
     return sketch
-
-
-_delete_features = delete_features
 
 
 def _dxf_entities(text: list[str]) -> list[dict[str, list[str]]]:
@@ -480,16 +506,31 @@ def dxf_curved_unparsed(entity: dict[str, list[str]]) -> bool:
     return kind in ("LWPOLYLINE", "POLYLINE", "VERTEX") and any(b != 0.0 for b in _floats(entity, "42"))
 
 
+def dxf_header_value(text: list[str], variable: str) -> str | None:
+    """The first value of a HEADER variable such as $INSUNITS, or None."""
+    for index in range(0, len(text) - 3, 2):
+        if text[index].strip() == "9" and text[index + 1].strip() == variable:
+            return text[index + 3].strip()
+    return None
+
+
+# $INSUNITS: 4 is millimetres; SOLIDWORKS writes it (measured 2026-10-08).
+DXF_UNITS_MM = "4"
+
+
 def summarize_dxf(path: Path) -> dict[str, Any]:
     """Count the entities of a DXF file and tell the bend lines from the outline.
 
     SOLIDWORKS writes everything on layer 0 and marks bend lines only by
     their line type (CENTER*), so that is what is counted.  Extents come from
-    the geometry of lines, arcs, circles and polylines, in the drawing's
-    millimetre units.  A spline, an ellipse or a bulged polyline leaves the extents
-    out instead of reporting a box that may be wrong.
+    the geometry of lines, arcs, circles and polylines, and are reported as
+    extents_mm only when the header's $INSUNITS says millimetres; any other
+    unit, a spline, an ellipse or a bulged polyline leaves the extents out
+    with a note instead of reporting a box that may be wrong.
     """
-    entities = _dxf_entities(Path(path).read_text(encoding="utf-8", errors="ignore").splitlines())
+    text = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    units = dxf_header_value(text, "$INSUNITS")
+    entities = _dxf_entities(text)
     kinds = Counter(e["type"][0] for e in entities)
     bend_lines = sum(
         1 for e in entities
@@ -497,8 +538,10 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
     )
     points = [point for e in entities for point in dxf_entity_points(e)]
     outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "ELLIPSE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
-    summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline}
-    if any(dxf_curved_unparsed(e) for e in entities):
+    summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline, "insunits": units}
+    if units != DXF_UNITS_MM:
+        summary["extents_note"] = f"Extents left out: $INSUNITS is {units!r}, not millimetres ({DXF_UNITS_MM})."
+    elif any(dxf_curved_unparsed(e) for e in entities):
         summary["extents_note"] = "Extents left out: the outline has splines, ellipses or bulged polylines."
     elif points:
         xs = [x for x, _ in points]
@@ -571,10 +614,11 @@ def sheet_metal_base_flange(args: dict[str, Any]) -> dict[str, Any]:
         return payload
     parameters = _sheet_metal_parameters(doc)
     payload["data"]["sheet_metal"] = parameters
-    measured = parameters.get("thickness_mm")
-    if measured is not None and abs(measured - float(args["thickness_mm"])) > 1e-6:
+    wanted = {"thickness_mm": float(args["thickness_mm"]), "bend_radius_mm": args.get("bend_radius_mm")}
+    mismatches = readback_mismatches(wanted, parameters, 1e-6)
+    if mismatches:
         payload["ok"] = False
-        payload["message"] += f" The sheet metal feature reports {measured} mm thickness instead of {args['thickness_mm']}."
+        payload["message"] += f" The sheet metal feature did not take {'; '.join(mismatches)}."
     return payload
 
 
@@ -642,13 +686,12 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
             sketches.append(sketch)
     except Exception:
         # The profiles of the earlier edges are useless without the flange.
-        _delete_features(doc, sketch_features)
+        delete_features(doc, sketch_features)
         raise
 
     clear_selection(doc)
-    before_insert = _feature_names(doc)
     try:
-        feature, created = _build(
+        feature, _ = _build(
             doc, "edge flange",
             lambda: feature_manager(doc).InsertSheetMetalEdgeFlange2(
                 dispatch_array(edges), dispatch_array(sketches), options, angle, radius,
@@ -658,17 +701,19 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception:
         # A COM error from the insert (bad argument, refused edge) is reported
-        # as such; the profiles and anything the call added still go.
-        _delete_features(doc, sketch_features + _new_features(doc, before_insert))
+        # as such; _build has removed what the call added, the profiles go here.
+        delete_features(doc, sketch_features)
         raise
     if feature is None:
-        # Leave no half-built profile sketches behind.
-        _delete_features(doc, sketch_features + created)
-        payload = _sheet_result(doc, None, "edge flange", edges=indices, length_mm=args["length_mm"])
+        # Leave no half-built profile sketches behind, and say whether that worked.
+        profiles_removed = delete_features(doc, sketch_features)
+        payload = _sheet_result(doc, None, "edge flange", edges=indices, length_mm=args["length_mm"], profiles_removed=profiles_removed)
         payload["message"] += (
             " Check that the edges are straight free edges of the sheet, that the flange does not run into "
             "existing material (try flip), and that no two edges belong to the same corner."
         )
+        if not profiles_removed:
+            payload["message"] += " The profile sketches could not all be removed; see list_sketches."
         return payload
     rename_feature(feature, args.get("name"))
     return _sheet_result(doc, feature, "edge flange", edges=indices, length_mm=args["length_mm"], angle_deg=args.get("angle_deg", 90))
@@ -769,13 +814,22 @@ def sheet_metal_hem(args: dict[str, Any]) -> dict[str, Any]:
     payload = _sheet_result(doc, feature, "hem", edges=count, type=str(args.get("type", "closed")))
     if feature is not None:
         definition = _definition(feature)
+        applied = None
         if definition is not None:
-            payload["data"]["hem"] = {
+            applied = {
                 "length_mm": round(to_mm(safe(definition, "Length", 0.0) or 0.0), 6),
                 "gap_mm": round(to_mm(safe(definition, "GapDistance", 0.0) or 0.0), 6),
                 "angle_deg": round(to_deg(safe(definition, "Angle", 0.0) or 0.0), 6),
                 "radius_mm": round(to_mm(safe(definition, "Radius", 0.0) or 0.0), 6),
             }
+            payload["data"]["hem"] = applied
+        # Only what the caller asked for is held against the readback; the
+        # defaults SOLIDWORKS fills in for a hem type are its own business.
+        wanted = {k: args.get(k) for k in ("length_mm", "gap_mm", "angle_deg", "radius_mm")}
+        mismatches = readback_mismatches(wanted, applied)
+        if mismatches:
+            payload["ok"] = False
+            payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     else:
         payload["message"] += " Hems need a straight free edge; tear_drop and double were not accepted on SOLIDWORKS 2016."
     return payload
@@ -814,18 +868,32 @@ def sheet_metal_closed_corner(args: dict[str, Any]) -> dict[str, Any]:
         "OverlapUnderlapRatio": float(args["overlap_ratio"]) if args.get("overlap_ratio") is not None else None,
         "OpenBendRegion": bool(args["open_bend_region"]) if args.get("open_bend_region") is not None else None,
     }
+    no_definition = False
     if any(v is not None for v in wanted.values()):
         definition = _definition(feature)
-        if definition is not None:
+        if definition is None:
+            no_definition = True
+        else:
             try:
                 definition.AccessSelections(doc, pythoncom.Nothing)
             except Exception:
                 pass
-            for member, wanted_value in wanted.items():
-                if wanted_value is not None:
-                    setattr(definition, member, wanted_value)
-            _modify(feature, doc, definition)
+            try:
+                for member, wanted_value in wanted.items():
+                    if wanted_value is not None:
+                        setattr(definition, member, wanted_value)
+                modified = _modify(feature, doc, definition)
+            except Exception:
+                # AccessSelections rolled the model back to before the feature;
+                # without the release the part would stay in that state.
+                _release_selection_access(definition)
+                raise
+            if not modified:
+                _release_selection_access(definition)
     payload = _sheet_result(doc, feature, "closed corner", faces=count)
+    if no_definition:
+        payload["ok"] = False
+        payload["message"] += " The corner's definition could not be read, so corner_type, gap_mm, overlap_ratio and open_bend_region were not applied."
     definition = _definition(feature)
     if definition is not None:
         applied = {
@@ -871,6 +939,7 @@ def sheet_metal_break_corner(args: dict[str, Any]) -> dict[str, Any]:
     exit_active_sketch(doc)
     count = require_selection(doc, args["selection"])
     mode = str(args.get("mode", "fillet"))
+    volume_before = _volume_mm3(doc)
     feature, _ = _build(
         doc, "break corner",
         lambda: doc.InsertSheetMetalBreakCorner(BREAK_CORNER_TYPES[mode], to_m(args["distance_mm"])),
@@ -881,7 +950,19 @@ def sheet_metal_break_corner(args: dict[str, Any]) -> dict[str, Any]:
     if feature is not None:
         definition = _definition(feature)
         if definition is not None:
-            payload["data"]["corners"] = int(safe(definition, "GetEntitiesCount", 0) or 0)
+            corners = int(safe(definition, "GetEntitiesCount", 0) or 0)
+            payload["data"]["corners"] = corners
+            if corners != count:
+                payload["ok"] = False
+                payload["message"] += f" The feature holds {corners} entities, {count} were selected."
+        # A fillet or chamfer on a corner takes material away; a feature that
+        # removed nothing broke no corner.
+        if volume_before is not None and payload["data"].get("volume_mm3") is not None:
+            removed = round(volume_before - payload["data"]["volume_mm3"], 4)
+            payload["data"]["removed_mm3"] = removed
+            if removed <= 0:
+                payload["ok"] = False
+                payload["message"] += " The break corner removed no material."
     return payload
 
 
@@ -923,16 +1004,15 @@ def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
     size = float(args.get("size_mm", 2)) if ratio else to_m(args.get("size_mm", 2))
     width = float(args.get("width_mm", 0)) if ratio else to_m(args.get("width_mm", 0))
     faces = iter_face_objects(doc)
+    pairs = corner_face_pairs(args["corners"], len(faces))
     manager = feature_manager(doc)
     volume_before = _volume_mm3(doc)
     accepted = 0
-    for corner in args["corners"]:
-        pair = [int(i) for i in corner["faces"]]
+    for pair in pairs:
         clear_selection(doc)
         for index in pair:
-            if not 0 <= index < len(faces):
-                raise RuntimeError(f"Face index {index} is out of range (0..{len(faces) - 1}); call list_faces first.")
             if not select_object(doc, faces[index][0], 4, True):
+                _finish_corner_relief_quietly(manager)
                 raise RuntimeError(f"Could not select face {index}.")
         try:
             manager.AddCornerReliefCorner()
@@ -950,10 +1030,15 @@ def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
             logger.info("Corner %s was not accepted as a bend corner: %s", pair, exc)
     clear_selection(doc)
     if accepted == 0:
+        # The relief was begun with AddCornerReliefCorner; finishing it with no
+        # accepted corner closes that build so the next call starts clean.
+        _finish_corner_relief_quietly(manager)
         return result(False, "SOLIDWORKS accepted none of the corners. Each corner needs the two cylindrical bend faces that meet there.")
     feature, _ = _build(doc, "corner relief", lambda: manager.FinishCornerRelief(), ("CornerRelief",))
     rename_feature(feature, args.get("name"))
-    payload = _sheet_result(doc, feature, "corner relief", corners=accepted, relief_type=str(args.get("relief_type", "square")))
+    # corners_accepted is what AddCornerReliefType answered, an API count; the
+    # geometry gate is the removed volume below.
+    payload = _sheet_result(doc, feature, "corner relief", corners_accepted=accepted, relief_type=str(args.get("relief_type", "square")))
     if feature is not None and volume_before is not None and payload["data"].get("volume_mm3") is not None:
         removed = round(volume_before - payload["data"]["volume_mm3"], 4)
         payload["data"]["removed_mm3"] = removed
@@ -1090,6 +1175,10 @@ def export_flat_pattern(args: dict[str, Any]) -> dict[str, Any]:
     if not model_path:
         return result(False, "The part has no saved path; save it with save_document first, then export the flat pattern.")
     output = validated_output_path(str(args["path"]), FLAT_PATTERN_EXTENSIONS, bool(args.get("overwrite", False)))
+    if output.exists():
+        # With overwrite the old file goes first, so that the existence check
+        # below sees what this export wrote and not what an earlier one did.
+        output.unlink()
     exit_active_sketch(doc)
     clear_selection(doc)
 

@@ -120,6 +120,9 @@ def main() -> int:
         area = float(end["area_mm2"])
         check("profile area is a 20 x 20 x 2 tube with rounded corners", 120 < area < 144, True)
         check("mitred pair volume = A * (300 + 200)", pair["data"]["volume_mm3"], area * 500, 1.0)
+        # Volume alone cannot tell a miter from a butt: both members reach the outer corner only when mitred.
+        check("mitred member 1 reaches the outer corner x = 310", max(b["max_mm"][0] for b in pair["data"]["bodies"]), 310.0)
+        check("mitred member 2 reaches the outer corner y = -10", min(b["min_mm"][1] for b in pair["data"]["bodies"]), -10.0)
 
         third = require(weldment_structural_member({
             "selection": {"sketch_segments": [2], "sketch_name": sketch["data"]["sketch"]},
@@ -133,6 +136,7 @@ def main() -> int:
         check("end cap volume = 3 * 18 * 18", cap["data"]["volume_mm3"], 3 * 18 * 18)
         check("end cap thickness readback", cap["data"]["end_cap"]["thickness_mm"], 3.0, 1e-6)
         check("end cap sits beyond the end", cap["data"]["bodies"][0]["min_mm"][0], -3.0)
+        check("one end cap body for one face", len(cap["data"]["bodies"]), 1)
 
         # Gussets in the inner corner between the first two members: the top
         # face of member 1 (y = 10) and the inner face of member 2 (x = 290,
@@ -145,6 +149,7 @@ def main() -> int:
         tri = require(weldment_gusset({"selection": {"faces": faces}, "d1_mm": 50, "d2_mm": 30, "thickness_mm": 5}), "weldment_gusset(triangle)")
         check("triangle gusset volume = 50 * 30 * 5 / 2", tri["data"]["volume_mm3"], 50 * 30 * 5 / 2)
         check("triangle gusset centred on the corner edge", tri["data"]["bodies"][0]["min_mm"][2], -2.5)
+        check("triangle gusset legs d1 along x, d2 along y, thickness 5", tri["data"]["bodies"][0]["size_mm"], [50.0, 30.0, 5.0])
         legs = [face_where([0, 1, 0], lambda p: abs(p[1] - 10) < 1e-3 and p[0] < 240),
                 face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3 and 60 < p[1] < 190)]
         poly = require(weldment_gusset({

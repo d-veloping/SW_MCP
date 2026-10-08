@@ -193,7 +193,7 @@ def part_b() -> None:
         check("two outer bend faces at the x = 0 corner", len(bends), 2)
         relief = require(sheet_metal_corner_relief({"corners": [{"faces": bends}], "relief_type": "square", "size_mm": 3}), "sheet_metal_corner_relief")
         check("corner relief removes material", relief["data"]["removed_mm3"] > 0, True)
-        check("corner relief accepted one corner", relief["data"]["corners"], 1)
+        check("corner relief accepted one corner", relief["data"]["corners_accepted"], 1)
 
         face = face_where([1, 0, 0], 38.0, lambda p: abs(p[0] - 60) < 1e-3 and 1 <= p[1] <= 20)
         corner = require(sheet_metal_closed_corner({"selection": {"faces": [face]}, "corner_type": "butt", "gap_mm": 0.5}), "sheet_metal_closed_corner")

@@ -26,6 +26,7 @@ import math
 from typing import Any
 
 from .sw_core import (
+    feature_names,
     active_document,
     apply_selection,
     call_versioned,
@@ -45,7 +46,6 @@ from .sw_core import (
     FILLET_TYPE_SIMPLE,
     FILLET_UNIFORM_RADIUS,
     find_feature,
-    iter_features,
     iter_feature_objects,
     logger,
     rebuild,
@@ -62,10 +62,6 @@ from .sw_core import (
     value,
     whats_wrong,
 )
-
-
-def _feature_names(doc: Any) -> list[str]:
-    return [f["name"] for f in iter_features(doc)]
 
 
 def _feature_created_after(doc: Any, before: list[str]) -> Any | None:
@@ -351,7 +347,7 @@ def chamfer(args: dict[str, Any]) -> dict[str, Any]:
 def shell(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
     exit_active_sketch(doc)
-    before = _feature_names(doc)
+    before = feature_names(doc)
     removed = 0
     if args.get("selection"):
         removed = apply_selection(doc, args["selection"])
@@ -426,7 +422,7 @@ def rib(args: dict[str, Any]) -> dict[str, Any]:
 
     def attempt(normal_to_sketch: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
-        before = _feature_names(doc)
+        before = feature_names(doc)
         feature_manager(doc).InsertRib(
             bool(args.get("two_sided", True)), False, to_m(args["thickness_mm"]), 0,
             bool(args.get("reverse_material", False)),

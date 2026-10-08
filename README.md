@@ -168,16 +168,27 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | `sheet_metal_hem` | Closed, open or rolled hem on selected edges. |
 | `sheet_metal_closed_corner` / `sheet_metal_break_corner` | Close the corner between two flanges (butt / overlap / underlap with a gap, read back); fillet or chamfer the corners of a sheet edge. |
 | `sheet_metal_corner_relief` | Square, circular, obround, tear, bend-waist or constant-width relief where two bends meet, one or more corners per feature. |
-| `sheet_metal_flatten` | Unsuppress / suppress the Flat-Pattern feature and report the flat bounding box. |
+| `sheet_metal_flatten` | Unsuppress / suppress the Flat-Pattern feature and report the flat bounding box (single-body parts). |
 | `sheet_metal_info` | Thickness, bend radius, K-factor, relief, bend state, and every sheet metal feature with its bends. |
-| `export_flat_pattern` | Flat pattern as DXF or DWG with bend lines, without a dialog; a DXF result is summarised (entities, bend lines, extents). |
+| `export_flat_pattern` | Flat pattern as DXF or DWG with bend lines, without a dialog; a DXF result is summarised (entities, bend lines, extents when the file is in millimetres). |
 
-Every one of these is judged by geometry: the tools report the body volume and
-bounding box after the feature, because several of the sheet metal API calls
-raise on return even when they have built the feature, and others return
-nothing at all when they have not. The box comes from `IBody2::GetExtremePoint`
-(six calls per body, exact on the geometry); `GetPartBox` and `GetBodyBox` are
-documented as approximate and are not used for a size anybody compares.
+Every feature-creating tool here is judged by geometry, never by the API's
+return value: it reports the body volume and bounding box after the feature,
+because several of the sheet metal API calls raise on return even when they
+have built the feature, and others return nothing at all when they have not.
+What a tool asked for is held against the feature's own readback (thickness,
+bend radius, hem length, corner type and gap, ...), a feature that removes
+material must have removed some, and a mismatch is `ok: false` with the
+feature still in the tree under its reported name, so the caller can inspect
+it or hand it to `delete_feature`. Only the leftovers of a call that built
+nothing are removed again: a 3D sketch whose lines did not all appear, the
+profile sketches of a failed edge flange, a Weldment feature added for a
+member that was refused. The boxes of the sheet metal, weldment and
+`list_bodies` results come from `IBody2::GetExtremePoint` (six calls per
+body, exact on the geometry); `get_bounding_box` keeps `GetPartBox`, which
+SOLIDWORKS documents as approximate, so it is for orientation, not for a
+check. `sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
+metal parts only.
 
 ### Weldments
 | Tool | Purpose |
@@ -185,7 +196,7 @@ documented as approximate and are not used for a size anybody compares.
 | `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
 | `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
-| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward. |
+| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward; one new body per selected face, readback held against the request. |
 | `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
 | `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
@@ -361,13 +372,16 @@ cannot be mocked faithfully. With SOLIDWORKS already running, run:
 
 It verifies the P0 geometry/constraint regressions, including the full-volume
 `through_all_both` cut. `tests\live_sheet_metal.py` builds an L profile and a
-plate with every sheet metal tool and checks each against a closed-form number:
-flange volumes, the developed length from the K-factor, the material a break
-corner removes, the bend lines in the exported DXF (32 checks on 2016 SP3).
-`tests\live_weldment.py` does the same for weldments: members measure profile
-area times length, the end cap its inset plate, the trimmed member its new
-length, the gussets a*b*t/2 and the polygon with its corner cut, a plane cut
-into two halves (24 checks).
+plate with every sheet metal tool and checks the flanges, the flat pattern and
+the break corner against a closed-form number: flange volumes, the developed
+length from the K-factor, the material a break corner removes, the bend lines
+in the exported DXF; the hem, the closed corner and the corner relief are
+checked by readback, added or removed material and the DXF (32 checks on
+2016 SP3). `tests\live_weldment.py` does the same for weldments: members
+measure profile area times length and reach the mitred outer corner, the end
+cap its inset plate, the trimmed member its new length, the gussets a*b*t/2
+with their leg lengths and the polygon with its corner cut, a plane cut into
+two halves, and a degenerate 3D line leaves no sketch behind (31 checks).
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
 Chinese install. Where a result could be checked numerically it was: the revolved
@@ -381,6 +395,10 @@ was exercised the same way on a German install. Where a release lacks the newest
 numbered method (`FeatureCut4`, `FeatureLinearPattern5`, `CreateDetailViewAt4`,
 ...) the tool falls back to the earlier variant with the arguments it takes; on
 newer releases the newest name is always tried first, so nothing changes there.
+The sheet metal and weldment tools are the exception: they were measured on
+2016 SP3 only and call the API names that build there (`InsertSheetMetalBaseFlange`,
+`InsertSheetMetalHem`, `InsertStructuralWeldment4`, `InsertEndCapFeature3`, ...),
+without a newest-name-first fallback.
 
 ## Layout
 

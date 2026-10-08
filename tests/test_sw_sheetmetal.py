@@ -40,10 +40,12 @@ def _line(x1: float, y1: float, x2: float, y2: float, linetype: str = "Continuou
     return _entity("LINE", [("6", linetype), ("10", x1), ("20", y1), ("11", x2), ("21", y2)])
 
 
-def _dxf(entities: list[list[str]]) -> str:
-    """A minimal DXF with a HEADER and an ENTITIES section."""
-    lines = ["  0", "SECTION", "  2", "HEADER", "  9", "$ACADVER", "  1", "AC1015", "  0", "ENDSEC",
-             "  0", "SECTION", "  2", "ENTITIES"]
+def _dxf(entities: list[list[str]], insunits: str | None = "4") -> str:
+    """A minimal DXF with a HEADER ($INSUNITS 4 = millimetres, as SOLIDWORKS writes it) and an ENTITIES section."""
+    lines = ["  0", "SECTION", "  2", "HEADER", "  9", "$ACADVER", "  1", "AC1015"]
+    if insunits is not None:
+        lines += ["  9", "$INSUNITS", " 70", insunits]
+    lines += ["  0", "ENDSEC", "  0", "SECTION", "  2", "ENTITIES"]
     for entity in entities:
         lines += entity
     lines += ["  0", "ENDSEC", "  0", "EOF"]
@@ -160,7 +162,7 @@ class EdgeFlangeCleanupTests(unittest.TestCase):
                 raise outcome
             return outcome
 
-        with mock.patch.object(sm, "require_part", return_value=(None, doc)),                 mock.patch.object(sm, "_require_sheet_metal"),                 mock.patch.object(sm, "_edge_objects", return_value=["e1", "e2"]),                 mock.patch.object(sm, "_draw_flange_profile", side_effect=draw),                 mock.patch.object(sm, "_delete_features") as delete:
+        with mock.patch.object(sm, "require_part", return_value=(None, doc)),                 mock.patch.object(sm, "_require_sheet_metal"),                 mock.patch.object(sm, "_edge_objects", return_value=["e1", "e2"]),                 mock.patch.object(sm, "_draw_flange_profile", side_effect=draw),                 mock.patch.object(sm, "delete_features") as delete:
             with self.assertRaises(RuntimeError):
                 sm.sheet_metal_edge_flange({"selection": {"edges": [1, 2]}, "length_mm": 10})
         delete.assert_called_once_with(doc, [first])
@@ -177,13 +179,73 @@ class EdgeFlangeCleanupTests(unittest.TestCase):
                 mock.patch.object(sm, "clear_selection"), \
                 mock.patch.object(sm, "_edge_objects", return_value=["e1", "e2"]), \
                 mock.patch.object(sm, "_draw_flange_profile", side_effect=list(profiles)), \
-                mock.patch.object(sm, "_feature_names", return_value=[]), \
-                mock.patch.object(sm, "_new_features", return_value=["leftover"]), \
                 mock.patch.object(sm, "_build", side_effect=OSError("Typenkonflikt.")), \
-                mock.patch.object(sm, "_delete_features") as delete:
+                mock.patch.object(sm, "delete_features") as delete:
             with self.assertRaises(OSError):
                 sm.sheet_metal_edge_flange({"selection": {"edges": [1, 2]}, "length_mm": 10})
-        delete.assert_called_once_with(doc, [profiles[0][0], profiles[1][0], "leftover"])
+        delete.assert_called_once_with(doc, [profiles[0][0], profiles[1][0]])
+
+    def test_build_removes_what_a_failed_call_added(self) -> None:
+        """_build deletes the features of a call that built no wanted feature, or raised."""
+        from unittest import mock
+
+        added = [object()]
+        with mock.patch.object(sm, "feature_names", return_value=[]), \
+                mock.patch.object(sm, "features_added", return_value=added), \
+                mock.patch.object(sm, "feature_property", return_value="Sketch"), \
+                mock.patch.object(sm, "delete_features") as delete:
+            feature, created = sm._build("doc", "hem", lambda: None, ("Hem",))
+        self.assertIsNone(feature)
+        delete.assert_called_once_with("doc", added)
+
+        def boom():
+            raise OSError("Typenkonflikt.")
+
+        with mock.patch.object(sm, "feature_names", return_value=[]), \
+                mock.patch.object(sm, "features_added", return_value=added), \
+                mock.patch.object(sm, "delete_features") as delete:
+            with self.assertRaises(OSError):
+                sm._build("doc", "hem", boom, ("Hem",))
+        delete.assert_called_once_with("doc", added)
+
+    def test_corner_face_pairs_are_checked_before_any_com_call(self) -> None:
+        self.assertEqual(sm.corner_face_pairs([{"faces": [1, 2]}, {"faces": [3, 4]}], 5), [[1, 2], [3, 4]])
+        with self.assertRaisesRegex(RuntimeError, "out of range"):
+            sm.corner_face_pairs([{"faces": [1, 2]}, {"faces": [3, 9]}], 5)
+        with self.assertRaisesRegex(RuntimeError, "exactly two"):
+            sm.corner_face_pairs([{"faces": [1]}], 5)
+
+
+class DxfUnitTests(unittest.TestCase):
+    """extents_mm is only reported when the header says millimetres."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.path = Path(self._dir.name) / "flat.dxf"
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _summary(self, insunits: str | None) -> dict:
+        self.path.write_text(_dxf([_line(0, 0, 40, 0), _line(40, 0, 40, 10)], insunits), encoding="utf-8")
+        return sm.summarize_dxf(self.path)
+
+    def test_millimetres_give_extents(self) -> None:
+        summary = self._summary("4")
+        self.assertEqual(summary["extents_mm"], [40.0, 10.0])
+        self.assertEqual(summary["insunits"], "4")
+
+    def test_inches_or_a_missing_unit_leave_the_extents_out(self) -> None:
+        for insunits in ("1", None):
+            summary = self._summary(insunits)
+            self.assertNotIn("extents_mm", summary)
+            self.assertIn("extents_note", summary)
+            self.assertEqual(summary["outline_entities"], 2)
+
+    def test_header_value_is_read_from_the_header_only(self) -> None:
+        text = _dxf([_line(0, 0, 1, 1)], "4").splitlines()
+        self.assertEqual(sm.dxf_header_value(text, "$INSUNITS"), "4")
+        self.assertIsNone(sm.dxf_header_value(text, "$MEASUREMENT"))
 
 
 class FakeFlatPattern:
@@ -194,10 +256,14 @@ class FakeFlatPattern:
 class FlatPatternTests(unittest.TestCase):
     """One Flat-Pattern per body: the single-body tools refuse a multibody part."""
 
-    def _with(self, *features: FakeFlatPattern):
+    def _with(self, *features: FakeFlatPattern, bodies: int = 1):
+        from contextlib import ExitStack
         from unittest import mock
 
-        return mock.patch.object(sm, "_features_of_type", return_value=list(features))
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(sm, "_features_of_type", return_value=list(features)))
+        stack.enter_context(mock.patch.object(sm, "get_bodies", return_value=[object()] * bodies))
+        return stack
 
     def test_a_single_flat_pattern_is_returned(self) -> None:
         only = FakeFlatPattern(True)
@@ -207,8 +273,13 @@ class FlatPatternTests(unittest.TestCase):
             self.assertIsNone(sm._single_flat_pattern(None))
 
     def test_a_multibody_part_is_refused(self) -> None:
-        with self._with(FakeFlatPattern(True), FakeFlatPattern(True)):
-            with self.assertRaisesRegex(RuntimeError, "2 Flat-Pattern features"):
+        with self._with(FakeFlatPattern(True), FakeFlatPattern(True), bodies=2):
+            with self.assertRaisesRegex(RuntimeError, "2 solid bodies and 2 Flat-Pattern features"):
+                sm._single_flat_pattern(None)
+
+    def test_a_sheet_body_next_to_a_plain_body_is_refused_too(self) -> None:
+        with self._with(FakeFlatPattern(True), bodies=2):
+            with self.assertRaisesRegex(RuntimeError, "2 solid bodies and 1 Flat-Pattern"):
                 sm._single_flat_pattern(None)
 
     def test_flat_means_every_flat_pattern_is_unsuppressed(self) -> None:
@@ -238,7 +309,7 @@ class OptionTests(unittest.TestCase):
         self.assertFalse(sm.is_server_fault(Exception(-2147352571, "Typenkonflikt.")))
         self.assertFalse(sm.is_server_fault(RuntimeError("nope")))
 
-    def test_enum_tables_match_the_type_library(self) -> None:
+    def test_enum_tables_hold_the_measured_values(self) -> None:
         self.assertEqual(sm.FLANGE_POSITIONS, {"material_inside": 1, "material_outside": 2, "bend_outside": 3})
         self.assertEqual((sm.HEM_TYPES["closed"], sm.HEM_TYPES["rolled"]), (1, 3))
         self.assertEqual(sm.CLOSED_CORNER_TYPES, {"butt": 1, "overlap": 2, "underlap": 3})

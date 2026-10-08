@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any
 
 from .sw_core import (
-    apply_selection,
     as_list,
     body_extents,
     body_volume_mm3,
@@ -47,28 +46,23 @@ from .sw_core import (
     delete_features,
     dispatch_array,
     exit_active_sketch,
-    extension,
     feature_manager,
-    feature_property,
+    feature_names,
     feature_result,
     find_feature,
     flag_methods,
     get_bodies,
-    iter_features,
-    latest_sketch,
-    logger,
+    readback_mismatches,
     rename_feature,
     require_part,
     require_selection,
     result,
     running_app,
     safe,
-    selectable,
     selected_objects,
     SELECTION_SCHEMA,
     sketch_manager,
     sketch_segment_objects,
-    to_deg,
     to_m,
     to_mm,
     to_rad,
@@ -105,10 +99,6 @@ PROFILE_SUFFIX = ".sldlfp"
 # --------------------------------------------------------------------------
 
 
-def _feature_names(doc: Any) -> list[str]:
-    return [f["name"] for f in iter_features(doc)]
-
-
 def body_summary(body: Any) -> dict[str, Any]:
     """Name, exact bounding box and volume of one body, measured on the body itself."""
     entry: dict[str, Any] = {"name": str(safe(body, "Name", "") or "")}
@@ -123,6 +113,32 @@ def body_summary(body: Any) -> dict[str, Any]:
 
 def bodies_summary(doc: Any) -> list[dict[str, Any]]:
     return [dict(body_summary(body), index=index) for index, body in enumerate(get_bodies(doc))]
+
+
+def bodies_changed(before: dict[str, dict[str, Any]], after: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The bodies of ``after`` that are new or whose volume differs from ``before``."""
+    changed = []
+    for body in after:
+        previous = before.get(body["name"])
+        if previous is None:
+            changed.append(body)
+        elif "volume_mm3" in previous and "volume_mm3" in body and abs(previous["volume_mm3"] - body["volume_mm3"]) > 1e-3:
+            changed.append(body)
+    return changed
+
+
+def untouched_targets(targets: dict[str, float | None], after: list[dict[str, Any]]) -> list[str]:
+    """Names of the bodies given to trim that still exist with their old volume.
+
+    A trimmed body is renamed or loses volume; one the boundary never reached
+    keeps both.  An unknown volume on either side cannot prove it untouched.
+    """
+    current = {b["name"]: b.get("volume_mm3") for b in after}
+    untouched = []
+    for name, volume in targets.items():
+        if name in current and volume is not None and current[name] is not None and abs(current[name] - volume) <= 1e-3:
+            untouched.append(name)
+    return untouched
 
 
 def bodies_unchanged(before: dict[str, dict[str, Any]], after: list[dict[str, Any]]) -> bool:
@@ -175,13 +191,7 @@ def _ensure_weldment(doc: Any) -> Any:
 
 def _remove_weldment(doc: Any, feature: Any) -> bool:
     """Delete a Weldment feature this call added; True if the part is plain again."""
-    clear_selection(doc)
-    try:
-        if bool(selectable(feature).Select2(False, 0)):
-            extension(doc).DeleteSelection2(0)
-    except Exception:
-        logger.info("Could not remove the Weldment feature added for a failed member")
-    clear_selection(doc)
+    delete_features(doc, [feature])
     return not bool(safe(doc, "IsWeldment", False))
 
 
@@ -249,12 +259,9 @@ def _segment_objects(doc: Any, selection: dict[str, Any] | None) -> list[Any]:
     indices = spec.get("sketch_segments")
     if not indices:
         raise RuntimeError("selection.sketch_segments is required: the segment indices of the path sketch from list_sketch_segments.")
-    sketch_name = spec.get("sketch_name")
-    if not sketch_name and doc.SketchManager.ActiveSketch is None:
-        # The unnamed default of a path is the newest sketch of either kind;
-        # the 2D-only default belongs to profile features.
-        sketch_name, _ = latest_sketch(doc, include_3d=True)
-    segments = sketch_segment_objects(doc, sketch_name)
+    # The unnamed default of a path is the newest sketch of either kind; the
+    # 2D-only default belongs to profile features and plain selections.
+    segments = sketch_segment_objects(doc, spec.get("sketch_name"), include_3d=True)
     chosen = []
     for raw in indices:
         index = int(raw)
@@ -303,7 +310,7 @@ def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
     exit_active_sketch(doc)
     clear_selection(doc)
     manager = flag_methods(sketch_manager(doc), "Insert3DSketch")
-    before = _feature_names(doc)
+    before = feature_names(doc)
     manager.Insert3DSketch(True)
     if doc.SketchManager.ActiveSketch is None:
         return result(False, "SOLIDWORKS did not open a 3D sketch.")
@@ -323,7 +330,7 @@ def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
     finally:
         manager.AddToDB = False
         manager.Insert3DSketch(True)
-    new = [n for n in _feature_names(doc) if n not in before]
+    new = [n for n in feature_names(doc) if n not in before]
     if not new:
         if failure is not None:
             raise failure
@@ -509,14 +516,30 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     payload["data"]["bodies"] = bodies
     payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     definition = safe(feature, "GetDefinition")
+    applied = None
     if definition is not None:
-        payload["data"]["end_cap"] = {
+        applied = {
             "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
             "inset_ratio": safe(definition, "ThicknessRatioForOffset"),
             "inset_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
             "chamfered": bool(safe(definition, "UseChamferCorners", False)),
             "inward": bool(safe(definition, "IsEndCapInward", False)),
         }
+        payload["data"]["end_cap"] = applied
+    # One plate per selected end face, and the plate as asked for.
+    if len(bodies) != count:
+        payload["ok"] = False
+        payload["message"] += f" Expected {count} new end cap bodies and found {len(bodies)}."
+    wanted = {
+        "thickness_mm": float(args["thickness_mm"]),
+        "inset_mm": float(inset_mm) if inset_mm is not None else None,
+        "chamfered": chamfer is not None,
+        "inward": bool(args["inward"]) if args.get("inward") is not None else None,
+    }
+    mismatches = readback_mismatches(wanted, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload
 
 
@@ -578,6 +601,7 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     # trim, which the butt and miter types silently leave uncut (measured:
     # butt1 against a plane builds a feature that changes nothing).
     before = {b["name"]: b for b in bodies_summary(doc)}
+    targets = {str(safe(b, "Name", "")): body_volume_mm3(b) for b in to_trim}
     clear_selection(doc)
     feature = feature_manager(doc).InsertWeldmentTrimFeature2(
         CORNER_TREATMENTS[corner_type], options, to_m(gap), dispatch_array(to_trim), dispatch_array(trimming),
@@ -588,11 +612,12 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
         payload["message"] += " The trimming bodies must actually cross or face the members being trimmed."
         return payload
     # Trimming renames the bodies after the feature; report every body so the
-    # caller sees the new boxes, and flag the ones that came from this feature.
-    feature_name = str(feature_property(feature, "Name", ""))
+    # caller sees the new boxes, and flag the ones this feature changed: the
+    # bodies that are new or whose volume moved, judged against the snapshot
+    # from before the call rather than by a name prefix.
     bodies = bodies_summary(doc)
     payload["data"]["bodies"] = bodies
-    payload["data"]["trimmed_bodies"] = [b for b in bodies if b["name"].startswith(feature_name)]
+    payload["data"]["trimmed_bodies"] = bodies_changed(before, bodies)
     payload["data"]["bodies_before"] = list(before)
     if bodies_unchanged(before, bodies):
         payload["ok"] = False
@@ -600,6 +625,12 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
             f" No body changed: with corner_type {corner_type} nothing was trimmed. A face or plane boundary "
             "needs corner_type trim; a body boundary must cross the member."
         )
+        return payload
+    untouched = untouched_targets(targets, bodies)
+    if untouched:
+        payload["ok"] = False
+        payload["data"]["untouched_bodies"] = untouched
+        payload["message"] += f" {len(untouched)} of the {len(targets)} bodies to trim were left as they were: {', '.join(untouched)}."
     return payload
 
 
@@ -662,15 +693,31 @@ def weldment_gusset(args: dict[str, Any]) -> dict[str, Any]:
     payload["data"]["bodies"] = bodies
     payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     definition = safe(feature, "GetDefinition")
+    applied = None
     if definition is not None:
-        payload["data"]["gusset"] = {
+        applied = {
             "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
             "d1_mm": round(to_mm(safe(definition, "ProfileDistance1", 0.0) or 0.0), 6),
             "d2_mm": round(to_mm(safe(definition, "ProfileDistance2", 0.0) or 0.0), 6),
             "d3_mm": round(to_mm(safe(definition, "ProfileDistance3", 0.0) or 0.0), 6),
             "profile": "polygon" if int(safe(definition, "ProfileType", 1) or 0) == 0 else "triangle",
         }
+        payload["data"]["gusset"] = applied
     if not bodies:
         payload["ok"] = False
         payload["message"] += " No new body appeared."
+    # The leg readback is held against the request as given; how SOLIDWORKS
+    # stores swapped legs was not measured, so swap_legs skips that part.
+    swapped = bool(args.get("swap_legs", False))
+    wanted = {
+        "thickness_mm": float(args["thickness_mm"]),
+        "d1_mm": None if swapped else float(args["d1_mm"]),
+        "d2_mm": None if swapped else float(args["d2_mm"]),
+        "d3_mm": float(d3) if polygon and not swapped else None,
+        "profile": profile,
+    }
+    mismatches = readback_mismatches(wanted, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload

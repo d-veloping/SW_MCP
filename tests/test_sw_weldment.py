@@ -332,8 +332,43 @@ class TrimCountTests(unittest.TestCase):
         self.assertIn("1 bodies and 2 boundaries", wm.trim_count_error("miter", 1, 2))
 
 
+class ReadbackTests(unittest.TestCase):
+    """A requested value that the feature does not read back as asked is a mismatch."""
+
+    def test_only_requested_values_are_compared(self) -> None:
+        applied = {"thickness_mm": 3.0, "inset_mm": 0.0, "chamfered": False}
+        self.assertEqual(sw_core.readback_mismatches({"thickness_mm": 3.0, "inset_mm": None}, applied), [])
+        self.assertEqual(sw_core.readback_mismatches({"thickness_mm": 3.0004}, applied), [])
+
+    def test_numbers_bools_and_strings_mismatch(self) -> None:
+        applied = {"thickness_mm": 3.0, "chamfered": False, "profile": "triangle"}
+        found = sw_core.readback_mismatches({"thickness_mm": 2.0, "chamfered": True, "profile": "polygon"}, applied)
+        self.assertEqual(len(found), 3)
+        self.assertIn("thickness_mm (2.0 requested, 3.0 applied)", found)
+
+    def test_a_missing_readback_counts_as_not_applied(self) -> None:
+        self.assertEqual(len(sw_core.readback_mismatches({"d3_mm": 20.0}, {"d1_mm": 50.0})), 1)
+        self.assertEqual(len(sw_core.readback_mismatches({"d3_mm": 20.0}, None)), 1)
+
+
+class TrimBodyAccountingTests(unittest.TestCase):
+    """Trimmed bodies are found by comparing with the snapshot, and every target must have moved."""
+
+    before = {"m1": {"name": "m1", "volume_mm3": 1000.0}, "m2": {"name": "m2", "volume_mm3": 2000.0},
+              "m3": {"name": "m3", "volume_mm3": 500.0}}
+
+    def test_changed_bodies_are_new_names_or_moved_volumes(self) -> None:
+        after = [{"name": "Trim1[1]", "volume_mm3": 900.0}, {"name": "m2", "volume_mm3": 2100.0}, {"name": "m3", "volume_mm3": 500.0}]
+        self.assertEqual([b["name"] for b in wm.bodies_changed(self.before, after)], ["Trim1[1]", "m2"])
+
+    def test_untouched_targets_keep_name_and_volume(self) -> None:
+        after = [{"name": "Trim1[1]", "volume_mm3": 900.0}, {"name": "m2", "volume_mm3": 2100.0}, {"name": "m3", "volume_mm3": 500.0}]
+        self.assertEqual(wm.untouched_targets({"m1": 1000.0, "m3": 500.0}, after), ["m3"])
+        self.assertEqual(wm.untouched_targets({"m3": None}, after), [])
+
+
 class EnumTableTests(unittest.TestCase):
-    def test_enum_tables_match_the_type_library(self) -> None:
+    def test_enum_tables_hold_the_measured_values(self) -> None:
         self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})
         self.assertEqual((wm.CORNER_TREATMENTS["miter"], wm.CORNER_TREATMENTS["butt1"]), (1, 2))
         self.assertEqual((wm.TRIM_COPED_CUT, wm.TRIM_WELD_GAP), (4, 8))

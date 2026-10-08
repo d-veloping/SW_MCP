@@ -357,7 +357,7 @@ _FEATURE_MANAGER_METHODS = (
     "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
     "FeatureLinearPattern4", "FeatureCircularPattern4",
     # Sheet metal
-    "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange", "CreateCustomBendAllowance",
+    "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange",
     "AddCornerReliefCorner", "AddCornerReliefType", "FinishCornerRelief",
     # Weldments
     "InsertWeldmentFeature", "CreateStructuralMemberGroup", "InsertStructuralWeldment4",
@@ -984,16 +984,33 @@ def body_volume_mm3(body: Any) -> float | None:
         return None
 
 
-def delete_features(doc: Any, features: list[Any]) -> None:
-    """Delete features a failed call left behind, so the tree shows no half-built state.
+def feature_names(doc: Any) -> list[str]:
+    return [f["name"] for f in iter_features(doc)]
 
-    Best effort: a feature that cannot be selected or deleted is logged, not
-    raised, because the caller is already reporting the failure that made the
-    features useless.
+
+def features_added(doc: Any, before: list[str]) -> list[Any]:
+    """The feature objects whose names were not in ``before``, in tree order."""
+    previous = set(before)
+    added = []
+    for feature in iter_feature_objects(doc):
+        name = str(feature_property(feature, "Name", ""))
+        if name and name not in previous:
+            added.append(feature)
+    return added
+
+
+def delete_features(doc: Any, features: list[Any]) -> bool:
+    """Delete features a failed call left behind; True when none of them remains.
+
+    Best effort: the caller is already reporting the failure that made the
+    features useless, so nothing is raised here.  A feature that could not be
+    selected and a name that is still in the tree afterwards are logged, and
+    the return value says whether the tree is clean.
     """
     names = [str(feature_property(f, "Name", "")) for f in features if f is not None]
+    names = [n for n in names if n]
     if not names:
-        return
+        return True
     clear_selection(doc)
     selected = 0
     for feature in features:
@@ -1002,12 +1019,44 @@ def delete_features(doc: Any, features: list[Any]) -> None:
                 selected += 1
         except Exception:
             pass
+    if selected < len(names):
+        logger.info("Could not select every leftover feature of %s", names)
     if selected:
         try:
             extension(doc).DeleteSelection2(0)
         except Exception:
             logger.info("Could not delete leftover features %s", names)
     clear_selection(doc)
+    remaining = [n for n in names if n in set(feature_names(doc))]
+    if remaining:
+        logger.info("Leftover features still in the tree: %s", remaining)
+    return not remaining
+
+
+def readback_mismatches(wanted: dict[str, Any], applied: dict[str, Any] | None, tolerance: float = 1e-3) -> list[str]:
+    """Which requested values SOLIDWORKS did not apply, judged by the feature's own readback.
+
+    ``wanted`` holds only the values the caller asked for (None entries are
+    skipped); a key missing from ``applied`` counts as not applied.  Numbers
+    are compared within ``tolerance`` (mm or degrees), everything else exactly.
+    """
+    mismatches = []
+    for key, value_wanted in wanted.items():
+        if value_wanted is None:
+            continue
+        if applied is None or key not in applied or applied[key] is None:
+            mismatches.append(f"{key} ({value_wanted} requested, nothing read back)")
+            continue
+        value_applied = applied[key]
+        if isinstance(value_wanted, bool) or isinstance(value_applied, bool):
+            same = bool(value_wanted) == bool(value_applied)
+        elif isinstance(value_wanted, (int, float)) and isinstance(value_applied, (int, float)):
+            same = abs(float(value_wanted) - float(value_applied)) <= tolerance
+        else:
+            same = value_wanted == value_applied
+        if not same:
+            mismatches.append(f"{key} ({value_wanted} requested, {value_applied} applied)")
+    return mismatches
 
 
 def body_extents(body: Any) -> list[float] | None:
@@ -1370,7 +1419,14 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
     return resolved_name, segments
 
 
-def sketch_segment_objects(doc: Any, sketch_name: str | None = None) -> list[Any]:
+def sketch_segment_objects(doc: Any, sketch_name: str | None = None, include_3d: bool = False) -> list[Any]:
+    """Segments of the open sketch, of a named sketch, or of the newest one.
+
+    A named sketch may be 2D or 3D.  The unnamed default is the newest 2D
+    sketch, the same one the profile features take, so a selection such as a
+    revolve axis cannot land in a 3D path while the profile comes from the 2D
+    sketch; path readers pass ``include_3d`` for the newest sketch of either kind.
+    """
     manager = sketch_manager(doc)
     sketch = manager.ActiveSketch
     if document_type(doc) == 3:
@@ -1378,18 +1434,19 @@ def sketch_segment_objects(doc: Any, sketch_name: str | None = None) -> list[Any
         if sketch is None:
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
     elif sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name, include_3d=True)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=include_3d or bool(sketch_name))
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
     return as_list(safe(sketch, "GetSketchSegments"))
 
 
-def sketch_point_objects(doc: Any, sketch_name: str | None = None) -> list[Any]:
+def sketch_point_objects(doc: Any, sketch_name: str | None = None, include_3d: bool = False) -> list[Any]:
+    """Points of the open, named or newest sketch; the unnamed default is 2D, as for segments."""
     manager = sketch_manager(doc)
     sketch = manager.ActiveSketch
     if sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name, include_3d=True)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=include_3d or bool(sketch_name))
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
