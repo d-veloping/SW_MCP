@@ -69,10 +69,9 @@ def main() -> int:
     created = create_new_document({"kind": "part"})
     report["steps"]["create_new_document"] = created.get("message")
     title = ((created.get("data") or {}).get("document") or {}).get("title")
-    if not created.get("ok"):
-        print(json.dumps(report, indent=2))
-        return 2
     try:
+        if not created.get("ok"):
+            return 2   # the part may exist anyway (another document became active): closed below
         for name, call, args in (
             ("create_sketch", create_sketch, {"plane": "front"}),
             ("draw_rectangle", draw_rectangle, {"x1_mm": 20, "y1_mm": 15, "x2_mm": 60, "y2_mm": 45}),
@@ -97,7 +96,7 @@ def main() -> int:
     finally:
         if title:
             report["steps"]["close_document"] = close_document({"title": title}).get("ok")
-    print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
     return 0 if all(report.get("checks", {}).values()) and report.get("checks") else 1
 
 
