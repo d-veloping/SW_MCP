@@ -15,8 +15,9 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-92 tools: sketching with real relations and driving dimensions, the solid
-features you actually reach for, reference geometry, assemblies and mates, and —
+111 tools: sketching with real relations and driving dimensions, the solid
+features you actually reach for, sheet metal with its flat pattern and DXF export,
+weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
 the model can see what it just built.
 
@@ -158,11 +159,54 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 `rib`, `simple_hole`, `sweep`, `loft`, `linear_pattern`, `circular_pattern`,
 `mirror_feature`, `delete_feature`, `rename_feature`, `set_feature_suppression`.
 
+### Sheet metal
+| Tool | Purpose |
+| --- | --- |
+| `sheet_metal_base_flange` | First sheet metal body from a sketch: an open chain of lines is thickened and extruded (each corner a bend), a closed outline becomes a plate. Sets thickness and bend radius for the part. |
+| `sheet_metal_edge_flange` | Flange along one or more straight edges, with angle, length from the inner virtual sharp, bend position, radius and relief. The profile sketch is drawn for you. |
+| `sheet_metal_miter_flange` | Profile sketch swept along connected edges with mitred corners, rip gap and optional start/end offsets. |
+| `sheet_metal_hem` | Closed, open or rolled hem on selected edges. |
+| `sheet_metal_closed_corner` / `sheet_metal_break_corner` | Close the corner between two flanges (butt / overlap / underlap with a gap, read back); fillet or chamfer the corners of a sheet edge. |
+| `sheet_metal_corner_relief` | Square, circular, obround, tear, bend-waist or constant-width relief where two bends meet, one or more corners per feature. |
+| `sheet_metal_flatten` | Unsuppress / suppress the Flat-Pattern feature and report the flat bounding box (single-body parts). |
+| `sheet_metal_info` | Thickness, bend radius, K-factor, relief, bend state, and every sheet metal feature with its bends. |
+| `export_flat_pattern` | Flat pattern as DXF or DWG with bend lines, without a dialog; a DXF result is summarised (entities, bend lines, extents when the file is in millimetres). |
+
+Every feature-creating tool here is judged by geometry, never by the API's
+return value: it reports the body volume and bounding box after the feature,
+because several of the sheet metal API calls raise on return even when they
+have built the feature, and others return nothing at all when they have not.
+What a tool asked for is held against the feature's own readback (thickness,
+bend radius, hem length, corner type and gap, ...), a feature that removes
+material must have removed some, and a mismatch is `ok: false` with the
+feature still in the tree under its reported name, so the caller can inspect
+it or hand it to `delete_feature`. Only the leftovers of a call that built
+nothing are removed again: a 3D sketch whose lines did not all appear, the
+profile sketches of a failed edge flange, a Weldment feature added for a
+member that was refused. The boxes of the sheet metal, weldment and
+`list_bodies` results come from `IBody2::GetExtremePoint` (six calls per
+body, exact on the geometry; for a rotated assembly component `list_bodies`
+transforms the two corners, which is exact only without rotation);
+`get_bounding_box` keeps `GetPartBox`, which SOLIDWORKS documents as
+approximate, so it is for orientation, not for a check.
+`sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
+metal parts only.
+
+### Weldments
+| Tool | Purpose |
+| --- | --- |
+| `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
+| `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
+| `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
+| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward (the member is cut back); one new body per selected face, every option held against the readback. |
+| `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
+| `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
+
 ### Inspection — the feedback channel
 | Tool | Purpose |
 | --- | --- |
 | `capture_screenshot` | Returns the view as an **image**, so the model can look at its own work. |
-| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. |
+| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
 | `check_errors` | What SOLIDWORKS thinks is wrong — see below. |
 | `set_view` | Named view plus zoom-to-fit. |
@@ -270,6 +314,10 @@ every line into "unknown".
   geometry change. Re-list; do not cache.
 - A modal dialog opened by SOLIDWORKS for any *other* reason will still block
   the server until dismissed.
+- The sheet metal tools work on single-body sheet metal parts. A multibody
+  sheet metal part has one Flat-Pattern feature per body; `sheet_metal_flatten`
+  and `export_flat_pattern` refuse such a part instead of reporting one body
+  as the whole.
 - `rib` is picky about its profile. `InsertRib` returns void and simply builds
   nothing unless the open profile reaches material at both ends *and* the
   extrusion direction can get there. The tool defaults to `parallel_to_sketch`
@@ -294,6 +342,39 @@ every line into "unknown".
   pattern the body instead.
 - `save_document` cannot overwrite a file SOLIDWORKS currently has open, even
   with `overwrite: true`. The error says so when that is the cause.
+- Sheet metal (measured on 2016 SP3): the K-factor cannot be changed through
+  the API — `ISheetMetalFeatureData` and `ICustomBendAllowance` accept the
+  value and keep the document default — so `sheet_metal_info` reports what the
+  flat pattern actually uses. `tear_drop` and `double` hems are not accepted.
+  With the profile this tool draws, `InsertSheetMetalEdgeFlange2` builds the
+  same flange whatever dimension type it is given: the outer virtual sharp
+  reads back `length + t·tan(angle/2)` for the same geometry, and the bend
+  tangent builds nothing; so `sheet_metal_edge_flange` offers no length
+  reference and measures from the inner virtual sharp. Options that the
+  feature definitions do not read back on 2016 (all measured 2026-10-08),
+  which are therefore passed and left to the geometry: `flip` and
+  `relief_type` of the edge flange, `trim_side_bends` of the miter flange,
+  `depth_mm` of the base flange, `position` of the hem, every parameter of
+  the corner relief (its feature has no definition at all), `gap_mm` and
+  `coped_cut` of the trim, `thickness_direction` and `location` of the
+  gusset. The end cap's reverse flag is not offered: it reads back as set and
+  moves nothing.
+  `export_flat_pattern` needs a saved part, because `ExportToDWG2` takes the
+  model path; `ExportFlatPatternView` is not used because it opens a file
+  dialog. A gauge table is refused on this install's templates
+  (`SetUseGaugeTable` answers "not enabled on template"), and the 2016
+  material database carries no sheet metal parameters, so neither route sets
+  the K-factor either.
+- Weldments: `weldment_trim_extend` against a body shortens the trimmed member
+  and grows the trimming member by the same amount, whatever the API's
+  extension option bits say (measured with every combination on 2016), so the
+  part's `get_mass_properties` does not move and the tool offers no extension
+  switch; `list_bodies` and the weldment tools report each body's own volume for
+  that reason (the part total is the plain sum of its bodies, overlaps
+  included: two 20 x 20 x 10 boxes overlapping by half report 8000 mm³). The
+  gusset's weld-bead chamfer and sketch-plane offset arguments of
+  `InsertGussetFeature3` are accepted and change nothing on 2016, so
+  `weldment_gusset` does not offer them.
 
 ## Testing
 
@@ -305,20 +386,42 @@ cannot be mocked faithfully. With SOLIDWORKS already running, run:
 ```
 
 It verifies the P0 geometry/constraint regressions, including the full-volume
-`through_all_both` cut.
+`through_all_both` cut. `tests\live_sheet_metal.py` builds an L profile and a
+plate with every sheet metal tool and checks the flanges, the flat pattern and
+the break corner against a closed-form number: flange volumes, the developed
+length from the K-factor, the material a break corner removes, the bend lines
+in the exported DXF; the hem, the closed corner and the corner relief are
+checked by readback, added or removed material and the DXF (32 checks on
+2016 SP3, plus 11 for the third part). `tests\live_weldment.py` does the same for weldments: members
+measure profile area times length and reach the mitred outer corner, the end
+cap its inset plate, the trimmed member its new length, the gussets a*b*t/2
+with their leg lengths and the polygon with its corner cut, a plane cut into
+two halves, and a degenerate 3D line leaves no sketch behind; a second pair
+with butt corners, a turned and mirrored profile and a gap, and end caps with
+ratio inset and chamfer (volume), and inset by distance and inward (the
+plate ends flush inside, the recut member is reported), are checked by
+readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
+with every option off its default by readback and reach.
 
-Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified
-Chinese install. Where a result could be checked numerically it was: the revolved
-ring, swept rod and lofted cone match their closed-form volumes; a 5-degree
-`draft` removes exactly the expected wedge; `rib` produces exactly the triangle
-under its profile; `through_all_both` removes the full cylinder rather than half
-of it. The limitations above are what survived that pass.
+Every tool except the 16 sheet metal and weldment tools has been exercised
+against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
+could be checked numerically it was: the revolved ring, swept rod and lofted
+cone match their closed-form volumes; a 5-degree `draft` removes exactly the
+expected wedge; `rib` produces exactly the triangle under its profile;
+`through_all_both` removes the full cylinder rather than half of it. The
+limitations above are what survived that pass.
 
 Older releases work too, back to at least SOLIDWORKS 2016 SP3, where every tool
 was exercised the same way on a German install. Where a release lacks the newest
 numbered method (`FeatureCut4`, `FeatureLinearPattern5`, `CreateDetailViewAt4`,
 ...) the tool falls back to the earlier variant with the arguments it takes; on
 newer releases the newest name is always tried first, so nothing changes there.
+The sheet metal and weldment tools are the exception in both directions: they
+were measured on 2016 SP3 only (`tests\live_sheet_metal.py`,
+`tests\live_weldment.py`), have not been run against 2026, and call the API
+names that build on 2016 (`InsertSheetMetalBaseFlange`, `InsertSheetMetalHem`,
+`InsertStructuralWeldment4`, `InsertEndCapFeature3`, ...) without a
+newest-name-first fallback.
 
 ## Layout
 
@@ -329,11 +432,15 @@ newer releases the newest name is always tried first, so nothing changes there.
 | `sw_refgeom.py` | Reference planes and axes |
 | `sw_sketch.py` | Sketches, geometry, editing, relations, dimensions |
 | `sw_feature.py` | Solid features |
+| `sw_sheetmetal.py` | Sheet metal features, flat pattern, DXF/DWG export |
+| `sw_weldment.py` | 3D sketches, structural members, end caps, trim/extend, gussets |
 | `sw_inspect.py` | Topology listings, measurement, mass properties, screenshots |
 | `sw_assembly.py` | Components and mates |
 | `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |
 | `sw_demo.py` | Basketball demo, opt-in via `SW_MCP_DEMO_TOOLS` |
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
+| `tests/live_sheet_metal.py` | Live sheet metal checks against closed-form geometry |
+| `tests/live_weldment.py` | Live weldment checks against closed-form geometry |
 | `tools/tlb_probe.py` | Reads signatures and enums straight off your installed type library |
 | `server.py` | Registry assembly and stdio dispatch |
 

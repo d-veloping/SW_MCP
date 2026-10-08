@@ -1,0 +1,488 @@
+# Copyright 2026 JIALE LIU
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The plain-Python parts of the weldment module and the sketch resolution
+it relies on: profile discovery, the 2D/3D sketch defaults, the rename
+readback, the enum tables.  Runs under unittest discover, like CI."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from solidworks_mcp import sw_core, sw_weldment as wm  # noqa: E402
+
+
+class FakeApp:
+    """Only what profile_roots reads: the preference string and the install path."""
+
+    def __init__(self, configured: str, install: Path) -> None:
+        self._configured = configured
+        self.GetExecutablePath = str(install)
+
+    def GetUserPreferenceStringValue(self, index: int) -> str:  # noqa: N802 - COM member name
+        assert index == wm.SW_FILE_LOCATIONS_WELDMENT_PROFILES
+        return self._configured
+
+
+def _profile(root: Path, standard: str, kind: str, size: str) -> Path:
+    path = root / standard / kind / f"{size}{wm.PROFILE_SUFFIX}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+    return path
+
+
+class ProfileDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._dir.name)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_iter_profiles_reads_standard_type_size_sorted_and_prefers_the_configured_folder(self) -> None:
+        custom = self.tmp / "custom"
+        install = self.tmp / "install"
+        _profile(custom, "iso", "square tube", "20 x 20 x 2")
+        _profile(install / "lang" / "german" / "weldment profiles", "iso", "square tube", "20 x 20 x 2")
+        _profile(install / "lang" / "german" / "weldment profiles", "iso", "pipe", "21.3 x 2.3")
+        app = FakeApp(f"{custom};{self.tmp / 'missing'}", install)
+
+        profiles = wm.iter_profiles(app)
+
+        self.assertEqual(
+            [(p["standard"], p["type"], p["size"]) for p in profiles],
+            [("iso", "pipe", "21.3 x 2.3"), ("iso", "square tube", "20 x 20 x 2")],
+        )
+        square = next(p for p in profiles if p["type"] == "square tube")
+        self.assertEqual(Path(square["path"]).parent.parent.parent, custom)
+
+    def test_profile_roots_accepts_the_executable_path(self) -> None:
+        install = self.tmp / "install"
+        _profile(install / "lang" / "english" / "weldment profiles", "iso", "pipe", "21.3 x 2.3")
+        app = FakeApp("", install / "sldworks.exe")
+        self.assertEqual(wm.profile_roots(app), [install / "lang" / "english" / "weldment profiles"])
+
+    def test_profile_roots_skips_missing_folders(self) -> None:
+        app = FakeApp(str(self.tmp / "nowhere"), self.tmp / "no-install")
+        self.assertEqual(wm.profile_roots(app), [])
+
+
+class FakeFeature:
+    """A feature-tree node as sw_core reads it: Name, GetTypeName2, GetNextFeature."""
+
+    def __init__(self, name: str, type_name: str, taken: set[str] | None = None) -> None:
+        self._name = name
+        self.type_name = type_name
+        self.taken = taken or set()
+        self.next: FakeFeature | None = None
+
+    @property
+    def Name(self) -> str:  # noqa: N802 - COM member name
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:  # noqa: N802 - COM member name
+        if value in self.taken:
+            raise RuntimeError("name already in use")
+        self._name = value
+
+    def GetTypeName2(self) -> str:  # noqa: N802 - COM member name
+        return self.type_name
+
+    def GetNextFeature(self):  # noqa: N802 - COM member name
+        return self.next
+
+
+class FakeTree:
+    def __init__(self, *features: FakeFeature) -> None:
+        for earlier, later in zip(features, features[1:]):
+            earlier.next = later
+        self.FirstFeature = features[0] if features else None
+
+
+class SketchDefaultTests(unittest.TestCase):
+    """A 3D path must never become the unnamed default of a profile feature."""
+
+    def setUp(self) -> None:
+        self.profile = FakeFeature("Sketch1", sw_core.SKETCH_2D_TYPE)
+        self.boss = FakeFeature("Boss-Extrude1", "Extrusion")
+        self.path = FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE)
+        self.doc = FakeTree(self.profile, self.boss, self.path)
+
+    def test_latest_sketch_defaults_to_the_newest_2d_sketch(self) -> None:
+        self.assertEqual(sw_core.latest_sketch(self.doc)[0], "Sketch1")
+        self.assertEqual(sw_core.resolve_sketch(self.doc, None)[0], "Sketch1")
+
+    def test_latest_sketch_includes_3d_only_when_asked(self) -> None:
+        self.assertEqual(sw_core.latest_sketch(self.doc, include_3d=True)[0], "3DSketch1")
+        self.assertEqual(sw_core.resolve_sketch(self.doc, None, include_3d=True)[0], "3DSketch1")
+
+    def test_a_3d_sketch_resolves_by_its_explicit_name_for_path_readers(self) -> None:
+        name, feature = sw_core.resolve_sketch(self.doc, "3DSketch1", include_3d=True)
+        self.assertEqual((name, feature), ("3DSketch1", self.path))
+
+    def test_a_named_3d_sketch_is_refused_where_a_profile_is_needed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "3D sketch"):
+            sw_core.resolve_sketch(self.doc, "3DSketch1")
+        self.assertEqual(sw_core.resolve_sketch(self.doc, "Sketch1")[0], "Sketch1")
+
+    def test_a_non_sketch_name_is_refused(self) -> None:
+        with self.assertRaises(RuntimeError):
+            sw_core.resolve_sketch(self.doc, "Boss-Extrude1")
+
+    def test_sketch_names_lists_2d_by_default(self) -> None:
+        self.assertEqual(sw_core.sketch_names(self.doc), ["Sketch1"])
+        self.assertEqual(sw_core.sketch_names(self.doc, include_3d=True), ["Sketch1", "3DSketch1"])
+
+    def test_list_sketches_shows_3d_paths_too(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from solidworks_mcp import sw_sketch
+
+        self.doc.SketchManager = SimpleNamespace(ActiveSketch=None)
+        with mock.patch.object(sw_sketch, "active_document", return_value=(None, self.doc)):
+            listed = sw_sketch.list_sketches({})
+        self.assertEqual(listed["data"]["sketches"], ["Sketch1", "3DSketch1"])
+
+
+class OpenSketchNameTests(unittest.TestCase):
+    """The open sketch is named by identity, not by being the newest."""
+
+    def test_a_reopened_2d_sketch_keeps_its_own_name(self) -> None:
+        profile = FakeFeature("Sketch1", sw_core.SKETCH_2D_TYPE)
+        path = FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE)
+        profile.GetSpecificFeature2 = object()
+        path.GetSpecificFeature2 = object()
+        doc = FakeTree(profile, path)
+        self.assertEqual(sw_core.open_sketch_name(doc, profile.GetSpecificFeature2), "Sketch1")
+        self.assertEqual(sw_core.open_sketch_name(doc, path.GetSpecificFeature2), "3DSketch1")
+
+    def test_an_unmatched_sketch_falls_back_to_the_newest(self) -> None:
+        doc = FakeTree(FakeFeature("Sketch1", sw_core.SKETCH_2D_TYPE), FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE))
+        self.assertEqual(sw_core.open_sketch_name(doc, object()), "3DSketch1")
+
+
+class RenameReadbackTests(unittest.TestCase):
+    """create_3d_sketch reports the name the tree carries, not the one asked for."""
+
+    def test_rename_returns_the_new_name_when_accepted(self) -> None:
+        feature = FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE)
+        self.assertEqual(sw_core.rename_feature(feature, "Rahmen"), "Rahmen")
+        self.assertEqual(feature.Name, "Rahmen")
+
+    def test_rename_returns_the_old_name_when_refused(self) -> None:
+        feature = FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE, taken={"Rahmen"})
+        self.assertEqual(sw_core.rename_feature(feature, "Rahmen"), "3DSketch1")
+        self.assertEqual(feature.Name, "3DSketch1")
+
+    def test_rename_without_a_name_or_feature_is_a_no_op(self) -> None:
+        self.assertIsNone(sw_core.rename_feature(FakeFeature("x", "y"), None))
+        self.assertIsNone(sw_core.rename_feature(None, "Rahmen"))
+
+
+class FakeBodyWithMass:
+    def __init__(self, volume_m3: float | None) -> None:
+        self.volume_m3 = volume_m3
+
+    def GetMassProperties(self, density: float):  # noqa: N802 - COM member name
+        if self.volume_m3 is None:
+            raise RuntimeError("no mass properties")
+        return (0.0, 0.0, 0.0, self.volume_m3, 0.0, self.volume_m3 * density)
+
+
+class BodyVolumeTests(unittest.TestCase):
+    """list_bodies and the weldment tools report each body's own volume in mm³."""
+
+    def test_body_volume_is_converted_to_cubic_millimetres(self) -> None:
+        self.assertEqual(sw_core.body_volume_mm3(FakeBodyWithMass(2.0054866e-5)), 20054.866)
+
+    def test_a_body_without_mass_properties_reports_none(self) -> None:
+        self.assertIsNone(sw_core.body_volume_mm3(FakeBodyWithMass(None)))
+
+    def test_volume_total_is_unknown_when_a_body_lacks_a_volume(self) -> None:
+        self.assertEqual(sw_core.volume_total_mm3([{"volume_mm3": 1.5}, {"volume_mm3": 2.5}]), 4.0)
+        self.assertIsNone(sw_core.volume_total_mm3([{"volume_mm3": 1.5}, {"name": "x"}]))
+        self.assertEqual(sw_core.volume_total_mm3([]), 0.0)
+
+    def _list_bodies(self, *volumes: float | None) -> dict:
+        from unittest import mock
+
+        from solidworks_mcp import sw_inspect
+
+        context = [(FakeBodyWithMass(v), f"b{i}", None) for i, v in enumerate(volumes)]
+        with mock.patch.object(sw_inspect, "active_document", return_value=(None, None)),                 mock.patch.object(sw_inspect, "iter_body_context", return_value=context):
+            return sw_inspect.list_bodies({})["data"]
+
+    def test_list_bodies_sums_when_every_body_has_a_volume(self) -> None:
+        self.assertEqual(self._list_bodies(1e-6, 2e-6)["volume_sum_mm3"], 3000.0)
+
+    def test_list_bodies_leaves_the_sum_unknown_when_a_volume_is_missing(self) -> None:
+        data = self._list_bodies(1e-6, None)
+        self.assertIsNone(data["volume_sum_mm3"])
+        self.assertEqual(data["bodies"][0]["volume_mm3"], 1000.0)
+
+
+class FakeBodyWithExtremes:
+    """A body that answers GetExtremePoint from a box and has no GetBodyBox at all."""
+
+    def __init__(self, box_m: list[float] | None, volume_m3: float | None = None) -> None:
+        self.box_m = box_m
+        self.volume_m3 = volume_m3
+        self.Name = "Body1"
+
+    def _FlagAsMethod(self, name: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def GetExtremePoint(self, dx, dy, dz, x, y, z):  # noqa: N802 - COM member name
+        if self.box_m is None:
+            return False
+        for axis, (direction, out) in enumerate(((dx, x), (dy, y), (dz, z))):
+            out.value = self.box_m[axis + 3] if direction > 0 else self.box_m[axis]
+        return True
+
+    def GetMassProperties(self, density: float):  # noqa: N802 - COM member name
+        if self.volume_m3 is None:
+            raise RuntimeError("no mass properties")
+        return (0.0, 0.0, 0.0, self.volume_m3, 0.0, self.volume_m3 * density)
+
+
+class BodyExtentsTests(unittest.TestCase):
+    """Boxes come from the exact extreme points, never from the approximate GetBodyBox."""
+
+    def test_body_extents_reads_the_six_extreme_points(self) -> None:
+        body = FakeBodyWithExtremes([0.0, -0.002, 0.0, 0.052, 0.030, 0.040])
+        self.assertEqual(sw_core.body_extents(body), [0.0, -0.002, 0.0, 0.052, 0.030, 0.040])
+
+    def test_body_extents_is_unknown_when_no_extreme_point_is_found(self) -> None:
+        self.assertIsNone(sw_core.body_extents(FakeBodyWithExtremes(None)))
+
+    def test_bodies_extents_is_the_union_and_unknown_when_one_body_is(self) -> None:
+        first = FakeBodyWithExtremes([0.0, 0.0, 0.0, 0.010, 0.010, 0.010])
+        second = FakeBodyWithExtremes([-0.005, 0.0, 0.0, 0.004, 0.020, 0.010])
+        self.assertEqual(sw_core.bodies_extents([first, second]), [-0.005, 0.0, 0.0, 0.010, 0.020, 0.010])
+        self.assertIsNone(sw_core.bodies_extents([first, FakeBodyWithExtremes(None)]))
+        self.assertIsNone(sw_core.bodies_extents([]))
+
+    def test_body_summary_reports_the_exact_box_in_millimetres(self) -> None:
+        entry = wm.body_summary(FakeBodyWithExtremes([0.0, -0.002, 0.0, 0.052, 0.030, 0.040], 1e-6))
+        self.assertEqual(entry["min_mm"], [0.0, -2.0, 0.0])
+        self.assertEqual(entry["max_mm"], [52.0, 30.0, 40.0])
+        self.assertEqual(entry["size_mm"], [52.0, 32.0, 40.0])
+        self.assertEqual(entry["volume_mm3"], 1000.0)
+
+    def test_body_summary_omits_the_box_when_unknown(self) -> None:
+        entry = wm.body_summary(FakeBodyWithExtremes(None, 1e-6))
+        self.assertNotIn("size_mm", entry)
+        self.assertEqual(entry["volume_mm3"], 1000.0)
+
+
+class TrimNoOpTests(unittest.TestCase):
+    """A trim that changed nothing is judged by the per-body volumes alone."""
+
+    before = {"a": {"name": "a", "volume_mm3": 1000.0, "size_mm": [10.0, 10.0, 10.0]},
+              "b": {"name": "b", "volume_mm3": 2000.0, "size_mm": [10.0, 10.0, 20.0]}}
+
+    def test_same_volumes_are_unchanged_even_when_boxes_moved(self) -> None:
+        after = [{"name": "a", "volume_mm3": 1000.0, "size_mm": [10.0, 10.000003, 10.0]},
+                 {"name": "b", "volume_mm3": 2000.0004, "size_mm": [10.0, 10.0, 20.0]}]
+        self.assertTrue(wm.bodies_unchanged(self.before, after))
+
+    def test_a_moved_volume_is_a_change(self) -> None:
+        after = [{"name": "a", "volume_mm3": 900.0}, {"name": "b", "volume_mm3": 2100.0}]
+        self.assertFalse(wm.bodies_unchanged(self.before, after))
+
+    def test_a_new_or_renamed_body_is_a_change(self) -> None:
+        self.assertFalse(wm.bodies_unchanged(self.before, [{"name": "a", "volume_mm3": 1000.0}]))
+        self.assertFalse(wm.bodies_unchanged(self.before, [{"name": "a", "volume_mm3": 1000.0}, {"name": "Trim1[1]", "volume_mm3": 2000.0}]))
+
+    def test_an_unknown_volume_cannot_prove_no_change(self) -> None:
+        after = [{"name": "a", "volume_mm3": 1000.0}, {"name": "b"}]
+        self.assertFalse(wm.bodies_unchanged(self.before, after))
+
+
+class TrimCountTests(unittest.TestCase):
+    """Butt and miter take one member against one body; only the end trim takes several."""
+
+    def test_one_against_one_is_fine_for_every_corner_type(self) -> None:
+        for corner in ("butt1", "butt2", "miter", "trim"):
+            self.assertIsNone(wm.trim_count_error(corner, 1, 1))
+
+    def test_several_bodies_need_the_end_trim(self) -> None:
+        self.assertIsNone(wm.trim_count_error("trim", 2, 3))
+        self.assertIn("2 bodies and 1 boundaries", wm.trim_count_error("butt1", 2, 1))
+        self.assertIn("1 bodies and 2 boundaries", wm.trim_count_error("miter", 1, 2))
+
+
+class ReadbackTests(unittest.TestCase):
+    """A requested value that the feature does not read back as asked is a mismatch."""
+
+    def test_only_requested_values_are_compared(self) -> None:
+        applied = {"thickness_mm": 3.0, "inset_mm": 0.0, "chamfered": False}
+        self.assertEqual(sw_core.readback_mismatches({"thickness_mm": 3.0, "inset_mm": None}, applied), [])
+        self.assertEqual(sw_core.readback_mismatches({"thickness_mm": 3.0004}, applied), [])
+
+    def test_numbers_bools_and_strings_mismatch(self) -> None:
+        applied = {"thickness_mm": 3.0, "chamfered": False, "profile": "triangle"}
+        found = sw_core.readback_mismatches({"thickness_mm": 2.0, "chamfered": True, "profile": "polygon"}, applied)
+        self.assertEqual(len(found), 3)
+        self.assertIn("thickness_mm (2.0 requested, 3.0 applied)", found)
+
+    def test_a_missing_readback_counts_as_not_applied(self) -> None:
+        self.assertEqual(len(sw_core.readback_mismatches({"d3_mm": 20.0}, {"d1_mm": 50.0})), 1)
+        self.assertEqual(len(sw_core.readback_mismatches({"d3_mm": 20.0}, None)), 1)
+
+
+class TrimBodyAccountingTests(unittest.TestCase):
+    """Trimmed bodies are found by comparing with the snapshot, and every target must have moved."""
+
+    before = {"m1": {"name": "m1", "volume_mm3": 1000.0}, "m2": {"name": "m2", "volume_mm3": 2000.0},
+              "m3": {"name": "m3", "volume_mm3": 500.0}}
+
+    def test_changed_bodies_are_new_names_or_moved_volumes(self) -> None:
+        after = [{"name": "Trim1[1]", "volume_mm3": 900.0}, {"name": "m2", "volume_mm3": 2100.0}, {"name": "m3", "volume_mm3": 500.0}]
+        self.assertEqual([b["name"] for b in wm.bodies_changed(self.before, after)], ["Trim1[1]", "m2"])
+
+    def test_untouched_targets_keep_name_and_volume(self) -> None:
+        after = [{"name": "Trim1[1]", "volume_mm3": 900.0}, {"name": "m2", "volume_mm3": 2100.0}, {"name": "m3", "volume_mm3": 500.0}]
+        self.assertEqual(wm.untouched_targets({"m1": 1000.0, "m3": 500.0}, after), ["m3"])
+        self.assertEqual(wm.untouched_targets({"m3": None}, after), [])
+
+
+class ReadmeToolCountTests(unittest.TestCase):
+    """The tool count in the README is the registry's count, not a number somebody typed."""
+
+    def test_readme_names_the_registered_tool_count(self) -> None:
+        import re
+
+        from solidworks_mcp import server
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        match = re.search(r"^(\d+) tools:", readme, re.MULTILINE)
+        self.assertIsNotNone(match, "README.md has no '<n> tools:' line")
+        # The basketball demo registers only with SW_MCP_DEMO_TOOLS and is not counted in the README.
+        counted = [t for t in server.TOOLS if not t.name.startswith("demo_")]
+        self.assertEqual(int(match.group(1)), len(counted))
+
+
+class FakeDefinition:
+    def __init__(self, **members: object) -> None:
+        for name, value_ in members.items():
+            setattr(self, name, value_)
+
+
+class FakeGroup(FakeDefinition):
+    pass
+
+
+class FakeMemberFeature:
+    def __init__(self, definition: object) -> None:
+        self._definition = definition
+
+    def GetDefinition(self):  # noqa: N802 - COM member name
+        return self._definition
+
+
+class MemberReadbackTests(unittest.TestCase):
+    """The structural member readback maps the definition and its first group, and an unread member stays None."""
+
+    def test_readback_maps_definition_and_group(self) -> None:
+        group = FakeGroup(ApplyCornerTreatment=True, CornerTreatmentType=3, Angle=0.5235987755982988, MirrorProfile=True, GapWithinGroup=0.002)
+        definition = FakeDefinition(WeldmentProfilePath=r"C:\p\20 x 20 x 2.sldlfp", ConnectedSegmentsOption=2, AllowProtrusion=True, Groups=(group,))
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertEqual(applied["corner_treatment"], "butt2")
+        self.assertEqual(applied["angle_deg"], 30.0)
+        self.assertEqual((applied["mirror_profile"], applied["gap_mm"], applied["connected_segments"], applied["allow_protrusion"], applied["groups"]), (True, 2.0, "coped_cut", True, 1))
+
+    def test_an_unread_member_is_none_and_counts_as_not_applied(self) -> None:
+        definition = FakeDefinition(WeldmentProfilePath="x", ConnectedSegmentsOption=1, AllowProtrusion=False)
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertIsNone(applied["groups"])
+        self.assertNotIn("angle_deg", applied)
+        mismatches = sw_core.readback_mismatches({"groups": 1, "angle_deg": 0.0}, applied)
+        self.assertEqual(len(mismatches), 2)
+
+    def test_a_wrong_corner_makes_a_mismatch(self) -> None:
+        group = FakeGroup(ApplyCornerTreatment=False, CornerTreatmentType=1, Angle=0.0, MirrorProfile=False, GapWithinGroup=0.0)
+        definition = FakeDefinition(WeldmentProfilePath="x", ConnectedSegmentsOption=1, AllowProtrusion=False, Groups=(group,))
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertEqual(applied["corner_treatment"], "none")
+        self.assertEqual(sw_core.readback_mismatches({"corner_treatment": "miter"}, applied), ["corner_treatment (miter requested, none applied)"])
+
+
+class WantedTests(unittest.TestCase):
+    """What each handler holds against the readback, derived from the request alone."""
+
+    def test_end_cap_wanted_follows_inset_mode_and_inward_integer(self) -> None:
+        wanted = wm.end_cap_wanted({"thickness_mm": 3, "inset_ratio": 0.3, "chamfer_mm": 2})
+        self.assertEqual((wanted["inset_by_ratio"], wanted["inset_ratio"], wanted["inset_mm"], wanted["chamfered"], wanted["chamfer_mm"], wanted["inward"]), (True, 0.3, None, True, 2.0, 0))
+        wanted = wm.end_cap_wanted({"thickness_mm": 3, "inset_mm": 1.5, "inward": True})
+        self.assertEqual((wanted["inset_by_ratio"], wanted["inset_ratio"], wanted["inset_mm"], wanted["chamfered"], wanted["inward"]), (False, None, 1.5, False, 1))
+        self.assertEqual(sw_core.readback_mismatches(wanted, {"inset_by_ratio": False, "inset_mm": 1.5, "chamfered": False, "chamfer_mm": 0.0, "inward": 0, "thickness_mm": 3.0}),
+                         ["inward (1 requested, 0 applied)"])
+
+    def test_gusset_wanted_compares_the_closer_that_was_given(self) -> None:
+        by_angle = wm.gusset_wanted({"profile": "polygon", "d1_mm": 50, "d2_mm": 40, "d3_mm": 20, "angle_deg": 30, "thickness_mm": 4})
+        self.assertEqual(by_angle["angle_deg"], 30.0)
+        self.assertNotIn("d4_mm", by_angle)
+        by_d4 = wm.gusset_wanted({"profile": "polygon", "d1_mm": 50, "d2_mm": 50, "d3_mm": 20, "d4_mm": 20, "thickness_mm": 4})
+        self.assertEqual(by_d4["d4_mm"], 20.0)
+        self.assertNotIn("angle_deg", by_d4)
+        swapped = wm.gusset_wanted({"d1_mm": 50, "d2_mm": 30, "thickness_mm": 5, "swap_legs": True})
+        self.assertEqual((swapped["d1_mm"], swapped["d2_mm"], swapped["d3_mm"]), (None, None, None))
+
+    def test_hem_wanted_uses_the_values_of_its_type(self) -> None:
+        from solidworks_mcp import sw_sheetmetal as sm
+
+        self.assertEqual(sm.hem_wanted({"type": "closed", "length_mm": 10}), {"type": "closed", "reverse": False, "length_mm": 10.0})
+        self.assertEqual(sm.hem_wanted({"type": "open", "length_mm": 8, "gap_mm": 1.5, "reverse": True}), {"type": "open", "reverse": True, "length_mm": 8.0, "gap_mm": 1.5})
+        self.assertEqual(sm.hem_wanted({"type": "rolled", "angle_deg": 200, "radius_mm": 3}), {"type": "rolled", "reverse": False, "angle_deg": 200.0, "radius_mm": 3.0})
+
+
+class HonestReaderTests(unittest.TestCase):
+    """read_* give None for what the definition does not expose, never a default."""
+
+    def test_missing_members_read_as_none(self) -> None:
+        definition = FakeDefinition(Thickness=0.004, UseReverse=True, Count=2)
+        self.assertEqual(sw_core.read_mm(definition, "Thickness"), 4.0)
+        self.assertIsNone(sw_core.read_mm(definition, "OffsetDistance"))
+        self.assertIsNone(sw_core.read_bool(definition, "IsEndCapInward"))
+        self.assertEqual(sw_core.read_int(definition, "Count"), 2)
+        self.assertIsNone(sw_core.read_enum(definition, "CornerType", wm.CORNER_TREATMENTS))
+        self.assertIsNone(sw_core.read_member(None, "Anything"))
+
+
+class EnumTableTests(unittest.TestCase):
+    def test_enum_tables_hold_the_measured_values(self) -> None:
+        self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})
+        self.assertEqual((wm.CORNER_TREATMENTS["miter"], wm.CORNER_TREATMENTS["butt1"]), (1, 2))
+        self.assertEqual((wm.TRIM_COPED_CUT, wm.TRIM_WELD_GAP), (4, 8))
+        self.assertEqual(wm.GUSSET_THICKNESS_DIRECTIONS, {"inner": 0, "both_sides": 1, "outer": 2})
+        self.assertEqual(wm.GUSSET_LOCATIONS, {"start": 0, "center": 1, "end": 2})
+        self.assertEqual(wm.GUSSET_PROFILES, {"triangle": False, "polygon": True})
+
+    def test_member_corners_leave_trim_to_trim_extend(self) -> None:
+        self.assertEqual(set(wm.MEMBER_CORNER_TREATMENTS), {"none", "miter", "butt1", "butt2"})
+        self.assertTrue(set(wm.MEMBER_CORNER_TREATMENTS) <= set(wm.CORNER_TREATMENTS))
+
+
+if __name__ == "__main__":
+    unittest.main()

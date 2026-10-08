@@ -286,7 +286,7 @@ invoke_no_arg = value
 _DOCUMENT_SPECIFIC_METHODS = frozenset(
     {
         # IPartDoc
-        "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
+        "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2", "ExportToDWG2",
         # IAssemblyDoc
         "GetBox", "AddComponent5", "AddMate5", "GetComponents",
         # Absent from some selectable interfaces
@@ -343,7 +343,7 @@ _SKETCH_MANAGER_METHODS = (
     "CreateLine", "CreateCenterLine", "CreateCircleByRadius", "CreateArc", "Create3PointArc",
     "CreateTangentArc", "CreateEllipse", "CreatePolygon", "CreateSketchSlot", "CreatePoint",
     "CreateSpline", "CreateCornerRectangle", "InsertSketch", "SketchTrim", "SketchUseEdge3",
-    "FullyDefineSketch",
+    "FullyDefineSketch", "Insert3DSketch",
 )
 
 _FEATURE_MANAGER_METHODS = (
@@ -356,7 +356,15 @@ _FEATURE_MANAGER_METHODS = (
     # Newer builds keep the old names, so flagging them costs nothing there.
     "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
     "FeatureLinearPattern4", "FeatureCircularPattern4",
+    # Sheet metal
+    "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange",
+    "AddCornerReliefCorner", "AddCornerReliefType", "FinishCornerRelief",
+    # Weldments
+    "InsertWeldmentFeature", "CreateStructuralMemberGroup", "InsertStructuralWeldment4",
+    "InsertEndCapFeature3", "InsertWeldmentTrimFeature2", "InsertGussetFeature3",
 )
+
+_SELECTION_MANAGER_METHODS = ("GetSelectedObjectCount2", "GetSelectedObject6", "CreateSelectData")
 
 _EXTENSION_METHODS = (
     "SelectByID2", "SelectByRay", "AddDimension", "DeleteSelection2", "SaveAs", "SaveAs3",
@@ -373,8 +381,12 @@ _MODEL_DOC_METHODS = (
     # IModelDoc2
     "ClearSelection2", "InsertSketch2", "SketchFillet2", "SketchChamfer", "SketchMirror", "SketchOffset2",
     "InsertFeatureShell", "InsertAxis2", "ShowNamedView2", "Parameter", "Save3", "SaveAs",
+    "EditSketch", "SetAddToDB", "SetDisplayWhenAdded", "CreateLine2",
+    # IModelDoc2, sheet metal
+    "InsertSheetMetalBaseFlange", "InsertSketchForEdgeFlange", "InsertSheetMetalHem",
+    "InsertSheetMetalClosedCorner", "InsertSheetMetalBreakCorner",
     # IPartDoc
-    "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
+    "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2", "ExportToDWG2",
     # IAssemblyDoc
     "GetBox", "AddComponent5", "AddMate5", "GetComponents",
 )
@@ -396,6 +408,18 @@ def extension(doc: Any) -> Any:
 
 def selectable(obj: Any) -> Any:
     return flag_methods(obj, "Select2", "Select4")
+
+
+def selected_objects(doc: Any, mark: int = -1) -> list[Any]:
+    """The objects currently selected, in selection order (any mark by default)."""
+    manager = flag_methods(doc.SelectionManager, *_SELECTION_MANAGER_METHODS)
+    count = int(manager.GetSelectedObjectCount2(mark) or 0)
+    objects = []
+    for index in range(1, count + 1):
+        obj = manager.GetSelectedObject6(index, mark)
+        if obj is not None:
+            objects.append(obj)
+    return objects
 
 
 def call_versioned(obj: Any, *candidates: tuple[str, Sequence[Any]]) -> Any:
@@ -440,6 +464,15 @@ def empty_variant() -> Any:
     return win32com.client.VARIANT(pythoncom.VT_EMPTY, None)
 
 
+def null_variant() -> Any:
+    """A VT_NULL, which some SOLIDWORKS members want for 'no array' (VBA's Null).
+
+    IPartDoc::ExportToDWG2 returns False for VT_EMPTY, a typed null dispatch
+    and an empty string array in its Views argument; it exports with VT_NULL.
+    """
+    return win32com.client.VARIANT(pythoncom.VT_NULL, None)
+
+
 def double_array(values: Sequence[float]) -> Any:
     """Pass doubles as a VT_R8 SAFEARRAY rather than a loosely typed tuple.
 
@@ -455,6 +488,10 @@ def dispatch_array(values: Sequence[Any]) -> Any:
 
 def byref_long(initial: int = 0) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
+
+
+def byref_double(initial: float = 0.0) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_R8, initial)
 
 
 def as_list(com_array: Any) -> list[Any]:
@@ -613,33 +650,73 @@ def reference_axes(doc: Any) -> list[str]:
     return [f["name"] for f in iter_features(doc) if f["type"] == "RefAxis" and f["name"]]
 
 
-def sketch_features(doc: Any) -> list[Any]:
-    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") == "ProfileFeature"]
+# A 2D sketch and a 3D sketch.  Both carry sketch segments, so both can be
+# named explicitly as a path or a segment source; only a 2D sketch is a
+# profile, so the unnamed default of a profile feature never picks a 3D one.
+SKETCH_2D_TYPE = "ProfileFeature"
+SKETCH_3D_TYPE = "3DProfileFeature"
+SKETCH_FEATURE_TYPES = frozenset({SKETCH_2D_TYPE, SKETCH_3D_TYPE})
 
 
-def sketch_names(doc: Any) -> list[str]:
-    return [str(feature_property(f, "Name", "")) for f in sketch_features(doc)]
+def sketch_features(doc: Any, include_3d: bool = False) -> list[Any]:
+    wanted = SKETCH_FEATURE_TYPES if include_3d else {SKETCH_2D_TYPE}
+    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in wanted]
 
 
-def latest_sketch(doc: Any) -> tuple[str, Any]:
-    """Return the most recently created sketch feature in tree order."""
-    sketches = sketch_features(doc)
+def sketch_names(doc: Any, include_3d: bool = False) -> list[str]:
+    return [str(feature_property(f, "Name", "")) for f in sketch_features(doc, include_3d)]
+
+
+def latest_sketch(doc: Any, include_3d: bool = False) -> tuple[str, Any]:
+    """Return the most recently created sketch feature in tree order.
+
+    2D sketches only unless ``include_3d`` is set: an extrude, revolve or
+    base flange that omits its sketch name must get the newest profile, not
+    the 3D path drawn for a structural member after it.
+    """
+    sketches = sketch_features(doc, include_3d)
     if not sketches:
         raise RuntimeError("No sketch was found in the feature tree.")
     feature = sketches[-1]
     return str(feature_property(feature, "Name", "")), feature
 
 
-def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
-    """Resolve an explicit sketch name, or fall back to the newest sketch."""
+def open_sketch_name(doc: Any, sketch: Any) -> str:
+    """The feature name of the open sketch ``sketch``.
+
+    ISketch has no accessor back to its feature in this type library, and a
+    reopened sketch need not be the newest one, so the feature whose sketch
+    is the same COM object wins (measured 2026-10-08: a reopened Sketch1
+    matches itself, not the newer 3DSketch1).  The newest sketch is only the
+    fallback when no feature matches.
+    """
+    for feature in reversed(sketch_features(doc, include_3d=True)):
+        try:
+            if value(feature, "GetSpecificFeature2") == sketch:
+                return str(feature_property(feature, "Name", ""))
+        except Exception:
+            continue
+    return latest_sketch(doc, include_3d=True)[0]
+
+
+def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
+    """Resolve an explicit sketch name, or fall back to the newest sketch.
+
+    Without ``include_3d`` only 2D sketches qualify, named or not: profile
+    features and ``edit_sketch`` cannot use a 3D path.  Readers of segments
+    and points pass ``include_3d`` so a weldment path stays reachable.
+    """
     if sketch_name:
         feature = find_feature(doc, sketch_name)
         if feature is None:
             raise RuntimeError(f"No feature named '{sketch_name}' exists in this document.")
-        if feature_property(feature, "GetTypeName2", "") != "ProfileFeature":
+        kind = feature_property(feature, "GetTypeName2", "")
+        if kind not in SKETCH_FEATURE_TYPES:
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
+        if kind != SKETCH_2D_TYPE and not include_3d:
+            raise RuntimeError(f"Sketch '{sketch_name}' is a 3D sketch; this operation needs a 2D sketch.")
         return sketch_name, feature
-    return latest_sketch(doc)
+    return latest_sketch(doc, include_3d)
 
 
 def exit_active_sketch(doc: Any) -> None:
@@ -890,6 +967,203 @@ def iter_body_context(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, 
         return [(body, str(safe(body, "Name", "")), None) for body in as_list(doc.GetBodies2(body_type, False))]
     except Exception:
         return []
+
+
+def body_volume_mm3(body: Any) -> float | None:
+    """The volume of one body, measured on the body itself.
+
+    A part's mass properties sum its bodies, so a trim that shortens one
+    member and lets the trimming member grow by the same amount (the default
+    extension) leaves the part volume unchanged; the per-body volumes show
+    what happened to each.
+    """
+    try:
+        properties = body.GetMassProperties(1.0)
+        return round(float(properties[3]) * 1e9, 4)
+    except Exception:
+        return None
+
+
+def feature_names(doc: Any) -> list[str]:
+    return [f["name"] for f in iter_features(doc)]
+
+
+def features_added(doc: Any, before: list[str]) -> list[Any]:
+    """The feature objects whose names were not in ``before``, in tree order."""
+    previous = set(before)
+    added = []
+    for feature in iter_feature_objects(doc):
+        name = str(feature_property(feature, "Name", ""))
+        if name and name not in previous:
+            added.append(feature)
+    return added
+
+
+def delete_features(doc: Any, features: list[Any]) -> bool:
+    """Delete features a failed call left behind; True when none of them remains.
+
+    Best effort: the caller is already reporting the failure that made the
+    features useless, so nothing is raised here.  A feature that could not be
+    selected and a name that is still in the tree afterwards are logged, and
+    the return value says whether the tree is clean.
+    """
+    names = [str(feature_property(f, "Name", "")) for f in features if f is not None]
+    names = [n for n in names if n]
+    if not names:
+        return True
+    clear_selection(doc)
+    selected = 0
+    for feature in features:
+        try:
+            if feature is not None and bool(selectable(feature).Select2(True, 0)):
+                selected += 1
+        except Exception:
+            pass
+    if selected < len(names):
+        logger.info("Could not select every leftover feature of %s", names)
+    if selected:
+        try:
+            extension(doc).DeleteSelection2(0)
+        except Exception:
+            logger.info("Could not delete leftover features %s", names)
+    clear_selection(doc)
+    remaining = [n for n in names if n in set(feature_names(doc))]
+    if remaining:
+        logger.info("Leftover features still in the tree: %s", remaining)
+    return not remaining
+
+
+def read_member(obj: Any, name: str) -> Any:
+    """A readback member as SOLIDWORKS gives it, or None when it cannot be read.
+
+    None is the honest answer for a member this interface or this release
+    does not expose, or one that raises; readback_mismatches then reports
+    "nothing read back" instead of a default that happens to look applied.
+    """
+    if obj is None:
+        return None
+    try:
+        member = getattr(obj, name)
+        if callable(member) and not hasattr(member, "_oleobj_"):
+            member = member()
+    except Exception:
+        return None
+    return member
+
+
+def read_mm(obj: Any, name: str) -> float | None:
+    value_m = read_member(obj, name)
+    return None if value_m is None else round(to_mm(float(value_m)), 6)
+
+
+def read_deg(obj: Any, name: str) -> float | None:
+    value_rad = read_member(obj, name)
+    return None if value_rad is None else round(to_deg(float(value_rad)), 6)
+
+
+def read_bool(obj: Any, name: str) -> bool | None:
+    raw = read_member(obj, name)
+    return None if raw is None else bool(raw)
+
+
+def read_int(obj: Any, name: str) -> int | None:
+    raw = read_member(obj, name)
+    return None if raw is None else int(raw)
+
+
+def read_float(obj: Any, name: str) -> float | None:
+    raw = read_member(obj, name)
+    return None if raw is None else float(raw)
+
+
+def read_enum(obj: Any, name: str, table: dict[str, int]) -> str | None:
+    """The table key for an enum member, None when unread or outside the table."""
+    raw = read_int(obj, name)
+    if raw is None:
+        return None
+    return {v: k for k, v in table.items()}.get(raw)
+
+
+def readback_mismatches(wanted: dict[str, Any], applied: dict[str, Any] | None, tolerance: float = 1e-3) -> list[str]:
+    """Which requested values SOLIDWORKS did not apply, judged by the feature's own readback.
+
+    ``wanted`` holds only the values the caller asked for (None entries are
+    skipped); a key missing from ``applied`` counts as not applied.  Numbers
+    are compared within ``tolerance`` (mm or degrees), everything else exactly.
+    """
+    mismatches = []
+    for key, value_wanted in wanted.items():
+        if value_wanted is None:
+            continue
+        if applied is None or key not in applied or applied[key] is None:
+            mismatches.append(f"{key} ({value_wanted} requested, nothing read back)")
+            continue
+        value_applied = applied[key]
+        if isinstance(value_wanted, bool) or isinstance(value_applied, bool):
+            same = bool(value_wanted) == bool(value_applied)
+        elif isinstance(value_wanted, (int, float)) and isinstance(value_applied, (int, float)):
+            same = abs(float(value_wanted) - float(value_applied)) <= tolerance
+        else:
+            same = value_wanted == value_applied
+        if not same:
+            mismatches.append(f"{key} ({value_wanted} requested, {value_applied} applied)")
+    return mismatches
+
+
+def body_extents(body: Any) -> list[float] | None:
+    """Exact bounding box of one body, [xmin, ymin, zmin, xmax, ymax, zmax] in metres.
+
+    IBody2::GetExtremePoint evaluates the body's farthest point along a
+    direction on the exact geometry (six calls, one per half-axis).
+    IBody2::GetBodyBox and IPartDoc::GetPartBox are documented as approximate
+    and may shift between rebuilds, so no size a caller compares comes from
+    them.  None when SOLIDWORKS finds no extreme point or refuses the call.
+    """
+    flag_methods(body, "GetExtremePoint")
+    low: list[float] = []
+    high: list[float] = []
+    for axis in range(3):
+        for sign, target in ((-1.0, low), (1.0, high)):
+            direction = [0.0, 0.0, 0.0]
+            direction[axis] = sign
+            point = [byref_double() for _ in range(3)]
+            try:
+                found = body.GetExtremePoint(*direction, *point)
+            except Exception:
+                return None
+            if not found:
+                return None
+            target.append(float(point[axis].value))
+    return low + high
+
+
+def bodies_extents(bodies: Sequence[Any]) -> list[float] | None:
+    """Union of the exact boxes of several bodies; None without bodies or when one is unknown."""
+    boxes = [body_extents(body) for body in bodies]
+    if not boxes or any(box is None for box in boxes):
+        return None
+    known = [box for box in boxes if box is not None]
+    return [min(box[i] for box in known) for i in range(3)] + [max(box[i + 3] for box in known) for i in range(3)]
+
+
+def box_mm(box: Sequence[float]) -> dict[str, list[float]]:
+    """min_mm, max_mm and size_mm of a metre box, rounded as the tools report them."""
+    return {
+        "min_mm": mm_point(box[0:3]),
+        "max_mm": mm_point(box[3:6]),
+        "size_mm": [round(to_mm(box[i + 3] - box[i]), 6) for i in range(3)],
+    }
+
+
+def volume_total_mm3(bodies: list[dict[str, Any]]) -> float | None:
+    """Sum of the bodies' ``volume_mm3``, or None when any body lacks one.
+
+    A partial sum would read as a smaller part, so an unknown volume makes
+    the total unknown.
+    """
+    if not all("volume_mm3" in b for b in bodies):
+        return None
+    return round(sum(b["volume_mm3"] for b in bodies), 4)
 
 
 def get_bodies(doc: Any, body_type: int = BODY_SOLID) -> list[Any]:
@@ -1156,11 +1430,9 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        resolved_name = open_sketch_name(doc, sketch)
     else:
-        resolved_name, feature = resolve_sketch(doc, sketch_name)
+        resolved_name, feature = resolve_sketch(doc, sketch_name, include_3d=True)
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
@@ -1198,7 +1470,14 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
     return resolved_name, segments
 
 
-def sketch_segment_objects(doc: Any, sketch_name: str | None = None) -> list[Any]:
+def sketch_segment_objects(doc: Any, sketch_name: str | None = None, include_3d: bool = False) -> list[Any]:
+    """Segments of the open sketch, of a named sketch, or of the newest one.
+
+    A named sketch may be 2D or 3D.  The unnamed default is the newest 2D
+    sketch, the same one the profile features take, so a selection such as a
+    revolve axis cannot land in a 3D path while the profile comes from the 2D
+    sketch; path readers pass ``include_3d`` for the newest sketch of either kind.
+    """
     manager = sketch_manager(doc)
     sketch = manager.ActiveSketch
     if document_type(doc) == 3:
@@ -1206,18 +1485,19 @@ def sketch_segment_objects(doc: Any, sketch_name: str | None = None) -> list[Any
         if sketch is None:
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
     elif sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=include_3d or bool(sketch_name))
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
     return as_list(safe(sketch, "GetSketchSegments"))
 
 
-def sketch_point_objects(doc: Any, sketch_name: str | None = None) -> list[Any]:
+def sketch_point_objects(doc: Any, sketch_name: str | None = None, include_3d: bool = False) -> list[Any]:
+    """Points of the open, named or newest sketch; the unnamed default is 2D, as for segments."""
     manager = sketch_manager(doc)
     sketch = manager.ActiveSketch
     if sketch is None or sketch_name:
-        _, feature = resolve_sketch(doc, sketch_name)
+        _, feature = resolve_sketch(doc, sketch_name, include_3d=include_3d or bool(sketch_name))
         sketch = value(feature, "GetSpecificFeature2")
     if sketch is None:
         raise RuntimeError("No sketch is open and no sketch name was supplied.")
@@ -1619,10 +1899,16 @@ def feature_result(doc: Any, feature: Any, action: str, **data: Any) -> dict[str
     return payload
 
 
-def rename_feature(feature: Any, name: str | None) -> None:
-    if not name:
-        return
+def rename_feature(feature: Any, name: str | None) -> str | None:
+    """Rename a feature and return the name it actually carries afterwards.
+
+    SOLIDWORKS refuses a name that is already taken, and the refusal only
+    logs here; the caller must report the returned name, never the wanted one.
+    """
+    if not name or feature is None:
+        return None
     try:
         feature.Name = name
     except Exception:
         logger.info("Could not rename feature to %s", name)
+    return str(feature_property(feature, "Name", "")) or None
