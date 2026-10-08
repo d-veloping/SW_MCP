@@ -319,6 +319,19 @@ class TrimNoOpTests(unittest.TestCase):
         self.assertFalse(wm.bodies_unchanged(self.before, after))
 
 
+class TrimCountTests(unittest.TestCase):
+    """Butt and miter take one member against one body; only the end trim takes several."""
+
+    def test_one_against_one_is_fine_for_every_corner_type(self) -> None:
+        for corner in ("butt1", "butt2", "miter", "trim"):
+            self.assertIsNone(wm.trim_count_error(corner, 1, 1))
+
+    def test_several_bodies_need_the_end_trim(self) -> None:
+        self.assertIsNone(wm.trim_count_error("trim", 2, 3))
+        self.assertIn("2 bodies and 1 boundaries", wm.trim_count_error("butt1", 2, 1))
+        self.assertIn("1 bodies and 2 boundaries", wm.trim_count_error("miter", 1, 2))
+
+
 class EnumTableTests(unittest.TestCase):
     def test_enum_tables_match_the_type_library(self) -> None:
         self.assertEqual(wm.CONNECTED_SEGMENTS, {"simple_cut": 1, "coped_cut": 2})

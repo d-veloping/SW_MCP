@@ -186,7 +186,7 @@ documented as approximate and are not used for a size anybody compares.
 | `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
 | `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward. |
-| `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
+| `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
 | `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
 ### Inspection — the feedback channel

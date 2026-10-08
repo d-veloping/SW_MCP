@@ -142,6 +142,21 @@ def bodies_unchanged(before: dict[str, dict[str, Any]], after: list[dict[str, An
     return True
 
 
+def trim_count_error(corner_type: str, targets: int, boundaries: int) -> str | None:
+    """Why a trim with these counts cannot be honoured, or None.
+
+    Only the end trim (corner_type trim) takes several target or boundary
+    bodies; butt and miter act on one member against one body.  Measured on
+    2016 SP3: two targets with butt1 or miter trim neither of them.
+    """
+    if corner_type == "trim" or (targets <= 1 and boundaries <= 1):
+        return None
+    return (
+        f"corner_type {corner_type} trims one member against one body; got {targets} bodies and {boundaries} "
+        "boundaries. Call once per member, or use corner_type trim for several at once."
+    )
+
+
 def _ensure_weldment(doc: Any) -> Any:
     """Add the Weldment feature when the part has none.
 
@@ -504,7 +519,8 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
         "corner_type": {
             "type": "string", "enum": ["butt1", "butt2", "miter", "trim"],
             "description": "How the member ends: butt1, butt2 or miter against a body; trim cuts it at a face or plane "
-                           "and keeps both pieces. Defaults to butt1 with trimming_bodies and to trim otherwise.",
+                           "and keeps both pieces. Defaults to butt1 with trimming_bodies and to trim otherwise. "
+                           "Only trim takes several bodies or several boundaries in one call.",
         },
         "coped_cut": {"type": "boolean", "default": False},
         "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming."},
@@ -527,6 +543,10 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
         trimming.extend(selected_objects(doc))
     if not trimming:
         return result(False, "Give trimming_bodies or trimming_selection (faces or planes): something for the members to stop at.")
+    corner_type = str(args.get("corner_type") or ("butt1" if args.get("trimming_bodies") else "trim"))
+    count_error = trim_count_error(corner_type, len(to_trim), len(trimming))
+    if count_error:
+        return result(False, count_error)
     # The two extension bits are set as the dialog does, and they change
     # nothing on 2016 either way: with butt1 the trimming member always grows
     # over the end of the trimmed one (measured with 0, 1, 2 and 3), so the
@@ -541,7 +561,6 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
     # A body boundary wants butt or miter; a face or plane boundary wants
     # trim, which the butt and miter types silently leave uncut (measured:
     # butt1 against a plane builds a feature that changes nothing).
-    corner_type = str(args.get("corner_type") or ("butt1" if args.get("trimming_bodies") else "trim"))
     before = {b["name"]: b for b in bodies_summary(doc)}
     clear_selection(doc)
     feature = feature_manager(doc).InsertWeldmentTrimFeature2(
