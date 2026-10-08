@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from .sw_core import (
     result,
     running_app,
     safe,
+    save_flag,
     discover_template,
     tool,
     value,
@@ -211,9 +213,32 @@ def new_document(kind: str) -> dict[str, Any]:
         time.sleep(NEW_DOCUMENT_POLL_S)
 
 
+def _same_file(a: str, b: str) -> bool:
+    return bool(a and b) and os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
+def _already_open(app: Any, path: Path) -> bool | None:
+    """Whether a document with this file is open: None when the list or any entry cannot be read, because then
+    nobody can tell."""
+    try:
+        docs = as_list(value(app, "GetDocuments"))
+    except Exception:
+        return None
+    found = False
+    for doc in docs:
+        try:
+            found = found or _same_file(str(value(doc, "GetPathName") or ""), str(path))
+        except Exception:
+            return None
+    return found
+
+
 @tool(
     "open_document",
-    "Open an existing .sldprt, .sldasm, or .slddrw file and make it the active document.",
+    "Open an existing .sldprt, .sldasm, or .slddrw file and make it the active document. `document` is the opened "
+    "file, `already_open` says whether it was open before the call (null when the open documents could not be "
+    "read). Succeeds only once SOLIDWORKS reports this document as active; fails (with `document`) if another "
+    "document becomes active or the activation does not show within a few seconds.",
     {"path": {"type": "string"}},
     ["path"],
 )
@@ -225,10 +250,15 @@ def open_document(args: dict[str, Any]) -> dict[str, Any]:
     doc_type = {".sldprt": 1, ".sldasm": 2, ".slddrw": 3}.get(path.suffix.lower())
     if doc_type is None:
         return result(False, "Only .sldprt, .sldasm, and .slddrw files can be opened.")
+    # read before OpenDoc6 in the same call: a caller that closes what it opened must know whether it opened it
+    already_open = _already_open(app, path)
+    previous = _identity(app.ActiveDoc)
     errors, warnings = byref_long(0), byref_long(0)
     doc = app.OpenDoc6(str(path), doc_type, 0, "", errors, warnings)
     if doc is None:
-        return result(False, f"SOLIDWORKS could not open {path}.", error_code=int(errors.value))
+        return result(False, f"SOLIDWORKS could not open {path}.", error_code=int(errors.value), already_open=already_open)
+    opened = document_info(doc)
+    own = (opened["title"], opened["path"])
     # OpenDoc6 returns an already-open document without activating it.  That
     # left the next tool operating on whichever drawing or part happened to be
     # active, despite this tool promising otherwise.
@@ -239,22 +269,45 @@ def open_document(args: dict[str, Any]) -> dict[str, Any]:
             False,
             f"Opened {path}, but SOLIDWORKS could not make it active.",
             error_code=int(activation_errors.value),
-            document=document_info(doc),
+            document=opened, already_open=already_open,
         )
-    return result(True, f"Opened and activated {path}.", document=document_info(app.ActiveDoc))
+    # After ActivateDoc3, SOLIDWORKS 2016 can still report the previous document as active for a moment (ClauSW
+    # issue #107).  The answer names the opened document and only succeeds once it is the active one; the wait
+    # lasts only while exactly the previous document is active, and nothing is activated again meanwhile.
+    started = time.monotonic()
+    while True:
+        active = app.ActiveDoc
+        identity = _identity(active)
+        waited = round((time.monotonic() - started) * 1000)
+        if identity == own:
+            return result(True, f"Opened and activated {path}.", document=opened, already_open=already_open,
+                          activated=True, wait_ms=waited)
+        if identity != previous or time.monotonic() - started >= NEW_DOCUMENT_ACTIVATION_S:
+            return result(
+                False,
+                f"Opened {path}, but SOLIDWORKS reports '{identity[0] if identity else 'none'}' as active "
+                f"after {waited} ms; nothing should be done in either.",
+                document=opened, already_open=already_open, activated=False, wait_ms=waited,
+                active_document=None if active is None else document_info(active),
+            )
+        time.sleep(NEW_DOCUMENT_POLL_S)
 
 
 @tool(
     "close_document",
     "Close a document without saving: the active one, or the one whose title or path is given. "
     "Unsaved changes are discarded, so save first if they matter. Useful before re-running a build "
-    "that saves to a path SOLIDWORKS still has open.",
-    {"title": {"type": "string", "description": "Title as shown in the window (e.g. 'Part1') or a full path. Defaults to the active document."}},
+    "that saves to a path SOLIDWORKS still has open. With `only_if_clean` the document is closed only if it has "
+    "no unsaved changes: when it has, or when that cannot be read, nothing is closed (`reason` dirty or unreadable).",
+    {"title": {"type": "string", "description": "Title as shown in the window (e.g. 'Part1') or a full path. Defaults to the active document."},
+     "only_if_clean": {"type": "boolean", "description": "Close only a document without unsaved changes; default false."}},
 )
 def close_document(args: dict[str, Any]) -> dict[str, Any]:
     app = running_app()
     wanted = str(args.get("title") or "").strip()
     target = None
+    target_doc = None
+    target_path = ""
     for doc in as_list(value(app, "GetDocuments")):
         try:
             title = str(value(doc, "GetTitle"))
@@ -263,13 +316,21 @@ def close_document(args: dict[str, Any]) -> dict[str, Any]:
             continue
         if not wanted:
             if app.ActiveDoc is not None and title == str(value(app.ActiveDoc, "GetTitle")):
-                target = title
+                target, target_doc, target_path = title, doc, path
                 break
         elif wanted in (title, path) or Path(path).stem == wanted or title.split(" - ")[0] == wanted:
-            target = title
+            target, target_doc, target_path = title, doc, path
             break
     if target is None:
         return result(False, f"No open document matches '{wanted or 'the active document'}'.")
+    if args.get("only_if_clean"):
+        # read right before CloseDoc in the same call: a change made after a separate check would be discarded
+        flag = save_flag(target_doc)
+        if flag is not False:
+            reason = "unreadable" if flag is None else "dirty"
+            what = "has unsaved changes" if reason == "dirty" else "has a save flag that cannot be read"
+            return result(False, f"Did not close '{target}': it {what}.", closed=None, reason=reason,
+                          document={"title": target, "path": target_path})
     active_title = ""
     try:
         if app.ActiveDoc is not None:

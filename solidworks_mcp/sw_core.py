@@ -572,17 +572,23 @@ def require_assembly() -> tuple[Any, Any]:
     return app, doc
 
 
+def save_flag(doc: Any) -> bool | None:
+    """Whether the document has unsaved changes; None when the flag cannot be read or is not a boolean.  Unknown is
+    never "unchanged": a caller may decide to discard on it."""
+    try:
+        raw = value(doc, "GetSaveFlag")
+    except Exception:
+        return None
+    return bool(raw) if isinstance(raw, (bool, int)) else None
+
+
 def document_info(doc: Any) -> dict[str, Any]:
     doc_type_num = document_type(doc)
-    try:
-        dirty = bool(value(doc, "GetSaveFlag"))
-    except Exception:
-        dirty = False
     return {
         "title": str(value(doc, "GetTitle")),
         "path": str(value(doc, "GetPathName") or ""),
         "document_type": DOC_TYPES.get(doc_type_num, f"unknown ({doc_type_num})"),
-        "dirty": dirty,
+        "dirty": save_flag(doc),
     }
 
 
