@@ -165,6 +165,26 @@ class EdgeFlangeCleanupTests(unittest.TestCase):
                 sm.sheet_metal_edge_flange({"selection": {"edges": [1, 2]}, "length_mm": 10})
         delete.assert_called_once_with(doc, [first])
 
+    def test_profiles_are_deleted_when_the_insert_raises(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        doc = SimpleNamespace(SketchManager=SimpleNamespace(ActiveSketch=None))
+        profiles = [(object(), object()), (object(), object())]
+        with mock.patch.object(sm, "require_part", return_value=(None, doc)), \
+                mock.patch.object(sm, "_require_sheet_metal"), \
+                mock.patch.object(sm, "exit_active_sketch"), \
+                mock.patch.object(sm, "clear_selection"), \
+                mock.patch.object(sm, "_edge_objects", return_value=["e1", "e2"]), \
+                mock.patch.object(sm, "_draw_flange_profile", side_effect=list(profiles)), \
+                mock.patch.object(sm, "_feature_names", return_value=[]), \
+                mock.patch.object(sm, "_new_features", return_value=["leftover"]), \
+                mock.patch.object(sm, "_build", side_effect=OSError("Typenkonflikt.")), \
+                mock.patch.object(sm, "_delete_features") as delete:
+            with self.assertRaises(OSError):
+                sm.sheet_metal_edge_flange({"selection": {"edges": [1, 2]}, "length_mm": 10})
+        delete.assert_called_once_with(doc, [profiles[0][0], profiles[1][0], "leftover"])
+
 
 class FakeFlatPattern:
     def __init__(self, suppressed: bool) -> None:

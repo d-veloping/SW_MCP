@@ -56,10 +56,10 @@ from .sw_core import (
     bodies_extents,
     box_mm,
     clear_selection,
+    delete_features,
     dispatch_array,
     double_array,
     exit_active_sketch,
-    extension,
     feature_manager,
     feature_property,
     feature_result,
@@ -387,24 +387,7 @@ def _fill_flange_profile(app: Any, doc: Any, sketch_feature: Any, edge: Any, len
     return sketch
 
 
-def _delete_features(doc: Any, features: list[Any]) -> None:
-    names = [str(feature_property(f, "Name", "")) for f in features]
-    if not names:
-        return
-    clear_selection(doc)
-    selected = 0
-    for feature in features:
-        try:
-            if bool(selectable(feature).Select2(True, 0)):
-                selected += 1
-        except Exception:
-            pass
-    if selected:
-        try:
-            extension(doc).DeleteSelection2(0)
-        except Exception:
-            logger.info("Could not delete leftover features %s", names)
-    clear_selection(doc)
+_delete_features = delete_features
 
 
 def _dxf_entities(text: list[str]) -> list[dict[str, list[str]]]:
@@ -663,14 +646,21 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
         raise
 
     clear_selection(doc)
-    feature, created = _build(
-        doc, "edge flange",
-        lambda: feature_manager(doc).InsertSheetMetalEdgeFlange2(
-            dispatch_array(edges), dispatch_array(sketches), options, angle, radius,
-            position, length, relief, ratio, 0.0, 0.0, reference, pythoncom.Nothing,
-        ),
-        ("EdgeFlange",),
-    )
+    before_insert = _feature_names(doc)
+    try:
+        feature, created = _build(
+            doc, "edge flange",
+            lambda: feature_manager(doc).InsertSheetMetalEdgeFlange2(
+                dispatch_array(edges), dispatch_array(sketches), options, angle, radius,
+                position, length, relief, ratio, 0.0, 0.0, reference, pythoncom.Nothing,
+            ),
+            ("EdgeFlange",),
+        )
+    except Exception:
+        # A COM error from the insert (bad argument, refused edge) is reported
+        # as such; the profiles and anything the call added still go.
+        _delete_features(doc, sketch_features + _new_features(doc, before_insert))
+        raise
     if feature is None:
         # Leave no half-built profile sketches behind.
         _delete_features(doc, sketch_features + created)

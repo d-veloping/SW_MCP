@@ -984,6 +984,32 @@ def body_volume_mm3(body: Any) -> float | None:
         return None
 
 
+def delete_features(doc: Any, features: list[Any]) -> None:
+    """Delete features a failed call left behind, so the tree shows no half-built state.
+
+    Best effort: a feature that cannot be selected or deleted is logged, not
+    raised, because the caller is already reporting the failure that made the
+    features useless.
+    """
+    names = [str(feature_property(f, "Name", "")) for f in features if f is not None]
+    if not names:
+        return
+    clear_selection(doc)
+    selected = 0
+    for feature in features:
+        try:
+            if feature is not None and bool(selectable(feature).Select2(True, 0)):
+                selected += 1
+        except Exception:
+            pass
+    if selected:
+        try:
+            extension(doc).DeleteSelection2(0)
+        except Exception:
+            logger.info("Could not delete leftover features %s", names)
+    clear_selection(doc)
+
+
 def body_extents(body: Any) -> list[float] | None:
     """Exact bounding box of one body, [xmin, ymin, zmin, xmax, ymax, zmax] in metres.
 

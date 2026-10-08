@@ -43,7 +43,7 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp.sw_core import active_document, running_app, value
 from solidworks_mcp.sw_file import create_new_document
-from solidworks_mcp.sw_inspect import list_bodies, list_faces
+from solidworks_mcp.sw_inspect import list_bodies, list_faces, list_features
 from solidworks_mcp.sw_refgeom import create_plane
 from solidworks_mcp.sw_weldment import (
     create_3d_sketch,
@@ -98,6 +98,14 @@ def main() -> int:
             {"x1_mm": 300, "y1_mm": 200, "z1_mm": 0, "x2_mm": 300, "y2_mm": 200, "z2_mm": -150},
         ]}), "create_3d_sketch")
         check("3D sketch segments", sketch["data"]["segments"], [0, 1, 2])
+        features_before = {f["name"] for f in list_features({})["data"]["features"]}
+        broken = create_3d_sketch({"lines": [
+            {"x1_mm": 0, "y1_mm": 0, "z1_mm": 50, "x2_mm": 100, "y2_mm": 0, "z2_mm": 50},
+            {"x1_mm": 100, "y1_mm": 0, "z1_mm": 50, "x2_mm": 100, "y2_mm": 0, "z2_mm": 50},
+        ]})
+        check("a degenerate line fails the 3D sketch", broken["ok"], False)
+        check("the incomplete 3D sketch is removed", broken["data"].get("sketch_removed"), True)
+        check("no new feature after the failed 3D sketch", {f["name"] for f in list_features({})["data"]["features"]} == features_before, True)
 
         profiles = require(list_weldment_profiles({"standard": "iso", "type": "square tube"}), "list_weldment_profiles")
         check("iso square tube 20 x 20 x 2 listed", any(p["size"] == "20 x 20 x 2" for p in profiles["data"]["profiles"]), True)

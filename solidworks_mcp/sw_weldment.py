@@ -44,12 +44,14 @@ from .sw_core import (
     body_volume_mm3,
     box_mm,
     clear_selection,
+    delete_features,
     dispatch_array,
     exit_active_sketch,
     extension,
     feature_manager,
     feature_property,
     feature_result,
+    find_feature,
     flag_methods,
     get_bodies,
     iter_features,
@@ -306,6 +308,7 @@ def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
     if doc.SketchManager.ActiveSketch is None:
         return result(False, "SOLIDWORKS did not open a 3D sketch.")
     created = 0
+    failure: Exception | None = None
     try:
         manager.AddToDB = True
         for line in args["lines"]:
@@ -315,29 +318,42 @@ def create_3d_sketch(args: dict[str, Any]) -> dict[str, Any]:
             )
             if segment is not None:
                 created += 1
+    except Exception as exc:
+        failure = exc
     finally:
         manager.AddToDB = False
         manager.Insert3DSketch(True)
     new = [n for n in _feature_names(doc) if n not in before]
     if not new:
+        if failure is not None:
+            raise failure
         return result(False, "The 3D sketch was not added to the feature tree.")
     name = new[-1]
-    from .sw_core import find_feature
-
     feature = find_feature(doc, name)
+    segments = len(as_list(safe(value(feature, "GetSpecificFeature2"), "GetSketchSegments")))
+    wanted_segments = len(args["lines"])
+    if failure is not None or segments != wanted_segments:
+        # An incomplete path must not stay as the newest 3D sketch, where an
+        # unnamed weldment_structural_member would pick it up.
+        delete_features(doc, [feature])
+        removed = find_feature(doc, name) is None
+        reason = (
+            f"CreateLine raised {failure}" if failure is not None
+            else f"SOLIDWORKS created {segments} of {wanted_segments} segments"
+        )
+        return result(
+            False,
+            f"{reason}; the incomplete 3D sketch '{name}' was {'removed' if removed else 'NOT removed'}.",
+            created=created, sketch_removed=removed,
+        )
     wanted = args.get("name")
     # The name reported is the one the tree carries, which differs from the
     # wanted one when SOLIDWORKS refuses the rename (a taken name, say).
     name = rename_feature(feature, wanted) or name
-    segments = len(as_list(safe(value(feature, "GetSpecificFeature2"), "GetSketchSegments")))
-    ok = segments == len(args["lines"])
-    message = (
-        f"Created 3D sketch '{name}' with {segments} segments." if ok
-        else f"Created 3D sketch '{name}', but it holds {segments} segments instead of {len(args['lines'])}."
-    )
+    message = f"Created 3D sketch '{name}' with {segments} segments."
     if wanted and name != str(wanted):
         message += f" SOLIDWORKS kept the name '{name}' instead of '{wanted}'."
-    return result(ok, message, sketch=name, segments=list(range(segments)), created=created)
+    return result(True, message, sketch=name, segments=list(range(segments)), created=created)
 
 
 @tool(
