@@ -43,6 +43,7 @@ from .sw_core import (
     result,
     running_app,
     safe,
+    save_flag,
     discover_template,
     tool,
     value,
@@ -324,12 +325,9 @@ def close_document(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, f"No open document matches '{wanted or 'the active document'}'.")
     if args.get("only_if_clean"):
         # read right before CloseDoc in the same call: a change made after a separate check would be discarded
-        try:
-            flag = value(target_doc, "GetSaveFlag")
-        except Exception:
-            flag = None
-        if not isinstance(flag, (bool, int)) or flag:
-            reason = "unreadable" if not isinstance(flag, (bool, int)) else "dirty"
+        flag = save_flag(target_doc)
+        if flag is not False:
+            reason = "unreadable" if flag is None else "dirty"
             what = "has unsaved changes" if reason == "dirty" else "has a save flag that cannot be read"
             return result(False, f"Did not close '{target}': it {what}.", closed=None, reason=reason,
                           document={"title": target, "path": target_path})

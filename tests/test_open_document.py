@@ -202,7 +202,8 @@ class CloseOnlyIfCleanTests(unittest.TestCase):
         return app
 
     def test_dirty_or_unreadable_flag_never_reaches_closedoc(self) -> None:
-        for dirty, reason in ((True, "dirty"), (1, "dirty"), (RuntimeError("COM"), "unreadable"), (None, "unreadable")):
+        for dirty, reason in ((True, "dirty"), (1, "dirty"), (RuntimeError("COM"), "unreadable"), (None, "unreadable"),
+                              ("ja", "unreadable")):
             with self.subTest(dirty=dirty):
                 app = self.app(dirty)
                 answer = self.close(app, only_if_clean=True)
@@ -226,7 +227,9 @@ class CloseOnlyIfCleanTests(unittest.TestCase):
 
 class DocumentInfoTests(unittest.TestCase):
     def test_unreadable_save_flag_is_unknown_not_clean(self) -> None:
-        self.assertIsNone(sw_core.document_info(FakeDoc("Bolzen", dirty=RuntimeError("COM")))["dirty"])
+        for unreadable in (RuntimeError("COM"), None, "ja", object()):
+            with self.subTest(flag=repr(unreadable)):
+                self.assertIsNone(sw_core.document_info(FakeDoc("Bolzen", dirty=unreadable))["dirty"])
         self.assertIs(sw_core.document_info(FakeDoc("Bolzen", dirty=False))["dirty"], False)
         self.assertIs(sw_core.document_info(FakeDoc("Bolzen", dirty=True))["dirty"], True)
 
