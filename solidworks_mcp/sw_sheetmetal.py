@@ -484,7 +484,7 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
         if e["type"][0] == "LINE" and (e.get("6") or [""])[0].upper().startswith("CENTER")
     )
     points = [point for e in entities for point in dxf_entity_points(e)]
-    outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
+    outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "ELLIPSE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
     summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline}
     if any(dxf_curved_unparsed(e) for e in entities):
         summary["extents_note"] = "Extents left out: the outline has splines, ellipses or bulged polylines."

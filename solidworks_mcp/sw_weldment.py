@@ -68,6 +68,7 @@ from .sw_core import (
     to_rad,
     tool,
     value,
+    volume_total_mm3,
 )
 
 
@@ -371,7 +372,7 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
         return payload
     bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
     payload["data"]["bodies"] = bodies
-    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     payload["data"]["weldment_added"] = added_weldment
     if len(bodies) != len(segments):
         payload["ok"] = False
@@ -407,7 +408,7 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
         to_m(args["thickness_mm"]), inset_mm is not None, chamfer is not None,
         to_m(inset_mm) if inset_mm is not None else 0.0, float(args.get("inset_ratio", 0.5)),
         to_m(chamfer) if chamfer is not None else 0.0,
-        False, 0.0, bool(args.get("reverse", False)), bool(args.get("inward", False)),
+        chamfer is not None, 0.0, bool(args.get("reverse", False)), bool(args.get("inward", False)),
     )
     rename_feature(feature, args.get("name"))
     payload = feature_result(doc, feature, "end cap", faces=count, thickness_mm=args["thickness_mm"])
@@ -416,7 +417,7 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
         return payload
     bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
     payload["data"]["bodies"] = bodies
-    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     definition = safe(feature, "GetDefinition")
     if definition is not None:
         payload["data"]["end_cap"] = {
@@ -570,7 +571,7 @@ def weldment_gusset(args: dict[str, Any]) -> dict[str, Any]:
         return payload
     bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
     payload["data"]["bodies"] = bodies
-    payload["data"]["volume_mm3"] = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
     definition = safe(feature, "GetDefinition")
     if definition is not None:
         payload["data"]["gusset"] = {

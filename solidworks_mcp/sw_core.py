@@ -980,6 +980,17 @@ def body_volume_mm3(body: Any) -> float | None:
         return None
 
 
+def volume_total_mm3(bodies: list[dict[str, Any]]) -> float | None:
+    """Sum of the bodies' ``volume_mm3``, or None when any body lacks one.
+
+    A partial sum would read as a smaller part, so an unknown volume makes
+    the total unknown.
+    """
+    if not all("volume_mm3" in b for b in bodies):
+        return None
+    return round(sum(b["volume_mm3"] for b in bodies), 4)
+
+
 def get_bodies(doc: Any, body_type: int = BODY_SOLID) -> list[Any]:
     return [body for body, _, _ in iter_body_context(doc, body_type)]
 

@@ -218,6 +218,11 @@ class BodyVolumeTests(unittest.TestCase):
     def test_a_body_without_mass_properties_reports_none(self) -> None:
         self.assertIsNone(sw_core.body_volume_mm3(FakeBodyWithMass(None)))
 
+    def test_volume_total_is_unknown_when_a_body_lacks_a_volume(self) -> None:
+        self.assertEqual(sw_core.volume_total_mm3([{"volume_mm3": 1.5}, {"volume_mm3": 2.5}]), 4.0)
+        self.assertIsNone(sw_core.volume_total_mm3([{"volume_mm3": 1.5}, {"name": "x"}]))
+        self.assertEqual(sw_core.volume_total_mm3([]), 0.0)
+
     def _list_bodies(self, *volumes: float | None) -> dict:
         from unittest import mock
 

@@ -56,6 +56,7 @@ from .sw_core import (
     to_deg,
     to_mm,
     value,
+    volume_total_mm3,
     whats_wrong,
 )
 
@@ -194,13 +195,7 @@ def list_bodies(args: dict[str, Any]) -> dict[str, Any]:
         if volume is not None:
             entry["volume_mm3"] = volume
         bodies.append(entry)
-    # The sum is only reported when every body gave its volume; a partial
-    # sum would read as a smaller part.
-    total = (
-        round(sum(b["volume_mm3"] for b in bodies), 4)
-        if all("volume_mm3" in b for b in bodies) else None
-    )
-    return result(True, f"Read {len(bodies)} solid bodies.", bodies=bodies, volume_sum_mm3=total)
+    return result(True, f"Read {len(bodies)} solid bodies.", bodies=bodies, volume_sum_mm3=volume_total_mm3(bodies))
 
 
 @tool("list_features", "Read-only: list the active document feature tree in order.", {})
