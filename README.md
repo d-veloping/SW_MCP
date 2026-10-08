@@ -163,7 +163,7 @@ Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`
 | Tool | Purpose |
 | --- | --- |
 | `sheet_metal_base_flange` | First sheet metal body from a sketch: an open chain of lines is thickened and extruded (each corner a bend), a closed outline becomes a plate. Sets thickness and bend radius for the part. |
-| `sheet_metal_edge_flange` | Flange along one or more straight edges, with angle, length (inner/outer virtual sharp or bend tangent), bend position, radius and relief. The profile sketch is drawn for you. |
+| `sheet_metal_edge_flange` | Flange along one or more straight edges, with angle, length from the inner virtual sharp, bend position, radius and relief. The profile sketch is drawn for you. |
 | `sheet_metal_miter_flange` | Profile sketch swept along connected edges with mitred corners, rip gap and optional start/end offsets. |
 | `sheet_metal_hem` | Closed, open or rolled hem on selected edges. |
 | `sheet_metal_closed_corner` / `sheet_metal_break_corner` | Close the corner between two flanges (butt / overlap / underlap with a gap, read back); fillet or chamfer the corners of a sheet edge. |
@@ -185,9 +185,11 @@ nothing are removed again: a 3D sketch whose lines did not all appear, the
 profile sketches of a failed edge flange, a Weldment feature added for a
 member that was refused. The boxes of the sheet metal, weldment and
 `list_bodies` results come from `IBody2::GetExtremePoint` (six calls per
-body, exact on the geometry); `get_bounding_box` keeps `GetPartBox`, which
-SOLIDWORKS documents as approximate, so it is for orientation, not for a
-check. `sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
+body, exact on the geometry; for a rotated assembly component `list_bodies`
+transforms the two corners, which is exact only without rotation);
+`get_bounding_box` keeps `GetPartBox`, which SOLIDWORKS documents as
+approximate, so it is for orientation, not for a check.
+`sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
 metal parts only.
 
 ### Weldments
@@ -196,7 +198,7 @@ metal parts only.
 | `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
 | `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
-| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered, reversed or inward (the member is cut back); one new body per selected face, every option held against the readback. |
+| `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward (the member is cut back); one new body per selected face, every option held against the readback. |
 | `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
 | `weldment_gusset` | Triangle or polygon gusset plate between two supporting faces, thickness inner / outer / both sides, plane at start / centre / end of the corner. |
 
@@ -344,12 +346,19 @@ every line into "unknown".
   the API — `ISheetMetalFeatureData` and `ICustomBendAllowance` accept the
   value and keep the document default — so `sheet_metal_info` reports what the
   flat pattern actually uses. `tear_drop` and `double` hems are not accepted.
-  `InsertSheetMetalEdgeFlange2` measures the flange length from the inner
-  virtual sharp whatever dimension type it is given (the outer virtual sharp
-  builds the same flange and only reads back `length + t·tan(angle/2)`, the
-  bend tangent builds nothing), so `sheet_metal_edge_flange` offers no
-  length reference. `trim_side_bends` of the miter flange and `flip` of the
-  edge flange have no readback on 2016; the box tells.
+  With the profile this tool draws, `InsertSheetMetalEdgeFlange2` builds the
+  same flange whatever dimension type it is given: the outer virtual sharp
+  reads back `length + t·tan(angle/2)` for the same geometry, and the bend
+  tangent builds nothing; so `sheet_metal_edge_flange` offers no length
+  reference and measures from the inner virtual sharp. Options that the
+  feature definitions do not read back on 2016 (all measured 2026-10-08),
+  which are therefore passed and left to the geometry: `flip` and
+  `relief_type` of the edge flange, `trim_side_bends` of the miter flange,
+  `depth_mm` of the base flange, `position` of the hem, every parameter of
+  the corner relief (its feature has no definition at all), `gap_mm` and
+  `coped_cut` of the trim, `thickness_direction` and `location` of the
+  gusset. The end cap's reverse flag is not offered: it reads back as set and
+  moves nothing.
   `export_flat_pattern` needs a saved part, because `ExportToDWG2` takes the
   model path; `ExportFlatPatternView` is not used because it opens a file
   dialog. A gauge table is refused on this install's templates
@@ -383,14 +392,15 @@ the break corner against a closed-form number: flange volumes, the developed
 length from the K-factor, the material a break corner removes, the bend lines
 in the exported DXF; the hem, the closed corner and the corner relief are
 checked by readback, added or removed material and the DXF (32 checks on
-2016 SP3, plus 10 for the third part). `tests\live_weldment.py` does the same for weldments: members
+2016 SP3, plus 11 for the third part). `tests\live_weldment.py` does the same for weldments: members
 measure profile area times length and reach the mitred outer corner, the end
 cap its inset plate, the trimmed member its new length, the gussets a*b*t/2
 with their leg lengths and the polygon with its corner cut, a plane cut into
 two halves, and a degenerate 3D line leaves no sketch behind; a second pair
 with butt corners, a turned and mirrored profile and a gap, and end caps with
-ratio inset, chamfer, reverse and inward, are checked by readback and box
-(38 checks). A third sheet metal part checks an edge flange and a miter flange
+ratio inset and chamfer (volume), and inset by distance and inward (the
+plate ends flush inside, the recut member is reported), are checked by
+readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
 with every option off its default by readback and reach.
 
 Every tool has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified

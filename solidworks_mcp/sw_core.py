@@ -1033,6 +1033,57 @@ def delete_features(doc: Any, features: list[Any]) -> bool:
     return not remaining
 
 
+def read_member(obj: Any, name: str) -> Any:
+    """A readback member as SOLIDWORKS gives it, or None when it cannot be read.
+
+    None is the honest answer for a member this interface or this release
+    does not expose, or one that raises; readback_mismatches then reports
+    "nothing read back" instead of a default that happens to look applied.
+    """
+    if obj is None:
+        return None
+    try:
+        member = getattr(obj, name)
+        if callable(member) and not hasattr(member, "_oleobj_"):
+            member = member()
+    except Exception:
+        return None
+    return member
+
+
+def read_mm(obj: Any, name: str) -> float | None:
+    value_m = read_member(obj, name)
+    return None if value_m is None else round(to_mm(float(value_m)), 6)
+
+
+def read_deg(obj: Any, name: str) -> float | None:
+    value_rad = read_member(obj, name)
+    return None if value_rad is None else round(to_deg(float(value_rad)), 6)
+
+
+def read_bool(obj: Any, name: str) -> bool | None:
+    raw = read_member(obj, name)
+    return None if raw is None else bool(raw)
+
+
+def read_int(obj: Any, name: str) -> int | None:
+    raw = read_member(obj, name)
+    return None if raw is None else int(raw)
+
+
+def read_float(obj: Any, name: str) -> float | None:
+    raw = read_member(obj, name)
+    return None if raw is None else float(raw)
+
+
+def read_enum(obj: Any, name: str, table: dict[str, int]) -> str | None:
+    """The table key for an enum member, None when unread or outside the table."""
+    raw = read_int(obj, name)
+    if raw is None:
+        return None
+    return {v: k for k, v in table.items()}.get(raw)
+
+
 def readback_mismatches(wanted: dict[str, Any], applied: dict[str, Any] | None, tolerance: float = 1e-3) -> list[str]:
     """Which requested values SOLIDWORKS did not apply, judged by the feature's own readback.
 

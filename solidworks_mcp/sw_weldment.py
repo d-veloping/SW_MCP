@@ -52,6 +52,13 @@ from .sw_core import (
     find_feature,
     flag_methods,
     get_bodies,
+    read_bool,
+    read_deg,
+    read_enum,
+    read_float,
+    read_int,
+    read_member,
+    read_mm,
     readback_mismatches,
     rename_feature,
     require_part,
@@ -63,9 +70,7 @@ from .sw_core import (
     SELECTION_SCHEMA,
     sketch_manager,
     sketch_segment_objects,
-    to_deg,
     to_m,
-    to_mm,
     to_rad,
     tool,
     value,
@@ -189,6 +194,8 @@ def _ensure_weldment(doc: Any) -> Any:
         return None
     feature = feature_manager(doc).InsertWeldmentFeature()
     if not bool(safe(doc, "IsWeldment", False)):
+        if feature is not None:
+            delete_features(doc, [feature])
         raise RuntimeError("SOLIDWORKS did not turn the part into a weldment.")
     return feature
 
@@ -202,7 +209,7 @@ def _remove_weldment(doc: Any, feature: Any) -> bool:
 def _resolve_profile(app: Any, args: dict[str, Any]) -> Path:
     explicit = args.get("profile_path")
     if explicit:
-        path = Path(str(explicit)).expanduser()
+        path = Path(str(explicit)).expanduser().resolve()
         if path.suffix.lower() != PROFILE_SUFFIX or not path.is_file():
             raise RuntimeError(f"profile_path must be an existing {PROFILE_SUFFIX} file; {path} is not.")
         return path
@@ -451,9 +458,11 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
     applied = member_readback(feature)
     if applied is not None:
         payload["data"]["member"] = applied
+        if applied.get("profile_path") is not None:
+            applied["profile_path"] = os.path.normcase(applied["profile_path"])
     treatment = str(args.get("corner_treatment", "miter"))
     wanted = {
-        "profile_path": str(profile),
+        "profile_path": os.path.normcase(str(profile)),
         "connected_segments": str(args.get("connected_segments", "simple_cut")),
         "allow_protrusion": bool(args.get("allow_protrusion", False)),
         "groups": 1,
@@ -469,31 +478,74 @@ def weldment_structural_member(args: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def gusset_wanted(args: dict[str, Any]) -> dict[str, Any]:
+    """The gusset request as its definition must read it back.
+
+    The legs are compared as given; how SOLIDWORKS stores swapped legs was
+    not measured, so swap_legs skips them.  A polygon closed by an angle
+    reads d4 back as -1 (measured 2026-10-08), so only the given closer is
+    compared.  thickness_direction and location have no readback.
+    """
+    profile = str(args.get("profile", "triangle"))
+    polygon = GUSSET_PROFILES[profile]
+    swapped = bool(args.get("swap_legs", False))
+    d4 = args.get("d4_mm")
+    wanted: dict[str, Any] = {
+        "thickness_mm": float(args["thickness_mm"]),
+        "d1_mm": None if swapped else float(args["d1_mm"]),
+        "d2_mm": None if swapped else float(args["d2_mm"]),
+        "d3_mm": float(args["d3_mm"]) if polygon and not swapped else None,
+        "profile": profile,
+    }
+    if polygon and not swapped:
+        if d4 is not None:
+            wanted["d4_mm"] = float(d4)
+        else:
+            wanted["angle_deg"] = float(args.get("angle_deg", 45))
+    return wanted
+
+
+def end_cap_wanted(args: dict[str, Any]) -> dict[str, Any]:
+    """The end cap request as its definition must read it back."""
+    inset_mm = args.get("inset_mm")
+    chamfer = args.get("chamfer_mm")
+    return {
+        "thickness_mm": float(args["thickness_mm"]),
+        "inset_by_ratio": inset_mm is None,
+        "inset_ratio": float(args.get("inset_ratio", 0.5)) if inset_mm is None else None,
+        "inset_mm": float(inset_mm) if inset_mm is not None else None,
+        "chamfered": chamfer is not None,
+        "chamfer_mm": float(chamfer) if chamfer is not None else None,
+        "inward": END_CAP_INWARD if bool(args.get("inward", False)) else END_CAP_OUTWARD,
+    }
+
+
 def member_readback(feature: Any) -> dict[str, Any] | None:
     """What the structural member feature says it holds, from its definition and its one group.
 
     The groups are the ``Groups`` property of IStructuralMemberFeatureData
     (``GetGroups`` does not resolve through late binding on 2016 SP3).
     """
-    definition = safe(feature, "GetDefinition")
+    definition = read_member(feature, "GetDefinition")
     if definition is None:
         return None
-    connected_names = {v: k for k, v in CONNECTED_SEGMENTS.items()}
+    path = read_member(definition, "WeldmentProfilePath")
     applied: dict[str, Any] = {
-        "profile_path": str(safe(definition, "WeldmentProfilePath", "") or ""),
-        "connected_segments": connected_names.get(int(safe(definition, "ConnectedSegmentsOption", 0) or 0)),
-        "allow_protrusion": bool(safe(definition, "AllowProtrusion", False)),
+        "profile_path": None if path is None else str(path),
+        "connected_segments": read_enum(definition, "ConnectedSegmentsOption", CONNECTED_SEGMENTS),
+        "allow_protrusion": read_bool(definition, "AllowProtrusion"),
     }
-    groups = as_list(safe(definition, "Groups"))
-    applied["groups"] = len(groups)
+    raw_groups = read_member(definition, "Groups")
+    groups = as_list(raw_groups) if raw_groups is not None else None
+    applied["groups"] = None if groups is None else len(groups)
     if groups:
         group = groups[0]
-        treatment_names = {v: k for k, v in CORNER_TREATMENTS.items()}
-        apply = bool(safe(group, "ApplyCornerTreatment", False))
-        applied["corner_treatment"] = treatment_names.get(int(safe(group, "CornerTreatmentType", 0) or 0)) if apply else "none"
-        applied["angle_deg"] = round(to_deg(safe(group, "Angle", 0.0) or 0.0), 6)
-        applied["mirror_profile"] = bool(safe(group, "MirrorProfile", False))
-        applied["gap_mm"] = round(to_mm(safe(group, "GapWithinGroup", 0.0) or 0.0), 6)
+        apply = read_bool(group, "ApplyCornerTreatment")
+        treatment = read_enum(group, "CornerTreatmentType", CORNER_TREATMENTS)
+        applied["corner_treatment"] = None if apply is None else ("none" if not apply else treatment)
+        applied["angle_deg"] = read_deg(group, "Angle")
+        applied["mirror_profile"] = read_bool(group, "MirrorProfile")
+        applied["gap_mm"] = read_mm(group, "GapWithinGroup")
     return applied
 
 
@@ -535,7 +587,6 @@ def _insert_member_group(doc: Any, profile: Path, segments: list[Any], args: dic
         "inset_mm": {"type": "number", "minimum": 0, "description": "Inset as a distance instead of a ratio."},
         "chamfer_mm": {"type": "number", "minimum": 0, "description": "Chamfer the plate corners by this distance."},
         "inward": {"type": "boolean", "default": False, "description": "Sink the plate into the member instead of adding it beyond the end; the member is cut back and reported among the changed bodies."},
-        "reverse": {"type": "boolean", "default": False, "description": "Read back as set; on 2016 SP3 it did not move the plate (measured)."},
         "name": {"type": "string"},
     },
     ["selection", "thickness_mm"],
@@ -553,12 +604,13 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     # a given offset, but on 2016 SP3 inset_mm 1 with chamfer_mm 2 builds a
     # chamfered 18 x 18 x 3 plate of 948 mm³ (measured 2026-10-08).  The last
     # argument is swEndCapExtend_e, an integer (0 outward, 1 inward), and
-    # IsEndCapInward reads it back as that integer.
+    # IsEndCapInward reads it back as that integer.  BIsReverse before it is
+    # not offered: it reads back as set and moves nothing (measured 2026-10-08).
     feature = feature_manager(doc).InsertEndCapFeature3(
         to_m(args["thickness_mm"]), inset_mm is not None, chamfer is not None,
         to_m(inset_mm) if inset_mm is not None else 0.0, float(args.get("inset_ratio", 0.5)),
         to_m(chamfer) if chamfer is not None else 0.0,
-        chamfer is not None, 0.0, bool(args.get("reverse", False)), END_CAP_INWARD if inward else END_CAP_OUTWARD,
+        chamfer is not None, 0.0, False, END_CAP_INWARD if inward else END_CAP_OUTWARD,
     )
     rename_feature(feature, args.get("name"))
     payload = feature_result(doc, feature, "end cap", faces=count, thickness_mm=args["thickness_mm"])
@@ -574,35 +626,24 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
     payload["data"]["bodies_added"] = added
     if not inward:
         payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
-    definition = safe(feature, "GetDefinition")
+    definition = read_member(feature, "GetDefinition")
     applied = None
     if definition is not None:
         applied = {
-            "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
-            "inset_by_ratio": bool(safe(definition, "UseThicknessRatioForOffset", False)),
-            "inset_ratio": safe(definition, "ThicknessRatioForOffset"),
-            "inset_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
-            "chamfered": bool(safe(definition, "UseChamferCorners", False)),
-            "chamfer_mm": round(to_mm(safe(definition, "ChamferDistance", 0.0) or 0.0), 6),
-            "reverse": bool(safe(definition, "UseReverse", False)),
-            "inward": int(safe(definition, "IsEndCapInward", 0) or 0),
+            "thickness_mm": read_mm(definition, "Thickness"),
+            "inset_by_ratio": read_bool(definition, "UseThicknessRatioForOffset"),
+            "inset_ratio": read_float(definition, "ThicknessRatioForOffset"),
+            "inset_mm": read_mm(definition, "OffsetDistance"),
+            "chamfered": read_bool(definition, "UseChamferCorners"),
+            "chamfer_mm": read_mm(definition, "ChamferDistance"),
+            "inward": read_int(definition, "IsEndCapInward"),
         }
         payload["data"]["end_cap"] = applied
     # One plate per selected end face, and the plate as asked for.
     if added != count:
         payload["ok"] = False
         payload["message"] += f" Expected {count} new end cap bodies and found {added}."
-    wanted = {
-        "thickness_mm": float(args["thickness_mm"]),
-        "inset_by_ratio": inset_mm is None,
-        "inset_ratio": float(args.get("inset_ratio", 0.5)) if inset_mm is None else None,
-        "inset_mm": float(inset_mm) if inset_mm is not None else None,
-        "chamfered": chamfer is not None,
-        "chamfer_mm": float(chamfer) if chamfer is not None else None,
-        "reverse": bool(args.get("reverse", False)),
-        "inward": END_CAP_INWARD if inward else END_CAP_OUTWARD,
-    }
-    mismatches = readback_mismatches(wanted, applied)
+    mismatches = readback_mismatches(end_cap_wanted(args), applied)
     if mismatches:
         payload["ok"] = False
         payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
@@ -627,8 +668,8 @@ def weldment_end_cap(args: dict[str, Any]) -> dict[str, Any]:
                            "and keeps both pieces. Defaults to butt1 with trimming_bodies and to trim otherwise. "
                            "Only trim takes several bodies or several boundaries in one call.",
         },
-        "coped_cut": {"type": "boolean", "default": False},
-        "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming."},
+        "coped_cut": {"type": "boolean", "default": False, "description": "No readback on 2016 (measured); judge it by the bodies."},
+        "gap_mm": {"type": "number", "minimum": 0, "default": 0, "description": "Weld gap left after trimming. No readback on 2016 (measured); judge it by the bodies."},
         "name": {"type": "string"},
     },
     ["bodies"],
@@ -697,6 +738,15 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
         payload["ok"] = False
         payload["data"]["untouched_bodies"] = untouched
         payload["message"] += f" {len(untouched)} of the {len(targets)} bodies to trim were left as they were: {', '.join(untouched)}."
+    # IWeldmentTrimExtendFeatureData exposes the corner type on 2016 and
+    # nothing else of what was passed (gap, coped cut: measured 2026-10-08).
+    definition = read_member(feature, "GetDefinition")
+    applied = None if definition is None else {"corner_type": read_enum(definition, "CornerType", CORNER_TREATMENTS)}
+    payload["data"]["trim"] = applied
+    mismatches = readback_mismatches({"corner_type": corner_type}, applied)
+    if mismatches:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload
 
 
@@ -717,8 +767,8 @@ def weldment_trim_extend(args: dict[str, Any]) -> dict[str, Any]:
         "d4_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Polygon only; used instead of angle_deg when given."},
         "angle_deg": {"type": "number", "default": 45, "description": "Polygon only: angle of the cut-off edge."},
         "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
-        "thickness_direction": {"type": "string", "enum": sorted(GUSSET_THICKNESS_DIRECTIONS), "default": "both_sides"},
-        "location": {"type": "string", "enum": sorted(GUSSET_LOCATIONS), "default": "center"},
+        "thickness_direction": {"type": "string", "enum": sorted(GUSSET_THICKNESS_DIRECTIONS), "default": "both_sides", "description": "No readback on 2016 (measured); the body box tells."},
+        "location": {"type": "string", "enum": sorted(GUSSET_LOCATIONS), "default": "center", "description": "No readback on 2016 (measured); the body box tells."},
         "swap_legs": {"type": "boolean", "default": False, "description": "Swap d1 with d2 (and d3 with d4)."},
         "name": {"type": "string"},
     },
@@ -758,31 +808,24 @@ def weldment_gusset(args: dict[str, Any]) -> dict[str, Any]:
     bodies = [b for b in bodies_summary(doc) if b["name"] not in before_bodies]
     payload["data"]["bodies"] = bodies
     payload["data"]["volume_mm3"] = volume_total_mm3(bodies)
-    definition = safe(feature, "GetDefinition")
+    definition = read_member(feature, "GetDefinition")
     applied = None
     if definition is not None:
+        profile_type = read_int(definition, "ProfileType")
         applied = {
-            "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
-            "d1_mm": round(to_mm(safe(definition, "ProfileDistance1", 0.0) or 0.0), 6),
-            "d2_mm": round(to_mm(safe(definition, "ProfileDistance2", 0.0) or 0.0), 6),
-            "d3_mm": round(to_mm(safe(definition, "ProfileDistance3", 0.0) or 0.0), 6),
-            "profile": "polygon" if int(safe(definition, "ProfileType", 1) or 0) == 0 else "triangle",
+            "thickness_mm": read_mm(definition, "Thickness"),
+            "d1_mm": read_mm(definition, "ProfileDistance1"),
+            "d2_mm": read_mm(definition, "ProfileDistance2"),
+            "d3_mm": read_mm(definition, "ProfileDistance3"),
+            "d4_mm": read_mm(definition, "ProfileDistance4"),
+            "angle_deg": read_deg(definition, "ProfileAngle"),
+            "profile": None if profile_type is None else ("polygon" if profile_type == 0 else "triangle"),
         }
         payload["data"]["gusset"] = applied
     if not bodies:
         payload["ok"] = False
         payload["message"] += " No new body appeared."
-    # The leg readback is held against the request as given; how SOLIDWORKS
-    # stores swapped legs was not measured, so swap_legs skips that part.
-    swapped = bool(args.get("swap_legs", False))
-    wanted = {
-        "thickness_mm": float(args["thickness_mm"]),
-        "d1_mm": None if swapped else float(args["d1_mm"]),
-        "d2_mm": None if swapped else float(args["d2_mm"]),
-        "d3_mm": float(d3) if polygon and not swapped else None,
-        "profile": profile,
-    }
-    mismatches = readback_mismatches(wanted, applied)
+    mismatches = readback_mismatches(gusset_wanted(args), applied)
     if mismatches:
         payload["ok"] = False
         payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."

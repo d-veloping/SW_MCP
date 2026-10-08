@@ -192,17 +192,21 @@ def main() -> int:
         turned_side = 2 * (6 * (math.cos(math.radians(30)) + math.sin(math.radians(30))) + 4)
         check("turned profile widens the member box", turned["data"]["bodies"][0]["size_mm"][2], turned_side)
         far_end = face_where([-1, 0, 0], lambda p: abs(p[0]) < 1e-3 and p[1] > 300)
-        cap2 = require(weldment_end_cap({"selection": {"faces": [int(far_end["index"])]}, "thickness_mm": 4, "inset_ratio": 0.3, "chamfer_mm": 2, "reverse": True}), "weldment_end_cap(ratio, chamfer, reverse)")
+        cap2 = require(weldment_end_cap({"selection": {"faces": [int(far_end["index"])]}, "thickness_mm": 4, "inset_ratio": 0.3, "chamfer_mm": 2}), "weldment_end_cap(ratio, chamfer)")
         applied = cap2["data"]["end_cap"]
-        check("end cap ratio inset, chamfer and reverse read back", [applied["inset_by_ratio"], applied["inset_ratio"], applied["chamfer_mm"], applied["chamfered"], applied["reverse"], applied["inward"]],
-              [True, 0.3, 2.0, True, True, 0])
-        # reverse is read back as set, but on 2016 SP3 the plate stays beyond the end (measured 2026-10-08).
-        check("end cap with reverse still sits beyond the end", cap2["data"]["bodies"][0]["min_mm"][0], -4.0)
+        check("end cap ratio inset and chamfer read back", [applied["inset_by_ratio"], applied["inset_ratio"], applied["chamfer_mm"], applied["chamfered"], applied["inward"]],
+              [True, 0.3, 2.0, True, 0])
+        # Ratio 0.3 of the 2 mm wall insets the plate 0.6 mm per side: 18.8 square, four 2 mm chamfers, 4 mm thick.
+        check("end cap volume = (18.8^2 - 4 * 2^2 / 2) * 4", cap2["data"]["volume_mm3"], (18.8 ** 2 - 4 * 2 ** 2 / 2) * 4)
+        check("end cap sits beyond the end", cap2["data"]["bodies"][0]["min_mm"][0], -4.0)
         top_end = face_where([0, 1, 0], lambda p: abs(p[1] - 600) < 1e-3)
         cap3 = require(weldment_end_cap({"selection": {"faces": [int(top_end["index"])]}, "thickness_mm": 4, "inset_mm": 1.5, "inward": True}), "weldment_end_cap(distance, inward)")
         applied = cap3["data"]["end_cap"]
         check("end cap distance inset and inward read back", [applied["inset_by_ratio"], applied["inset_mm"], applied["inward"]], [False, 1.5, 1])
-        check("inward end cap adds one body and recuts the member", cap3["data"]["bodies_added"], 1)
+        check("inward end cap adds one body", cap3["data"]["bodies_added"], 1)
+        plates = [b for b in cap3["data"]["bodies"] if abs(b["size_mm"][1] - 4.0) < 1e-6]
+        check("inward plate lies inside the member, ending at y = 600", plates[0]["max_mm"][1] if plates else None, 600.0)
+        check("inward cap reports the plate and the recut member", len(cap3["data"]["bodies"]), 2)
 
         # Trimming against a reference plane: the first member, 300 mm along
         # x, cut at a plane 150 mm from the right plane (x = 0) keeps 150 mm.

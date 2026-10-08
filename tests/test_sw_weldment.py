@@ -378,7 +378,96 @@ class ReadmeToolCountTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         match = re.search(r"^(\d+) tools:", readme, re.MULTILINE)
         self.assertIsNotNone(match, "README.md has no '<n> tools:' line")
-        self.assertEqual(int(match.group(1)), len(server.TOOLS))
+        # The basketball demo registers only with SW_MCP_DEMO_TOOLS and is not counted in the README.
+        counted = [t for t in server.TOOLS if not t.name.startswith("demo_")]
+        self.assertEqual(int(match.group(1)), len(counted))
+
+
+class FakeDefinition:
+    def __init__(self, **members: object) -> None:
+        for name, value_ in members.items():
+            setattr(self, name, value_)
+
+
+class FakeGroup(FakeDefinition):
+    pass
+
+
+class FakeMemberFeature:
+    def __init__(self, definition: object) -> None:
+        self._definition = definition
+
+    def GetDefinition(self):  # noqa: N802 - COM member name
+        return self._definition
+
+
+class MemberReadbackTests(unittest.TestCase):
+    """The structural member readback maps the definition and its first group, and an unread member stays None."""
+
+    def test_readback_maps_definition_and_group(self) -> None:
+        group = FakeGroup(ApplyCornerTreatment=True, CornerTreatmentType=3, Angle=0.5235987755982988, MirrorProfile=True, GapWithinGroup=0.002)
+        definition = FakeDefinition(WeldmentProfilePath=r"C:\p\20 x 20 x 2.sldlfp", ConnectedSegmentsOption=2, AllowProtrusion=True, Groups=(group,))
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertEqual(applied["corner_treatment"], "butt2")
+        self.assertEqual(applied["angle_deg"], 30.0)
+        self.assertEqual((applied["mirror_profile"], applied["gap_mm"], applied["connected_segments"], applied["allow_protrusion"], applied["groups"]), (True, 2.0, "coped_cut", True, 1))
+
+    def test_an_unread_member_is_none_and_counts_as_not_applied(self) -> None:
+        definition = FakeDefinition(WeldmentProfilePath="x", ConnectedSegmentsOption=1, AllowProtrusion=False)
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertIsNone(applied["groups"])
+        self.assertNotIn("angle_deg", applied)
+        mismatches = sw_core.readback_mismatches({"groups": 1, "angle_deg": 0.0}, applied)
+        self.assertEqual(len(mismatches), 2)
+
+    def test_a_wrong_corner_makes_a_mismatch(self) -> None:
+        group = FakeGroup(ApplyCornerTreatment=False, CornerTreatmentType=1, Angle=0.0, MirrorProfile=False, GapWithinGroup=0.0)
+        definition = FakeDefinition(WeldmentProfilePath="x", ConnectedSegmentsOption=1, AllowProtrusion=False, Groups=(group,))
+        applied = wm.member_readback(FakeMemberFeature(definition))
+        self.assertEqual(applied["corner_treatment"], "none")
+        self.assertEqual(sw_core.readback_mismatches({"corner_treatment": "miter"}, applied), ["corner_treatment (miter requested, none applied)"])
+
+
+class WantedTests(unittest.TestCase):
+    """What each handler holds against the readback, derived from the request alone."""
+
+    def test_end_cap_wanted_follows_inset_mode_and_inward_integer(self) -> None:
+        wanted = wm.end_cap_wanted({"thickness_mm": 3, "inset_ratio": 0.3, "chamfer_mm": 2})
+        self.assertEqual((wanted["inset_by_ratio"], wanted["inset_ratio"], wanted["inset_mm"], wanted["chamfered"], wanted["chamfer_mm"], wanted["inward"]), (True, 0.3, None, True, 2.0, 0))
+        wanted = wm.end_cap_wanted({"thickness_mm": 3, "inset_mm": 1.5, "inward": True})
+        self.assertEqual((wanted["inset_by_ratio"], wanted["inset_ratio"], wanted["inset_mm"], wanted["chamfered"], wanted["inward"]), (False, None, 1.5, False, 1))
+        self.assertEqual(sw_core.readback_mismatches(wanted, {"inset_by_ratio": False, "inset_mm": 1.5, "chamfered": False, "chamfer_mm": 0.0, "inward": 0, "thickness_mm": 3.0}),
+                         ["inward (1 requested, 0 applied)"])
+
+    def test_gusset_wanted_compares_the_closer_that_was_given(self) -> None:
+        by_angle = wm.gusset_wanted({"profile": "polygon", "d1_mm": 50, "d2_mm": 40, "d3_mm": 20, "angle_deg": 30, "thickness_mm": 4})
+        self.assertEqual(by_angle["angle_deg"], 30.0)
+        self.assertNotIn("d4_mm", by_angle)
+        by_d4 = wm.gusset_wanted({"profile": "polygon", "d1_mm": 50, "d2_mm": 50, "d3_mm": 20, "d4_mm": 20, "thickness_mm": 4})
+        self.assertEqual(by_d4["d4_mm"], 20.0)
+        self.assertNotIn("angle_deg", by_d4)
+        swapped = wm.gusset_wanted({"d1_mm": 50, "d2_mm": 30, "thickness_mm": 5, "swap_legs": True})
+        self.assertEqual((swapped["d1_mm"], swapped["d2_mm"], swapped["d3_mm"]), (None, None, None))
+
+    def test_hem_wanted_uses_the_values_of_its_type(self) -> None:
+        from solidworks_mcp import sw_sheetmetal as sm
+
+        self.assertEqual(sm.hem_wanted({"type": "closed", "length_mm": 10}), {"type": "closed", "reverse": False, "length_mm": 10.0})
+        self.assertEqual(sm.hem_wanted({"type": "open", "length_mm": 8, "gap_mm": 1.5, "reverse": True}), {"type": "open", "reverse": True, "length_mm": 8.0, "gap_mm": 1.5})
+        self.assertEqual(sm.hem_wanted({"type": "rolled", "angle_deg": 200, "radius_mm": 3}), {"type": "rolled", "reverse": False, "angle_deg": 200.0, "radius_mm": 3.0})
+
+
+class HonestReaderTests(unittest.TestCase):
+    """read_* give None for what the definition does not expose, never a default."""
+
+    def test_missing_members_read_as_none(self) -> None:
+        definition = FakeDefinition(Thickness=0.004, UseReverse=True, Count=2)
+        self.assertEqual(sw_core.read_mm(definition, "Thickness"), 4.0)
+        self.assertIsNone(sw_core.read_mm(definition, "OffsetDistance"))
+        self.assertIsNone(sw_core.read_bool(definition, "IsEndCapInward"))
+        self.assertEqual(sw_core.read_int(definition, "Count"), 2)
+        self.assertIsNone(sw_core.read_enum(definition, "CornerType", wm.CORNER_TREATMENTS))
+        self.assertIsNone(sw_core.read_member(None, "Anything"))
 
 
 class EnumTableTests(unittest.TestCase):

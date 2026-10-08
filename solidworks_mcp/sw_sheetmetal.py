@@ -72,6 +72,12 @@ from .sw_core import (
     iter_feature_objects,
     logger,
     null_variant,
+    read_bool,
+    read_deg,
+    read_enum,
+    read_float,
+    read_int,
+    read_mm,
     readback_mismatches,
     rebuild,
     rename_feature,
@@ -83,7 +89,6 @@ from .sw_core import (
     SELECTION_SCHEMA,
     select_object,
     select_sketch_for_feature,
-    to_deg,
     to_m,
     to_mm,
     to_rad,
@@ -319,19 +324,43 @@ def _sheet_metal_parameters(doc: Any) -> dict[str, Any]:
     definition = _definition(feature)
     if definition is None:
         return {"feature": str(feature_property(feature, "Name", ""))}
-    allowance = safe(definition, "BendAllowanceType")
-    relief_names = {v: k for k, v in RELIEF_TYPES.items()}
+    allowance = read_int(definition, "BendAllowanceType")
     return {
         "feature": str(feature_property(feature, "Name", "")),
-        "thickness_mm": round(to_mm(safe(definition, "Thickness", 0.0) or 0.0), 6),
-        "bend_radius_mm": round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6),
-        "bend_allowance_type": BEND_ALLOWANCE_TYPES.get(int(allowance or 0), str(allowance)),
-        "k_factor": safe(definition, "KFactor"),
-        "bend_allowance_mm": round(to_mm(safe(definition, "BendAllowance", 0.0) or 0.0), 6),
-        "auto_relief": bool(safe(definition, "UseAutoRelief", False)),
-        "relief_type": relief_names.get(int(safe(definition, "AutoReliefType", 0) or 0)),
-        "relief_ratio": safe(definition, "ReliefRatio"),
+        "thickness_mm": read_mm(definition, "Thickness"),
+        "bend_radius_mm": read_mm(definition, "BendRadius"),
+        "bend_allowance_type": None if allowance is None else BEND_ALLOWANCE_TYPES.get(allowance, str(allowance)),
+        "k_factor": read_float(definition, "KFactor"),
+        "bend_allowance_mm": read_mm(definition, "BendAllowance"),
+        "auto_relief": read_bool(definition, "UseAutoRelief"),
+        "relief_type": read_enum(definition, "AutoReliefType", RELIEF_TYPES),
+        "relief_ratio": read_float(definition, "ReliefRatio"),
     }
+
+
+# Which hem values each type uses: a closed hem has no gap, a rolled hem no
+# length; SOLIDWORKS stores its own numbers for the unused ones (measured on
+# 2016 SP3: an open hem reads angle 180 back whatever was passed).
+HEM_VALUES = {
+    "closed": ("length_mm",),
+    "open": ("length_mm", "gap_mm"),
+    "tear_drop": ("angle_deg", "radius_mm"),
+    "rolled": ("angle_deg", "radius_mm"),
+    "double": ("length_mm", "gap_mm"),
+}
+HEM_DEFAULTS = {"length_mm": 10, "gap_mm": 0.5, "angle_deg": 270, "radius_mm": 2}
+
+
+def hem_wanted(args: dict[str, Any]) -> dict[str, Any]:
+    """The hem request as the readback must show it: type, reverse and the values its type uses.
+
+    position has no readback on 2016 (measured 2026-10-08) and is left to the box.
+    """
+    hem_type = str(args.get("type", "closed"))
+    wanted: dict[str, Any] = {"type": hem_type, "reverse": bool(args.get("reverse", False))}
+    for key in HEM_VALUES.get(hem_type, ()):
+        wanted[key] = float(args.get(key, HEM_DEFAULTS[key]))
+    return wanted
 
 
 def _bend_state(doc: Any) -> str:
@@ -618,11 +647,21 @@ def sheet_metal_base_flange(args: dict[str, Any]) -> dict[str, Any]:
         return payload
     parameters = _sheet_metal_parameters(doc)
     payload["data"]["sheet_metal"] = parameters
-    wanted = {"thickness_mm": float(args["thickness_mm"]), "bend_radius_mm": args.get("bend_radius_mm")}
-    mismatches = readback_mismatches(wanted, parameters, 1e-6)
+    definition = _definition(feature)
+    flange = {
+        "reverse_thickness": read_bool(definition, "ReverseThickness"),
+        "reverse_direction": read_bool(definition, "ReverseDirection"),
+    }
+    payload["data"]["flange"] = flange
+    # The radius the call set is the given one or the thickness; depth_mm has
+    # no readback on 2016 (measured 2026-10-08) and shows in the box.
+    wanted = {"thickness_mm": float(args["thickness_mm"]), "bend_radius_mm": round(to_mm(radius), 6)}
+    mismatches = readback_mismatches(wanted, parameters, 1e-6) + readback_mismatches(
+        {"reverse_thickness": bool(args.get("reverse_thickness", False)), "reverse_direction": bool(args.get("reverse_direction", False))}, flange,
+    )
     if mismatches:
         payload["ok"] = False
-        payload["message"] += f" The sheet metal feature did not take {'; '.join(mismatches)}."
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
     return payload
 
 
@@ -644,7 +683,7 @@ def sheet_metal_base_flange(args: dict[str, Any]) -> dict[str, Any]:
                            "material_outside keeps the inner face flush, bend_outside puts the whole bend beyond the edge.",
         },
         "flip": {"type": "boolean", "default": False, "description": "Bend towards the other side of the sheet (not read back; check the box)."},
-        "relief_type": {"type": "string", "enum": sorted(RELIEF_TYPES), "description": "Bend relief. Defaults to the part's automatic relief."},
+        "relief_type": {"type": "string", "enum": sorted(RELIEF_TYPES), "description": "Bend relief. Defaults to the part's automatic relief. Not read back on 2016 (measured); the ratio is."},
         "relief_ratio": {"type": "number", "default": 0.5, "description": "Relief width as a ratio of the thickness, when relief_type is given."},
         "name": {"type": "string"},
     },
@@ -720,19 +759,19 @@ def sheet_metal_edge_flange(args: dict[str, Any]) -> dict[str, Any]:
     definition = _definition(feature)
     applied = None
     if definition is not None:
-        position_names = {v: k for k, v in FLANGE_POSITIONS.items()}
         applied = {
-            "angle_deg": round(to_deg(safe(definition, "BendAngle", 0.0) or 0.0), 6),
-            "bend_radius_mm": round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6),
-            "default_radius": bool(safe(definition, "UseDefaultBendRadius", False)),
-            "position": position_names.get(int(safe(definition, "PositionType", 0) or 0)),
-            "length_mm": round(to_mm(safe(definition, "OffsetDistance", 0.0) or 0.0), 6),
-            "length_reference": int(safe(definition, "OffsetDimType", 0) or 0),
-            "relief_ratio": safe(definition, "ReliefRatio"),
+            "angle_deg": read_deg(definition, "BendAngle"),
+            "bend_radius_mm": read_mm(definition, "BendRadius"),
+            "default_radius": read_bool(definition, "UseDefaultBendRadius"),
+            "position": read_enum(definition, "PositionType", FLANGE_POSITIONS),
+            "length_mm": read_mm(definition, "OffsetDistance"),
+            "length_reference": read_int(definition, "OffsetDimType"),
+            "relief_ratio": read_float(definition, "ReliefRatio"),
         }
         payload["data"]["flange"] = applied
     # Everything the call set is held against the readback; flip and the
-    # relief type have no readback on 2016 and are left to the geometry.
+    # relief type have no readback on 2016 (measured 2026-10-08: ReliefType
+    # is not exposed on IEdgeFlangeFeatureData there) and are left to the geometry.
     wanted = {
         "angle_deg": float(args.get("angle_deg", 90)),
         "bend_radius_mm": float(radius_mm) if radius_mm else None,
@@ -808,17 +847,15 @@ def sheet_metal_miter_flange(args: dict[str, Any]) -> dict[str, Any]:
     definition = _definition(feature)
     applied = None
     if definition is not None:
-        position_names = {v: k for k, v in FLANGE_POSITIONS.items()}
-        relief_names = {v: k for k, v in RELIEF_TYPES.items()}
         applied = {
-            "bend_radius_mm": round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6),
-            "default_radius": bool(safe(definition, "UseDefaultBendRadius", False)),
-            "gap_mm": round(to_mm(safe(definition, "GapDistance", 0.0) or 0.0), 6),
-            "position": position_names.get(int(safe(definition, "PositionType", 0) or 0)),
-            "start_offset_mm": round(to_mm(safe(definition, "StartOffset", 0.0) or 0.0), 6),
-            "end_offset_mm": round(to_mm(safe(definition, "EndOffset", 0.0) or 0.0), 6),
-            "relief_type": relief_names.get(int(safe(definition, "ReliefType", 0) or 0)),
-            "relief_ratio": safe(definition, "ReliefRatio"),
+            "bend_radius_mm": read_mm(definition, "BendRadius"),
+            "default_radius": read_bool(definition, "UseDefaultBendRadius"),
+            "gap_mm": read_mm(definition, "GapDistance"),
+            "position": read_enum(definition, "PositionType", FLANGE_POSITIONS),
+            "start_offset_mm": read_mm(definition, "StartOffset"),
+            "end_offset_mm": read_mm(definition, "EndOffset"),
+            "relief_type": read_enum(definition, "ReliefType", RELIEF_TYPES),
+            "relief_ratio": read_float(definition, "ReliefRatio"),
         }
         payload["data"]["flange"] = applied
     wanted = {
@@ -841,7 +878,7 @@ def sheet_metal_miter_flange(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "sheet_metal_hem",
     "Fold the edge of the sheet back on itself. closed and open hems take length_mm (open also gap_mm); "
-    "rolled hems take angle_deg and radius_mm. position inside keeps the hem within the edge, "
+    "rolled hems take angle_deg and radius_mm. position inside keeps the hem within the edge (no readback on 2016; the box tells), "
     "outside adds it beyond. Put the edges in selection.edges.",
     {
         "selection": SELECTION_SCHEMA,
@@ -878,16 +915,15 @@ def sheet_metal_hem(args: dict[str, Any]) -> dict[str, Any]:
         applied = None
         if definition is not None:
             applied = {
-                "length_mm": round(to_mm(safe(definition, "Length", 0.0) or 0.0), 6),
-                "gap_mm": round(to_mm(safe(definition, "GapDistance", 0.0) or 0.0), 6),
-                "angle_deg": round(to_deg(safe(definition, "Angle", 0.0) or 0.0), 6),
-                "radius_mm": round(to_mm(safe(definition, "Radius", 0.0) or 0.0), 6),
+                "type": read_enum(definition, "Type", HEM_TYPES),
+                "length_mm": read_mm(definition, "Length"),
+                "gap_mm": read_mm(definition, "GapDistance"),
+                "angle_deg": read_deg(definition, "Angle"),
+                "radius_mm": read_mm(definition, "Radius"),
+                "reverse": read_bool(definition, "ReverseDirection"),
             }
             payload["data"]["hem"] = applied
-        # Only what the caller asked for is held against the readback; the
-        # defaults SOLIDWORKS fills in for a hem type are its own business.
-        wanted = {k: args.get(k) for k in ("length_mm", "gap_mm", "angle_deg", "radius_mm")}
-        mismatches = readback_mismatches(wanted, applied)
+        mismatches = readback_mismatches(hem_wanted(args), applied)
         if mismatches:
             payload["ok"] = False
             payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
@@ -956,29 +992,25 @@ def sheet_metal_closed_corner(args: dict[str, Any]) -> dict[str, Any]:
         payload["ok"] = False
         payload["message"] += " The corner's definition could not be read, so corner_type, gap_mm, overlap_ratio and open_bend_region were not applied."
     definition = _definition(feature)
+    applied = None
     if definition is not None:
         applied = {
-            "corner_type": {v: k for k, v in CLOSED_CORNER_TYPES.items()}.get(int(safe(definition, "CornerType", 0) or 0)),
-            "gap_mm": round(to_mm(safe(definition, "GapDistance", 0.0) or 0.0), 6),
-            "overlap_ratio": safe(definition, "OverlapUnderlapRatio"),
-            "open_bend_region": bool(safe(definition, "OpenBendRegion", False)),
+            "corner_type": read_enum(definition, "CornerType", CLOSED_CORNER_TYPES),
+            "gap_mm": read_mm(definition, "GapDistance"),
+            "overlap_ratio": read_float(definition, "OverlapUnderlapRatio"),
+            "open_bend_region": read_bool(definition, "OpenBendRegion"),
         }
         payload["data"]["corner"] = applied
-        mismatches = []
-        if wanted["CornerType"] is not None and applied["corner_type"] != args.get("corner_type"):
-            mismatches.append("corner_type")
-        if wanted["GapDistance"] is not None and abs(applied["gap_mm"] - float(args["gap_mm"])) > 1e-6:
-            mismatches.append("gap_mm")
-        if wanted["OverlapUnderlapRatio"] is not None and (
-            applied["overlap_ratio"] is None
-            or abs(float(applied["overlap_ratio"]) - wanted["OverlapUnderlapRatio"]) > 1e-6
-        ):
-            mismatches.append("overlap_ratio")
-        if wanted["OpenBendRegion"] is not None and applied["open_bend_region"] != wanted["OpenBendRegion"]:
-            mismatches.append("open_bend_region")
-        if mismatches:
-            payload["ok"] = False
-            payload["message"] += f" SOLIDWORKS did not apply {', '.join(mismatches)}; see data.corner for what it kept."
+    requested = {
+        "corner_type": str(args["corner_type"]) if args.get("corner_type") else None,
+        "gap_mm": float(args["gap_mm"]) if args.get("gap_mm") is not None else None,
+        "overlap_ratio": float(args["overlap_ratio"]) if args.get("overlap_ratio") is not None else None,
+        "open_bend_region": bool(args["open_bend_region"]) if args.get("open_bend_region") is not None else None,
+    }
+    mismatches = readback_mismatches(requested, applied, 1e-6)
+    if mismatches and not no_definition:
+        payload["ok"] = False
+        payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}; see data.corner for what it kept."
     return payload
 
 
@@ -1010,12 +1042,19 @@ def sheet_metal_break_corner(args: dict[str, Any]) -> dict[str, Any]:
     payload = _sheet_result(doc, feature, "break corner", entities=count, mode=mode, distance_mm=args["distance_mm"])
     if feature is not None:
         definition = _definition(feature)
+        applied = None
         if definition is not None:
-            corners = int(safe(definition, "GetEntitiesCount", 0) or 0)
-            payload["data"]["corners"] = corners
-            if corners != count:
-                payload["ok"] = False
-                payload["message"] += f" The feature holds {corners} entities, {count} were selected."
+            applied = {
+                "mode": read_enum(definition, "BreakType", BREAK_CORNER_TYPES),
+                "distance_mm": read_mm(definition, "Distance"),
+                "corners": read_int(definition, "GetEntitiesCount"),
+            }
+            payload["data"]["corners"] = applied["corners"]
+            payload["data"]["break"] = applied
+        mismatches = readback_mismatches({"mode": mode, "distance_mm": float(args["distance_mm"]), "corners": count}, applied)
+        if mismatches:
+            payload["ok"] = False
+            payload["message"] += f" SOLIDWORKS did not apply {'; '.join(mismatches)}."
         # A fillet or chamfer on a corner takes material away; a feature that
         # removed nothing broke no corner.
         if volume_before is not None and payload["data"].get("volume_mm3") is not None:
@@ -1033,7 +1072,8 @@ def sheet_metal_break_corner(args: dict[str, Any]) -> dict[str, Any]:
     "Each corner is given by its two bend faces: the cylindrical faces (list_faces surface_type cylinder) "
     "of the two bends that meet there, outer or inner, as a pair in corners. size_mm is the side of a "
     "square relief, the length of an obround one, or the radius of a circular one; width_mm is the slot "
-    "width of an obround relief or the fillet radius of a square one with filleted corners.",
+    "width of an obround relief or the fillet radius of a square one with filleted corners. The feature has no "
+    "definition readback on 2016; the removed volume is the judgement.",
     {
         "corners": {
             "type": "array", "minItems": 1,
@@ -1069,32 +1109,39 @@ def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
     manager = feature_manager(doc)
     volume_before = _volume_mm3(doc)
     accepted = 0
-    for pair in pairs:
+    try:
+        for pair in pairs:
+            clear_selection(doc)
+            for index in pair:
+                if not select_object(doc, faces[index][0], 4, True):
+                    raise RuntimeError(f"Could not select face {index}.")
+            try:
+                manager.AddCornerReliefCorner()
+                if bool(manager.AddCornerReliefType(
+                    -1, relief, 0.0, size, width,
+                    bool(args.get("center_on_bend_lines", False)), ratio,
+                    bool(args.get("tangent_to_bend", False)), bool(args.get("filleted_corners", False)),
+                    bool(args.get("narrow_corner", False)),
+                )):
+                    accepted += 1
+            except Exception as exc:
+                if not is_server_fault(exc):
+                    raise
+                # Flat faces instead of bend faces raise here and define no corner.
+                logger.info("Corner %s was not accepted as a bend corner: %s", pair, exc)
+    except Exception:
+        # The relief was begun with AddCornerReliefCorner; whatever ends the
+        # loop early, the build is closed so the next call starts clean.
+        _finish_corner_relief_quietly(manager)
         clear_selection(doc)
-        for index in pair:
-            if not select_object(doc, faces[index][0], 4, True):
-                _finish_corner_relief_quietly(manager)
-                raise RuntimeError(f"Could not select face {index}.")
-        try:
-            manager.AddCornerReliefCorner()
-            if bool(manager.AddCornerReliefType(
-                -1, relief, 0.0, size, width,
-                bool(args.get("center_on_bend_lines", False)), ratio,
-                bool(args.get("tangent_to_bend", False)), bool(args.get("filleted_corners", False)),
-                bool(args.get("narrow_corner", False)),
-            )):
-                accepted += 1
-        except Exception as exc:
-            if not is_server_fault(exc):
-                raise
-            # Flat faces instead of bend faces raise here and define no corner.
-            logger.info("Corner %s was not accepted as a bend corner: %s", pair, exc)
+        raise
     clear_selection(doc)
     if accepted == 0:
-        # The relief was begun with AddCornerReliefCorner; finishing it with no
-        # accepted corner closes that build so the next call starts clean.
         _finish_corner_relief_quietly(manager)
         return result(False, "SOLIDWORKS accepted none of the corners. Each corner needs the two cylindrical bend faces that meet there.")
+    # The corner relief feature returns no definition on 2016 SP3 (measured
+    # 2026-10-08: GetDefinition is None), so there is no readback of type,
+    # size or width; the removed volume below is the whole judgement.
     feature, _ = _build(doc, "corner relief", lambda: manager.FinishCornerRelief(), ("CornerRelief",))
     rename_feature(feature, args.get("name"))
     # corners_accepted is what AddCornerReliefType answered, an API count; the
@@ -1182,9 +1229,9 @@ def sheet_metal_info(args: dict[str, Any]) -> dict[str, Any]:
                     definition = _definition(sub)
                     bend = {"name": str(feature_property(sub, "Name", ""))}
                     if definition is not None:
-                        bend["angle_deg"] = round(to_deg(safe(definition, "BendAngle", 0.0) or 0.0), 4)
-                        bend["radius_mm"] = round(to_mm(safe(definition, "BendRadius", 0.0) or 0.0), 6)
-                        bend["down"] = bool(safe(definition, "BendDown", False))
+                        bend["angle_deg"] = read_deg(definition, "BendAngle")
+                        bend["radius_mm"] = read_mm(definition, "BendRadius")
+                        bend["down"] = read_bool(definition, "BendDown")
                     bends.append(bend)
                 sub = value(sub, "GetNextSubFeature")
         except Exception:

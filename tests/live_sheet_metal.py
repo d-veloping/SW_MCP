@@ -19,9 +19,11 @@ else driving it:
 
     ..\\.venv\\Scripts\\python.exe tests\\live_sheet_metal.py
 
-Two parts are built from scratch and every feature is checked by a number
-SOLIDWORKS cannot fake: the volume a flange adds, the developed length of
-the flat pattern, the bend lines in the exported DXF.
+Three parts are built from scratch. The flanges, the flat pattern, the break
+corner and the DXF are checked by a number SOLIDWORKS cannot fake: the volume
+a flange adds, the developed length of the flat pattern, the material a break
+corner removes, the bend lines in the exported DXF; the hem, the closed corner
+and the corner relief by added or removed material plus their readback.
 
 Part A, an L profile: base flange from an open sketch, flat length against
 the K-factor formula, a closed hem, a miter flange on the free leg, DXF export
@@ -230,7 +232,11 @@ def part_b() -> None:
 
 
 def part_c() -> None:
-    """The option surface: an edge flange and a miter flange with nothing left at its default."""
+    """The option surface: an edge flange and a miter flange with their readable options off the defaults.
+
+    flip and trim_side_bends have no readback and stay at their defaults here;
+    the relief type of the edge flange has none either and is only passed.
+    """
     print("Part C: options")
     require(create_new_document({"kind": "part"}), "create_new_document")
     _, doc = active_document()
@@ -265,7 +271,14 @@ def part_c() -> None:
         applied = miter["data"]["flange"]
         check("miter flange radius, gap, offsets read back", [applied["bend_radius_mm"], applied["gap_mm"], applied["start_offset_mm"], applied["end_offset_mm"]], [2.0, 1.0, 5.0, 3.0])
         check("miter flange position and relief read back", [applied["position"], applied["relief_type"], applied["relief_ratio"]], ["material_outside", "obround", 0.6])
-        check("miter flange leaves the offsets free: depth 40 - 5 - 3", miter["data"]["size_mm"][2], 40.0)
+        # The offsets show in the geometry: the miter's end faces sit at z = 5 and
+        # z = 37, and its top face is (40 - 5 - 3) wide by 13 long (15 minus the
+        # bend radius, with the material outside the edge).
+        miter_faces = [f for f in require(list_faces({}), "list_faces")["data"]["faces"] if f["point_mm"][0] > 52.5]
+        ends = sorted(round(f["point_mm"][2], 3) for f in miter_faces if f.get("normal") and abs(abs(f["normal"][2]) - 1) < 1e-6)
+        check("miter flange end faces at the offsets z = 5 and z = 37", ends, [5.0, 37.0])
+        top = [f for f in miter_faces if f.get("normal") and abs(f["normal"][1] - 1) < 1e-6]
+        check("miter flange top face is 32 x 13", top[0]["area_mm2"] if top else None, 32.0 * 13.0)
         # The part box: the miter reaches x = 67, the edge flange 5.42265 beyond x = 0.
         check("miter flange reach 67 plus the edge flange beyond x = 0", miter["data"]["size_mm"][0], 67.0 + (57.42265 - 52.0))
     finally:
