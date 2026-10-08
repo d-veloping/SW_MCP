@@ -8,17 +8,15 @@ jobs:
     # pywin32 is a hard dependency and the COM surface these tests fake is
     # Windows', so a Linux runner could not even install the package.
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          # The one version the server runs on and is checked live against
+          # SOLIDWORKS with; requires-python says the same.
+          python-version: "3.12"
 
       - name: Install the package
         run: python -m pip install .
