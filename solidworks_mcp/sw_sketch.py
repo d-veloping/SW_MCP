@@ -1105,10 +1105,26 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(rebuilt, f"Set {name}." if rebuilt else f"Set {name}, but the rebuild reported a problem.", **applied)
 
 
+# swDimensionDrivenState_e
+_DIMENSION_DRIVEN, _DIMENSION_DRIVING = 1, 2
+
+
+def _driven_state(dimension: Any) -> int | None:
+    """The raw swDimensionDrivenState_e of a dimension (0 unknown, 1 driven, 2 driving), None when it cannot be read."""
+    raw = safe(dimension, "DrivenState", None)
+    if isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @tool(
     "list_dimensions",
-    "Read-only: list every driving dimension in the document, or only those of one feature/sketch, "
-    "with the full names that set_dimension takes.",
+    "Read-only: list every dimension in the document, or only those of one feature/sketch, with the full names "
+    "that set_dimension takes. `driven: true` marks a driven (reference) dimension that set_dimension cannot change, "
+    "`false` a driving one, null an unknown or unreadable state; `driven_state` is the raw swDimensionDrivenState_e.",
     {"feature_name": {"type": "string", "description": "Restrict to one feature or sketch."}},
 )
 def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
@@ -1132,11 +1148,13 @@ def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
                 dimension = flag_methods(display, 'GetDimension2').GetDimension2(0)
                 full_name = str(safe(dimension, "FullName", ""))
                 system_value = float(safe(dimension, "SystemValue", 0.0) or 0.0)
+                state = _driven_state(dimension)
                 entry: dict[str, Any] = {
                     "owner": owner,
                     "full_name": full_name,
                     "name": str(safe(dimension, "Name", "")),
-                    "driven": bool(safe(dimension, "DrivenState", 1) == 2),
+                    "driven": {_DIMENSION_DRIVEN: True, _DIMENSION_DRIVING: False}.get(state),
+                    "driven_state": state,
                 }
                 # Dimension type 3 is angular in swDimensionType_e; everything
                 # else we surface here is a length.
