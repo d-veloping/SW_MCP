@@ -127,15 +127,18 @@ def main() -> int:
         check("end cap sits beyond the end", cap["data"]["bodies"][0]["min_mm"][0], -3.0)
 
         # Gussets in the inner corner between the first two members: the top
-        # face of member 1 (y = 10) and the inner face of member 2 (x = 290).
+        # face of member 1 (y = 10) and the inner face of member 2 (x = 290,
+        # centred at y = 105).  The third member's inner face also lies at
+        # x = 290 (centred at y = 200); which of the two list_faces reports
+        # first varies between runs, so the predicate names member 2.
         legs = [face_where([0, 1, 0], lambda p: abs(p[1] - 10) < 1e-3 and p[0] < 290),
-                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3)]
+                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3 and p[1] < 190)]
         faces = [int(f["index"]) for f in legs]
         tri = require(weldment_gusset({"selection": {"faces": faces}, "d1_mm": 50, "d2_mm": 30, "thickness_mm": 5}), "weldment_gusset(triangle)")
         check("triangle gusset volume = 50 * 30 * 5 / 2", tri["data"]["volume_mm3"], 50 * 30 * 5 / 2)
         check("triangle gusset centred on the corner edge", tri["data"]["bodies"][0]["min_mm"][2], -2.5)
         legs = [face_where([0, 1, 0], lambda p: abs(p[1] - 10) < 1e-3 and p[0] < 240),
-                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3 and p[1] > 60)]
+                face_where([-1, 0, 0], lambda p: abs(p[0] - 290) < 1e-3 and 60 < p[1] < 190)]
         poly = require(weldment_gusset({
             "selection": {"faces": [int(f["index"]) for f in legs]}, "profile": "polygon",
             "d1_mm": 50, "d2_mm": 50, "d3_mm": 20, "d4_mm": 20, "thickness_mm": 4, "thickness_direction": "outer",
