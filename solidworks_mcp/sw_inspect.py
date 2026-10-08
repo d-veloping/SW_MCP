@@ -194,7 +194,12 @@ def list_bodies(args: dict[str, Any]) -> dict[str, Any]:
         if volume is not None:
             entry["volume_mm3"] = volume
         bodies.append(entry)
-    total = round(sum(b.get("volume_mm3", 0.0) for b in bodies), 4)
+    # The sum is only reported when every body gave its volume; a partial
+    # sum would read as a smaller part.
+    total = (
+        round(sum(b["volume_mm3"] for b in bodies), 4)
+        if all("volume_mm3" in b for b in bodies) else None
+    )
     return result(True, f"Read {len(bodies)} solid bodies.", bodies=bodies, volume_sum_mm3=total)
 
 

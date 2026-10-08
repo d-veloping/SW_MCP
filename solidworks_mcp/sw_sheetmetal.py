@@ -458,11 +458,12 @@ def dxf_entity_points(entity: dict[str, list[str]]) -> list[tuple[float, float]]
 def dxf_curved_unparsed(entity: dict[str, list[str]]) -> bool:
     """True for geometry whose 10/20 points do not bound it.
 
-    A spline's points are control points, and a polyline vertex with a
+    A spline's points are control points, an ellipse's are its centre and
+    major axis, and a polyline vertex with a
     bulge (group 42) starts an arc that can swell past both of its ends.
     """
     kind = entity["type"][0]
-    if kind == "SPLINE":
+    if kind in ("SPLINE", "ELLIPSE"):
         return True
     return kind in ("LWPOLYLINE", "POLYLINE", "VERTEX") and any(b != 0.0 for b in _floats(entity, "42"))
 
@@ -473,7 +474,7 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
     SOLIDWORKS writes everything on layer 0 and marks bend lines only by
     their line type (CENTER*), so that is what is counted.  Extents come from
     the geometry of lines, arcs, circles and polylines, in the drawing's
-    millimetre units.  A spline or a bulged polyline leaves the extents
+    millimetre units.  A spline, an ellipse or a bulged polyline leaves the extents
     out instead of reporting a box that may be wrong.
     """
     entities = _dxf_entities(Path(path).read_text(encoding="utf-8", errors="ignore").splitlines())
@@ -486,7 +487,7 @@ def summarize_dxf(path: Path) -> dict[str, Any]:
     outline = sum(kinds.get(k, 0) for k in ("LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "SPLINE")) - bend_lines
     summary: dict[str, Any] = {"entities": dict(kinds), "bend_lines": bend_lines, "outline_entities": outline}
     if any(dxf_curved_unparsed(e) for e in entities):
-        summary["extents_note"] = "Extents left out: the outline has splines or bulged polylines."
+        summary["extents_note"] = "Extents left out: the outline has splines, ellipses or bulged polylines."
     elif points:
         xs = [x for x, _ in points]
         ys = [y for _, y in points]
@@ -936,6 +937,7 @@ def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
             payload["ok"] = False
             payload["message"] += " The relief removed no material."
     if accepted < len(args["corners"]):
+        payload["ok"] = False
         payload["message"] += f" {len(args['corners']) - accepted} corner(s) were not accepted and left out."
     return payload
 

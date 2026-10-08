@@ -44,6 +44,7 @@ from .sw_core import (
     latest_sketch,
     logger,
     nothing,
+    open_sketch_name,
     origin_sketch_point,
     rebuild,
     select_object,
@@ -256,7 +257,7 @@ def close_sketch(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "No sketch is open.")
     name = ""
     try:
-        name, _ = latest_sketch(doc, include_3d=True)
+        name = open_sketch_name(doc, doc.SketchManager.ActiveSketch)
     except Exception:
         pass
     sketch_manager(doc).InsertSketch(True)

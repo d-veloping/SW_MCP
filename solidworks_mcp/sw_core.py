@@ -677,6 +677,24 @@ def latest_sketch(doc: Any, include_3d: bool = False) -> tuple[str, Any]:
     return str(feature_property(feature, "Name", "")), feature
 
 
+def open_sketch_name(doc: Any, sketch: Any) -> str:
+    """The feature name of the open sketch ``sketch``.
+
+    ISketch has no accessor back to its feature in this type library, and a
+    reopened sketch need not be the newest one, so the feature whose sketch
+    is the same COM object wins (measured 2026-10-08: a reopened Sketch1
+    matches itself, not the newer 3DSketch1).  The newest sketch is only the
+    fallback when no feature matches.
+    """
+    for feature in reversed(sketch_features(doc, include_3d=True)):
+        try:
+            if value(feature, "GetSpecificFeature2") == sketch:
+                return str(feature_property(feature, "Name", ""))
+        except Exception:
+            continue
+    return latest_sketch(doc, include_3d=True)[0]
+
+
 def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
     """Resolve an explicit sketch name, or fall back to the newest sketch.
 
@@ -1226,9 +1244,7 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest sketch feature in the tree.
-        resolved_name, _ = latest_sketch(doc, include_3d=True)
+        resolved_name = open_sketch_name(doc, sketch)
     else:
         resolved_name, feature = resolve_sketch(doc, sketch_name, include_3d=True)
         sketch = value(feature, "GetSpecificFeature2")

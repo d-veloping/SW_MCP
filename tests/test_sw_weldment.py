@@ -164,6 +164,23 @@ class SketchDefaultTests(unittest.TestCase):
         self.assertEqual(listed["data"]["sketches"], ["Sketch1", "3DSketch1"])
 
 
+class OpenSketchNameTests(unittest.TestCase):
+    """The open sketch is named by identity, not by being the newest."""
+
+    def test_a_reopened_2d_sketch_keeps_its_own_name(self) -> None:
+        profile = FakeFeature("Sketch1", sw_core.SKETCH_2D_TYPE)
+        path = FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE)
+        profile.GetSpecificFeature2 = object()
+        path.GetSpecificFeature2 = object()
+        doc = FakeTree(profile, path)
+        self.assertEqual(sw_core.open_sketch_name(doc, profile.GetSpecificFeature2), "Sketch1")
+        self.assertEqual(sw_core.open_sketch_name(doc, path.GetSpecificFeature2), "3DSketch1")
+
+    def test_an_unmatched_sketch_falls_back_to_the_newest(self) -> None:
+        doc = FakeTree(FakeFeature("Sketch1", sw_core.SKETCH_2D_TYPE), FakeFeature("3DSketch1", sw_core.SKETCH_3D_TYPE))
+        self.assertEqual(sw_core.open_sketch_name(doc, object()), "3DSketch1")
+
+
 class RenameReadbackTests(unittest.TestCase):
     """create_3d_sketch reports the name the tree carries, not the one asked for."""
 
@@ -200,6 +217,23 @@ class BodyVolumeTests(unittest.TestCase):
 
     def test_a_body_without_mass_properties_reports_none(self) -> None:
         self.assertIsNone(sw_core.body_volume_mm3(FakeBodyWithMass(None)))
+
+    def _list_bodies(self, *volumes: float | None) -> dict:
+        from unittest import mock
+
+        from solidworks_mcp import sw_inspect
+
+        context = [(FakeBodyWithMass(v), f"b{i}", None) for i, v in enumerate(volumes)]
+        with mock.patch.object(sw_inspect, "active_document", return_value=(None, None)),                 mock.patch.object(sw_inspect, "iter_body_context", return_value=context):
+            return sw_inspect.list_bodies({})["data"]
+
+    def test_list_bodies_sums_when_every_body_has_a_volume(self) -> None:
+        self.assertEqual(self._list_bodies(1e-6, 2e-6)["volume_sum_mm3"], 3000.0)
+
+    def test_list_bodies_leaves_the_sum_unknown_when_a_volume_is_missing(self) -> None:
+        data = self._list_bodies(1e-6, None)
+        self.assertIsNone(data["volume_sum_mm3"])
+        self.assertEqual(data["bodies"][0]["volume_mm3"], 1000.0)
 
 
 class EnumTableTests(unittest.TestCase):

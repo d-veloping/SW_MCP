@@ -115,6 +115,13 @@ class DxfSummaryTests(unittest.TestCase):
         self.assertNotIn("extents_mm", summary)
         self.assertIn("extents_note", summary)
 
+    def test_an_ellipse_leaves_the_extents_out(self) -> None:
+        summary = self.summarize(_dxf([
+            _line(0, 0, 5, 5),
+            _entity("ELLIPSE", [("10", 50), ("20", 0), ("11", 30), ("21", 0), ("40", 0.5)]),
+        ]))
+        self.assertNotIn("extents_mm", summary)
+
     def test_a_bulged_polyline_leaves_the_extents_out(self) -> None:
         summary = self.summarize(_dxf([
             _entity("LWPOLYLINE", [("90", 2), ("10", 0), ("20", 0), ("42", 1), ("10", 20), ("20", 0)]),
