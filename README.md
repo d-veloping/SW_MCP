@@ -31,7 +31,7 @@ does the same for AutoCAD.
 ## Requirements
 
 - Windows, with SOLIDWORKS installed and **already running**
-- Python 3.10+
+- Python 3.12
 
 ## Install
 
