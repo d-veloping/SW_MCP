@@ -301,6 +301,10 @@ every line into "unknown".
   geometry change. Re-list; do not cache.
 - A modal dialog opened by SOLIDWORKS for any *other* reason will still block
   the server until dismissed.
+- The sheet metal tools work on single-body sheet metal parts. A multibody
+  sheet metal part has one Flat-Pattern feature per body; `sheet_metal_flatten`
+  and `export_flat_pattern` refuse such a part instead of reporting one body
+  as the whole.
 - `rib` is picky about its profile. `InsertRib` returns void and simply builds
   nothing unless the open profile reaches material at both ends *and* the
   extrusion direction can get there. The tool defaults to `parallel_to_sketch`

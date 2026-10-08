@@ -166,6 +166,40 @@ class EdgeFlangeCleanupTests(unittest.TestCase):
         delete.assert_called_once_with(doc, [first])
 
 
+class FakeFlatPattern:
+    def __init__(self, suppressed: bool) -> None:
+        self.IsSuppressed = suppressed
+
+
+class FlatPatternTests(unittest.TestCase):
+    """One Flat-Pattern per body: the single-body tools refuse a multibody part."""
+
+    def _with(self, *features: FakeFlatPattern):
+        from unittest import mock
+
+        return mock.patch.object(sm, "_features_of_type", return_value=list(features))
+
+    def test_a_single_flat_pattern_is_returned(self) -> None:
+        only = FakeFlatPattern(True)
+        with self._with(only):
+            self.assertIs(sm._single_flat_pattern(None), only)
+        with self._with():
+            self.assertIsNone(sm._single_flat_pattern(None))
+
+    def test_a_multibody_part_is_refused(self) -> None:
+        with self._with(FakeFlatPattern(True), FakeFlatPattern(True)):
+            with self.assertRaisesRegex(RuntimeError, "2 Flat-Pattern features"):
+                sm._single_flat_pattern(None)
+
+    def test_flat_means_every_flat_pattern_is_unsuppressed(self) -> None:
+        with self._with(FakeFlatPattern(False), FakeFlatPattern(False)):
+            self.assertTrue(sm._is_flattened(None))
+        with self._with(FakeFlatPattern(False), FakeFlatPattern(True)):
+            self.assertFalse(sm._is_flattened(None))
+        with self._with():
+            self.assertFalse(sm._is_flattened(None))
+
+
 class OptionTests(unittest.TestCase):
     def test_export_options_default_to_geometry_and_bend_lines(self) -> None:
         self.assertEqual(sm.export_options({}), sm.EXPORT_GEOMETRY | sm.EXPORT_BEND_LINES)

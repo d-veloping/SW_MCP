@@ -251,9 +251,25 @@ def _sheet_metal_feature(doc: Any) -> Any | None:
     return features[0] if features else None
 
 
-def _flat_pattern_feature(doc: Any) -> Any | None:
-    features = _features_of_type(doc, "FlatPattern")
-    return features[-1] if features else None
+def _flat_pattern_features(doc: Any) -> list[Any]:
+    """Every Flat-Pattern feature: one per sheet metal body."""
+    return _features_of_type(doc, "FlatPattern")
+
+
+def _single_flat_pattern(doc: Any) -> Any | None:
+    """The part's one Flat-Pattern feature, or None when it has none.
+
+    A multibody sheet metal part carries one Flat-Pattern per body; flattening
+    or exporting such a part would have to address every body, which these
+    tools do not, so they refuse it rather than report one body as the part.
+    """
+    features = _flat_pattern_features(doc)
+    if len(features) > 1:
+        raise RuntimeError(
+            f"The part has {len(features)} Flat-Pattern features, one per sheet metal body; "
+            "sheet_metal_flatten and export_flat_pattern handle single-body sheet metal parts only."
+        )
+    return features[0] if features else None
 
 
 def _require_sheet_metal(doc: Any) -> Any:
@@ -294,10 +310,9 @@ def _bend_state(doc: Any) -> str:
 
 
 def _is_flattened(doc: Any) -> bool:
-    flat = _flat_pattern_feature(doc)
-    if flat is None:
-        return False
-    return not bool(safe(flat, "IsSuppressed", True))
+    """True only when every Flat-Pattern feature is unsuppressed."""
+    features = _flat_pattern_features(doc)
+    return bool(features) and not any(bool(safe(f, "IsSuppressed", True)) for f in features)
 
 
 def _edge_objects(doc: Any, indices: list[int]) -> list[Any]:
@@ -970,7 +985,8 @@ def sheet_metal_corner_relief(args: dict[str, Any]) -> dict[str, Any]:
     "sheet_metal_flatten",
     "Show the sheet metal part flat (flat=true) or folded again (flat=false) by unsuppressing or "
     "suppressing its Flat-Pattern feature. Reports the bend state and the bounding box, so the flat "
-    "size can be checked against the expected developed length. Fold the part back before adding features.",
+    "size can be checked against the expected developed length. Fold the part back before adding features. "
+    "Single-body sheet metal parts only; a multibody part (one Flat-Pattern per body) is refused.",
     {"flat": {"type": "boolean", "default": True}},
 )
 def sheet_metal_flatten(args: dict[str, Any]) -> dict[str, Any]:
@@ -978,7 +994,7 @@ def sheet_metal_flatten(args: dict[str, Any]) -> dict[str, Any]:
     _require_sheet_metal(doc)
     exit_active_sketch(doc)
     flat = bool(args.get("flat", True))
-    feature = _flat_pattern_feature(doc)
+    feature = _single_flat_pattern(doc)
     if feature is None:
         return result(False, "The part has no Flat-Pattern feature.")
     clear_selection(doc)
@@ -1057,7 +1073,8 @@ def sheet_metal_info(args: dict[str, Any]) -> dict[str, Any]:
     "Write the flat pattern of the active sheet metal part as DXF or DWG under the designated outputs "
     "folder, without any dialog. The part must have been saved (save_document) because SOLIDWORKS "
     "exports by model path. Bend lines are included by default. For a DXF the result summarises the "
-    "entities, bend-line count and extents so the file can be checked without opening it.",
+    "entities, bend-line count and extents so the file can be checked without opening it. Single-body "
+    "sheet metal parts only; a multibody part (one Flat-Pattern per body) is refused.",
     {
         "path": {"type": "string", "description": "Target file, .dxf or .dwg; relative paths land in the outputs folder."},
         "overwrite": {"type": "boolean", "default": False},
@@ -1077,6 +1094,8 @@ def export_flat_pattern(args: dict[str, Any]) -> dict[str, Any]:
 
     _, doc = require_part()
     _require_sheet_metal(doc)
+    if _single_flat_pattern(doc) is None:
+        return result(False, "The part has no Flat-Pattern feature to export.")
     model_path = str(value(doc, "GetPathName") or "")
     if not model_path:
         return result(False, "The part has no saved path; save it with save_document first, then export the flat pattern.")
