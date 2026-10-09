@@ -328,7 +328,23 @@ class CreateDrawingActivationTests(unittest.TestCase):
         answer = self.create([self.part], {"paper_size": "A3", "first_angle": True})
         self.assertTrue(answer["ok"], answer)
         self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", True))
-        self.assertIn("only after the wait", answer["message"])
+        self.assertIn("only after the check", answer["message"])
+
+    def test_case_b_names_the_document_active_at_the_end(self) -> None:
+        """Case B where a third document becomes active during the sheet setup: answer and message name that one, not
+        the part the wait ended with."""
+        other = _Doc("Fremd", 1, r"C:\Ausgabe\Fremd.SLDPRT")
+
+        def setup_then_other(*args) -> bool:
+            self.drawing.setups.append(args)
+            self.drawing.app.after, self.drawing.app.reads_after = [other], 0
+            return True
+        self.drawing.SetupSheet5 = setup_then_other
+        answer = self.create([self.part], {"paper_size": "A3"})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual((answer["data"]["active_document"]["title"], answer["data"]["activated"]), ("Fremd", False))
+        self.assertIn("'Fremd' is", answer["message"])
+        self.assertNotIn("Test_Rahmen", answer["message"])
 
     def test_part_active_right_after_new_document_never_raises_and_sets_up_the_own_drawing(self) -> None:
         """Case C: ActiveDoc is the part between new_document and the sheet setup; the sheet setup goes to the own

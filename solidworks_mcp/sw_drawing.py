@@ -328,15 +328,17 @@ def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
     active = running_app().ActiveDoc
     identity = _identity(active)
     if identity != own:
-        message = (f"Created a new drawing '{own[0]}', but '{identity[0] if identity else 'none'}' became active again "
-                   "after the drawing was created; nothing should be done in either." if created.get("ok")
-                   else created["message"])
+        shown = identity[0] if identity else "none"
+        message = (f"Created a new drawing '{own[0]}', but '{shown}' became active again after the drawing was "
+                   "created; nothing should be done in either." if created.get("ok")
+                   else f"Created a new drawing '{own[0]}', but it is not the active document at the end ('{shown}' "
+                   "is); nothing should be done in either.")
         return result(
             False, message, document=document_info(doc), activated=False, wait_ms=created["data"].get("wait_ms"),
             active_document=None if active is None else document_info(active),
         )
     return result(True, "Created a new drawing." if created.get("ok") else
-                  "Created a new drawing; it became active only after the wait for activation.",
+                  "Created a new drawing; it became active only after the check in new_document.",
                   document=document_info(doc), sheets=_sheet_names(doc), activated=True,
                   wait_ms=created["data"].get("wait_ms"))
 
