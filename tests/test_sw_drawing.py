@@ -200,5 +200,166 @@ class DisplayModeTests(unittest.TestCase):
                 target.broken = False
 
 
+# --------------------------------------------------------------------------
+# create_drawing and the document that is active afterwards (ClauSW #115)
+# --------------------------------------------------------------------------
+
+
+class _Sheet:
+    def GetName(self) -> str:  # noqa: N802 - COM member name
+        return "Blatt1"
+
+    def GetSize(self) -> int:  # noqa: N802 - COM member name
+        return 8
+
+
+class _Doc:
+    def __init__(self, title: str, kind: int, path: str = "") -> None:
+        self.title, self.kind, self.path = title, kind, path
+        self.setups: list[tuple] = []
+        self.app = None                  # set by _App for the new document
+        self.activate_on_setup = False   # SOLIDWORKS finishes a late activation during SetupSheet5
+
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def GetTitle(self) -> str:  # noqa: N802 - COM member name
+        return self.title
+
+    def GetPathName(self) -> str:  # noqa: N802 - COM member name
+        return self.path
+
+    def GetType(self) -> int:  # noqa: N802 - COM member name
+        return self.kind
+
+    def GetSaveFlag(self) -> bool:  # noqa: N802 - COM member name
+        return False
+
+    def GetCurrentSheet(self):  # noqa: N802 - COM member name
+        return _Sheet()
+
+    def GetSheetNames(self):  # noqa: N802 - COM member name
+        return ["Blatt1"]
+
+    def SetupSheet5(self, *args) -> bool:  # noqa: N802 - COM member name
+        self.setups.append(args)
+        if self.activate_on_setup:
+            self.app.after, self.app.reads_after = [self], 0
+        return True
+
+
+class _App:
+    """ActiveDoc is `before` until NewDocument, then one entry of `after` per read, the last one repeating."""
+
+    def __init__(self, before, after, new) -> None:
+        self.before, self.after, self.new = before, after, new
+        self.created = False
+        self.reads_after = 0
+        if new is not None:
+            new.app = self
+
+    def GetUserPreferenceStringValue(self, preference: int) -> str:  # noqa: N802 - COM member name
+        return __file__
+
+    def NewDocument(self, *args):  # noqa: N802 - COM member name
+        self.created = True
+        return self.new
+
+    @property
+    def ActiveDoc(self):  # noqa: N802 - COM member name
+        if not self.created:
+            return self.before
+        index = min(self.reads_after, len(self.after) - 1)
+        self.reads_after += 1
+        return self.after[index]
+
+    def ActivateDoc3(self, *args):  # noqa: N802 - COM member name
+        raise AssertionError("create_drawing must never activate a document itself")
+
+
+class CreateDrawingActivationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.part = _Doc("Test_Rahmen", 1, r"C:\Ausgabe\Test_Rahmen.SLDPRT")
+        self.drawing = _Doc("Draw7 - Blatt1", 3)
+
+    def create(self, after, args=None) -> dict:
+        from solidworks_mcp import sw_file
+
+        from test_new_document import Clock
+
+        app = _App(self.part, after, self.drawing)
+        clock = Clock()
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app), \
+                unittest.mock.patch.object(sw_drawing, "running_app", return_value=app), \
+                unittest.mock.patch.object(sw_drawing, "active_document", return_value=(app, app.ActiveDoc)), \
+                unittest.mock.patch.object(sw_file.time, "monotonic", clock.monotonic), \
+                unittest.mock.patch.object(sw_file.time, "sleep", clock.sleep):
+            return sw_drawing.create_drawing(args or {})
+
+    def test_drawing_stays_active(self) -> None:
+        answer = self.create([self.drawing], {"paper_size": "A3", "first_angle": True})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["data"]["document"]["title"], "Draw7 - Blatt1")
+        self.assertEqual((answer["data"]["activated"], answer["data"]["sheets"]), (True, ["Blatt1"]))
+        self.assertEqual(len(self.drawing.setups), 1)
+
+    def test_part_active_again_before_the_final_check_is_ok_false_with_the_drawing(self) -> None:
+        """Case A: new_document saw the drawing, the final check sees the part again."""
+        answer = self.create([self.drawing, self.part])
+        self.assertFalse(answer["ok"], answer)
+        data = answer["data"]
+        self.assertEqual((data["document"]["title"], data["activated"]), ("Draw7 - Blatt1", False))
+        self.assertEqual(data["active_document"]["title"], "Test_Rahmen")
+        self.assertIn("became active again", answer["message"])
+
+    def test_part_still_active_in_new_document_returns_its_answer_with_the_sheet_set_up(self) -> None:
+        """Case B: the drawing never showed as active within the wait; its sheet is still set up on the own object,
+        so a caller that activates it later gets the sheet it asked for."""
+        answer = self.create([self.part], {"paper_size": "A3", "first_angle": True})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", False))
+        self.assertEqual(len(self.drawing.setups), 1)
+        self.assertEqual(self.drawing.setups[0][1], sw_drawing.PAPER_SIZES["A3"])
+
+    def test_activation_finished_during_the_sheet_setup_is_ok(self) -> None:
+        """Case B with a late switch: the wait ran out with the part active, SOLIDWORKS activates the drawing during
+        the sheet setup; the final check sees the drawing and the answer is ok."""
+        self.drawing.activate_on_setup = True
+        answer = self.create([self.part], {"paper_size": "A3", "first_angle": True})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", True))
+        self.assertIn("only after the check", answer["message"])
+
+    def test_case_b_names_the_document_active_at_the_end(self) -> None:
+        """Case B where a third document becomes active during the sheet setup: answer and message name that one, not
+        the part the wait ended with."""
+        other = _Doc("Fremd", 1, r"C:\Ausgabe\Fremd.SLDPRT")
+
+        def setup_then_other(*args) -> bool:
+            self.drawing.setups.append(args)
+            self.drawing.app.after, self.drawing.app.reads_after = [other], 0
+            return True
+        self.drawing.SetupSheet5 = setup_then_other
+        answer = self.create([self.part], {"paper_size": "A3"})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual((answer["data"]["active_document"]["title"], answer["data"]["activated"]), ("Fremd", False))
+        self.assertIn("'Fremd' is", answer["message"])
+        self.assertNotIn("Test_Rahmen", answer["message"])
+
+    def test_part_active_right_after_new_document_never_raises_and_sets_up_the_own_drawing(self) -> None:
+        """Case C: ActiveDoc is the part between new_document and the sheet setup; the sheet setup goes to the own
+        drawing object, nothing raises, and the answer is ok=False with the drawing."""
+        answer = self.create([self.drawing, self.part, self.part], {"paper_size": "A3", "first_angle": True})
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(answer["data"]["document"]["title"], "Draw7 - Blatt1")
+        self.assertEqual(len(self.drawing.setups), 1)
+
+    def test_no_document_from_new_document_stays_a_plain_failure(self) -> None:
+        self.drawing = None
+        answer = self.create([self.part])
+        self.assertFalse(answer["ok"])
+        self.assertNotIn("data", answer)
+
+
 if __name__ == "__main__":
     unittest.main()

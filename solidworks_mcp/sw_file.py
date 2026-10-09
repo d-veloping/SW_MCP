@@ -166,10 +166,16 @@ def create_new_document(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def new_document(kind: str) -> dict[str, Any]:
+    return _new_document(kind)[0]
+
+
+def _new_document(kind: str) -> tuple[dict[str, Any], Any]:
+    """new_document plus the COM object of the new document (None when none was created), for callers that go on
+    working on exactly this document instead of whatever ActiveDoc reports."""
     app = running_app()
     preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
     if preference is None:
-        return result(False, "kind must be part, assembly, or drawing.")
+        return result(False, "kind must be part, assembly, or drawing."), None
     template = app.GetUserPreferenceStringValue(preference)
     if not template or not Path(str(template)).is_file():
         fallback = discover_template(kind)
@@ -178,12 +184,12 @@ def new_document(kind: str) -> dict[str, Any]:
                 False,
                 f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
                 "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
-            )
+            ), None
         template = str(fallback)
     previous = _identity(app.ActiveDoc)
     doc = app.NewDocument(template, 0, 0.0, 0.0)
     if doc is None:
-        return result(False, f"SOLIDWORKS did not create a {kind} document.")
+        return result(False, f"SOLIDWORKS did not create a {kind} document."), None
     created = document_info(doc)
     own = (created["title"], created["path"])
     started = time.monotonic()
@@ -193,7 +199,7 @@ def new_document(kind: str) -> dict[str, Any]:
         identity = _identity(active)
         waited = round((time.monotonic() - started) * 1000)
         if identity == own:
-            return result(True, f"Created new {kind} document.", document=created, activated=True, wait_ms=waited)
+            return result(True, f"Created new {kind} document.", document=created, activated=True, wait_ms=waited), doc
         if identity != previous:
             return result(
                 False,
@@ -201,7 +207,7 @@ def new_document(kind: str) -> dict[str, Any]:
                 f"('{identity[0] if identity else 'none'}'); nothing should be done in either.",
                 document=created, activated=False, wait_ms=waited,
                 active_document=None if active is None else document_info(active),
-            )
+            ), doc
         if time.monotonic() - started >= NEW_DOCUMENT_ACTIVATION_S:
             return result(
                 False,
@@ -209,7 +215,7 @@ def new_document(kind: str) -> dict[str, Any]:
                 f"('{identity[0] if identity else 'none'}') as active after {waited} ms.",
                 document=created, activated=False, wait_ms=waited,
                 active_document=None if active is None else document_info(active),
-            )
+            ), doc
         time.sleep(NEW_DOCUMENT_POLL_S)
 
 
@@ -288,6 +294,70 @@ def open_document(args: dict[str, Any]) -> dict[str, Any]:
                 f"Opened {path}, but SOLIDWORKS reports '{identity[0] if identity else 'none'}' as active "
                 f"after {waited} ms; nothing should be done in either.",
                 document=opened, already_open=already_open, activated=False, wait_ms=waited,
+                active_document=None if active is None else document_info(active),
+            )
+        time.sleep(NEW_DOCUMENT_POLL_S)
+
+
+@tool(
+    "activate_document",
+    "Make the open document with exactly this title (as list_open_documents reports it) the active one and wait "
+    "until SOLIDWORKS reports it as active. This takes the focus away from the current document; it is meant for a "
+    "caller that created the target document itself and lost the focus to its own other document. Nothing is "
+    "activated when no or more than one open document has this title; an already active document is left alone. "
+    "Fails (with `document`, `active_document` and `wait_ms`) if a third document becomes active or the activation "
+    "does not show within a few seconds.",
+    {"title": {"type": "string", "description": "Exact title from list_open_documents; no path, stem or prefix."}},
+    ["title"],
+)
+def activate_document(args: dict[str, Any]) -> dict[str, Any]:
+    app = running_app()
+    wanted = str(args.get("title") or "")
+    if not wanted:
+        return result(False, "Pass the exact title of an open document in `title`.")
+    try:
+        docs = as_list(value(app, "GetDocuments"))
+    except Exception as exc:
+        return result(False, f"Could not list the open documents: {exc}")
+    matches = []
+    for doc in docs:
+        try:
+            title = str(value(doc, "GetTitle"))
+        except Exception:
+            # an unreadable title could be the wanted one: whether the title is unique cannot be told
+            return result(False, f"Did not activate '{wanted}': an open document has a title that cannot be read.")
+        if title == wanted:
+            matches.append(doc)
+    if len(matches) != 1:
+        return result(False, f"Did not activate '{wanted}': {len(matches)} open documents have this title.",
+                      matches=len(matches))
+    target = matches[0]
+    own = _identity(target)
+    document = document_info(target)
+    active = app.ActiveDoc
+    previous = _identity(active)
+    if previous == own:
+        return result(True, f"'{wanted}' is already the active document.", document=document, activated=True, wait_ms=0)
+    errors = byref_long(0)
+    if not bool(app.ActivateDoc3(wanted, False, 0, errors)):
+        return result(False, f"SOLIDWORKS could not make '{wanted}' active.", error_code=int(errors.value),
+                      document=document, activated=False, wait_ms=0,
+                      active_document=None if active is None else document_info(active))
+    # as after open_document: the switch can show only after a moment; wait only while exactly the previous
+    # document is active, and never activate again
+    started = time.monotonic()
+    while True:
+        active = app.ActiveDoc
+        identity = _identity(active)
+        waited = round((time.monotonic() - started) * 1000)
+        if identity == own:
+            return result(True, f"Activated '{wanted}'.", document=document, activated=True, wait_ms=waited)
+        if identity != previous or time.monotonic() - started >= NEW_DOCUMENT_ACTIVATION_S:
+            return result(
+                False,
+                f"Asked SOLIDWORKS to activate '{wanted}', but it reports '{identity[0] if identity else 'none'}' "
+                f"as active after {waited} ms; nothing should be done in either.",
+                document=document, activated=False, wait_ms=waited,
                 active_document=None if active is None else document_info(active),
             )
         time.sleep(NEW_DOCUMENT_POLL_S)

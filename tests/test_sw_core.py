@@ -492,5 +492,91 @@ class SelectionSpecTests(unittest.TestCase):
         self.assertEqual(sw_core.split_selection({"faces": []}), [])
 
 
+class FakeDimension:
+    """A dimension as list_dimensions reads it; `state` is DrivenState, an exception instance makes it unreadable."""
+
+    def __init__(self, name: str, state, kind: int = 2, system_value: float = 0.01) -> None:
+        self.Name = name
+        self.FullName = f"{name}@Skizze1"
+        self.SystemValue = system_value
+        self._state = state
+        self._kind = kind
+
+    @property
+    def DrivenState(self):  # noqa: N802 - COM member name
+        if isinstance(self._state, Exception):
+            raise self._state
+        return self._state
+
+    def GetType(self) -> int:  # noqa: N802 - COM member name
+        return self._kind
+
+
+class FakeDisplayDimension(FakeDispatch):
+    def __init__(self, dimension: FakeDimension) -> None:
+        super().__init__({"GetDimension2"})
+        self.dimension = dimension
+
+    def GetDimension2(self, index: int) -> FakeDimension:  # noqa: N802 - COM member name
+        return self.dimension
+
+
+class FakeDimensionFeature(FakeDispatch):
+    def __init__(self, name: str, dimensions: list[FakeDimension]) -> None:
+        super().__init__({"GetNextDisplayDimension"})
+        self.Name = name
+        self.displays = [FakeDisplayDimension(d) for d in dimensions]
+
+    def GetFirstDisplayDimension(self):  # noqa: N802 - COM member name
+        return self.displays[0] if self.displays else None
+
+    def GetNextDisplayDimension(self, current):  # noqa: N802 - COM member name
+        index = self.displays.index(current) + 1
+        return self.displays[index] if index < len(self.displays) else None
+
+
+class ListDimensionsDrivenTests(unittest.TestCase):
+    """ClauSW #76: `driven` is true exactly for swDimensionDriven (1), false for swDimensionDriving (2), null for an
+    unknown (0) or unreadable state; `driven_state` carries the raw value."""
+
+    def listed(self, *dimensions: FakeDimension) -> list[dict]:
+        from solidworks_mcp import sw_sketch
+
+        feature = FakeDimensionFeature("Skizze1", list(dimensions))
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, object())), \
+                unittest.mock.patch.object(sw_sketch, "iter_feature_objects", return_value=[feature]):
+            answer = sw_sketch.list_dimensions({})
+        self.assertTrue(answer["ok"], answer)
+        return answer["data"]["dimensions"]
+
+    def test_driving_is_not_driven_and_driven_is_driven(self) -> None:
+        driving, driven = self.listed(FakeDimension("D1", 2), FakeDimension("D2", 1))
+        self.assertEqual((driving["driven"], driving["driven_state"]), (False, 2))
+        self.assertEqual((driven["driven"], driven["driven_state"]), (True, 1))
+
+    def test_only_the_reference_dimension_is_driven_in_a_mixed_sketch(self) -> None:
+        rows = self.listed(FakeDimension("D1", 2), FakeDimension("D2", 2), FakeDimension("D3", 1), FakeDimension("D4", 2))
+        self.assertEqual([r["name"] for r in rows if r["driven"] is True], ["D3"])
+        self.assertTrue(all(r["driven"] is False for r in rows if r["name"] != "D3"))
+
+    def test_unknown_or_unreadable_state_is_null_and_the_dimension_stays_listed(self) -> None:
+        unknown, unreadable, odd, flag = self.listed(FakeDimension("D1", 0), FakeDimension("D2", RuntimeError("COM")),
+                                                     FakeDimension("D3", "kaputt"), FakeDimension("D4", True))
+        self.assertEqual((unknown["driven"], unknown["driven_state"]), (None, 0))
+        self.assertEqual((unreadable["driven"], unreadable["driven_state"]), (None, None))
+        self.assertEqual((odd["driven"], odd["driven_state"]), (None, None))
+        self.assertEqual((flag["driven"], flag["driven_state"]), (None, None))
+        self.assertEqual(unreadable["full_name"], "D2@Skizze1")
+        self.assertAlmostEqual(unreadable["value_mm"], 10.0)
+
+    def test_angular_dimension_keeps_value_deg(self) -> None:
+        import math
+
+        row, = self.listed(FakeDimension("A1", 1, kind=3, system_value=math.radians(15)))
+        self.assertAlmostEqual(row["value_deg"], 15.0)
+        self.assertNotIn("value_mm", row)
+        self.assertEqual((row["driven"], row["driven_state"]), (True, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

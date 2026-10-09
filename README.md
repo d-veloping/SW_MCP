@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-111 tools: sketching with real relations and driving dimensions, the solid
+112 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -133,6 +133,7 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | `create_new_document` | New part / assembly / drawing from the default template. |
 | `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw` and wait until it is the active document; reports the opened document and `already_open` (was the file open before the call). |
 | `list_open_documents` / `close_document` | Every open document with title and path; close one without saving, with `only_if_clean` only if it has no unsaved changes. |
+| `activate_document` | Activate the open document with exactly this title and wait until it is active; for a caller that created the document itself and lost the focus. Activates nothing for an unknown, duplicate or unreadable title. |
 | `save_document` / `save_active_document` | Save-as under the output root / save in place. |
 | `export_document` | STEP, IGES, STL, Parasolid, 3MF, an image of the current view, or PDF of a drawing (every sheet, vector, true sheet size; an image of a drawing is only a window-sized capture). |
 | `rebuild_document` | Rebuild and report failing features. |
@@ -404,8 +405,8 @@ plate ends flush inside, the recut member is reported), are checked by
 readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
 with every option off its default by readback and reach.
 
-Every tool except the 16 sheet metal and weldment tools has been exercised
-against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
+Every tool except the 16 sheet metal and weldment tools and `activate_document`
+has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
 could be checked numerically it was: the revolved ring, swept rod and lofted
 cone match their closed-form volumes; a 5-degree `draft` removes exactly the
 expected wedge; `rib` produces exactly the triangle under its profile;
