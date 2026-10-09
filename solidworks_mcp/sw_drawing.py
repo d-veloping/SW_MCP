@@ -323,21 +323,22 @@ def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as exc:
             logger.info("Sheet setup was declined: %s", exc)
-    if not created.get("ok"):
-        # the drawing never became active (SOLIDWORKS kept or switched back to another document): the answer names it
-        return created
+    # the final check also runs when the wait for activation ran out: SOLIDWORKS may finish a late activation during the
+    # sheet setup, and only the state at the end counts
     active = running_app().ActiveDoc
     identity = _identity(active)
     if identity != own:
+        message = (f"Created a new drawing '{own[0]}', but '{identity[0] if identity else 'none'}' became active again "
+                   "after the drawing was created; nothing should be done in either." if created.get("ok")
+                   else created["message"])
         return result(
-            False,
-            f"Created a new drawing '{own[0]}', but '{identity[0] if identity else 'none'}' became active again after "
-            "the drawing was created; nothing should be done in either.",
-            document=document_info(doc), activated=False, wait_ms=created["data"].get("wait_ms"),
+            False, message, document=document_info(doc), activated=False, wait_ms=created["data"].get("wait_ms"),
             active_document=None if active is None else document_info(active),
         )
-    return result(True, "Created a new drawing.", document=document_info(doc), sheets=_sheet_names(doc),
-                  activated=True, wait_ms=created["data"].get("wait_ms"))
+    return result(True, "Created a new drawing." if created.get("ok") else
+                  "Created a new drawing; it became active only after the wait for activation.",
+                  document=document_info(doc), sheets=_sheet_names(doc), activated=True,
+                  wait_ms=created["data"].get("wait_ms"))
 
 
 def _sheet_names(doc: Any) -> list[str]:

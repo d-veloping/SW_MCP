@@ -217,6 +217,8 @@ class _Doc:
     def __init__(self, title: str, kind: int, path: str = "") -> None:
         self.title, self.kind, self.path = title, kind, path
         self.setups: list[tuple] = []
+        self.app = None                  # set by _App for the new document
+        self.activate_on_setup = False   # SOLIDWORKS finishes a late activation during SetupSheet5
 
     def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
         pass
@@ -241,6 +243,8 @@ class _Doc:
 
     def SetupSheet5(self, *args) -> bool:  # noqa: N802 - COM member name
         self.setups.append(args)
+        if self.activate_on_setup:
+            self.app.after, self.app.reads_after = [self], 0
         return True
 
 
@@ -251,6 +255,8 @@ class _App:
         self.before, self.after, self.new = before, after, new
         self.created = False
         self.reads_after = 0
+        if new is not None:
+            new.app = self
 
     def GetUserPreferenceStringValue(self, preference: int) -> str:  # noqa: N802 - COM member name
         return __file__
@@ -314,6 +320,15 @@ class CreateDrawingActivationTests(unittest.TestCase):
         self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", False))
         self.assertEqual(len(self.drawing.setups), 1)
         self.assertEqual(self.drawing.setups[0][1], sw_drawing.PAPER_SIZES["A3"])
+
+    def test_activation_finished_during_the_sheet_setup_is_ok(self) -> None:
+        """Case B with a late switch: the wait ran out with the part active, SOLIDWORKS activates the drawing during
+        the sheet setup; the final check sees the drawing and the answer is ok."""
+        self.drawing.activate_on_setup = True
+        answer = self.create([self.part], {"paper_size": "A3", "first_angle": True})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual((answer["data"]["document"]["title"], answer["data"]["activated"]), ("Draw7 - Blatt1", True))
+        self.assertIn("only after the wait", answer["message"])
 
     def test_part_active_right_after_new_document_never_raises_and_sets_up_the_own_drawing(self) -> None:
         """Case C: ActiveDoc is the part between new_document and the sheet setup; the sheet setup goes to the own
