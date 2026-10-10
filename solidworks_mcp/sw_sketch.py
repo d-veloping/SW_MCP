@@ -49,6 +49,9 @@ from .sw_core import (
     rebuild,
     select_object,
     select_origin,
+    SKETCH_FEATURE_TYPES,
+    sketch_status,
+    UNSOLVED_SKETCH_STATUS,
     require_part,
     require_selection,
     resolve_plane_name,
@@ -899,20 +902,14 @@ def add_relation(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sketch_status(doc: Any) -> str:
-    """Report whether the open sketch is under/fully/over defined."""
+    """Report whether the open sketch is under/fully/over defined; "closed" when no sketch is open."""
     try:
         sketch = doc.SketchManager.ActiveSketch
-        if sketch is None:
-            return "closed"
-        code = int(value(sketch, "GetConstrainedStatus"))
     except Exception:
         return "unknown"
-    # swConstrainedStatus_e is 1-based: 1 unknown, 2 under, 3 fully, 4 over.
-    return {
-        1: "unknown", 2: "under_defined", 3: "fully_defined",
-        4: "over_defined", 5: "no_solution", 6: "invalid_solution",
-        7: "autosolve_off",
-    }.get(code, f"status_{code}")
+    if sketch is None:
+        return "closed"
+    return sketch_status(sketch)
 
 
 _DIMENSION_METHODS = {
@@ -1046,11 +1043,48 @@ def _display_dimension(doc: Any, full_name: str) -> Any | None:
     return None
 
 
+def _dimension_owner(dimension: Any) -> tuple[str, Any | None]:
+    """The name of the feature that owns ``dimension`` and, when that feature is a sketch, its ISketch.
+
+    ``IDimension.GetFeatureOwner`` resolves the owner directly, also for the
+    short form ``D1@Sketch1`` (0.12-0.16 s measured 2026-10-09 on 2016 SP3);
+    a lookup by name would walk the feature tree (1.2-1.9 s).  An owner that
+    cannot be read counts as a non-sketch owner, so only the value readback
+    judges the change.
+    """
+    try:
+        owner = value(dimension, "GetFeatureOwner")
+    except Exception:
+        return "", None
+    if owner is None:
+        return "", None
+    name = str(feature_property(owner, "Name", ""))
+    if feature_property(owner, "GetTypeName2", "") not in SKETCH_FEATURE_TYPES:
+        return name, None
+    try:
+        return name, value(owner, "GetSpecificFeature2")
+    except Exception:
+        return name, None
+
+
+def _same_sketch(open_sketch: Any, owner_sketch: Any | None) -> bool:
+    """Whether the open sketch is the owner's sketch (COM identity, as open_sketch_name compares it)."""
+    if owner_sketch is None:
+        return False
+    try:
+        return bool(open_sketch == owner_sketch)
+    except Exception:
+        return False
+
+
 @tool(
     "set_dimension",
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
     "find names. Linear values are millimetres, angular values are degrees. diametric switches a "
-    "dimension measured to a centerline between radius and diameter display.",
+    "dimension measured to a centerline between radius and diameter display. A value change is "
+    "rebuilt, read back, and judged by the owning sketch's solve state: ok is false when the value "
+    "did not stick or the sketch is left over_defined, no_solution or invalid_solution, because the "
+    "geometry then did not move. While a sketch other than the owner is open, nothing is changed.",
     {
         "full_name": {"type": "string"},
         "value_mm": {"type": "number"},
@@ -1065,44 +1099,105 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
     dimension = doc.Parameter(name)
     if dimension is None:
         return result(False, f"No dimension named '{name}' exists. Call list_dimensions to see valid names.")
-    restyled: dict[str, Any] = {}
+    if args.get("value_mm") is not None:
+        target, unit, convert = to_m(args["value_mm"]), "mm", to_mm
+        applied: dict[str, Any] = {"value_mm": float(args["value_mm"])}
+    elif args.get("value_deg") is not None:
+        target, unit, convert = to_rad(args["value_deg"]), "deg", to_deg
+        applied = {"value_deg": float(args["value_deg"])}
+    elif args.get("diametric") is not None:
+        target, unit, convert, applied = None, "", to_mm, {}
+    else:
+        return result(False, "Pass value_mm, value_deg, or diametric.")
+
+    owner, owner_sketch = "", None
+    if target is not None:
+        owner, owner_sketch = _dimension_owner(dimension)
+        open_sketch = doc.SketchManager.ActiveSketch
+        if open_sketch is not None and not _same_sketch(open_sketch, owner_sketch):
+            # Without a rebuild the change cannot be read back or judged, and
+            # EditRebuild3 would close the caller's sketch (SW_MCP#14).
+            return result(
+                False,
+                f"A sketch that does not own {name} is open, so the change could not be rebuilt and checked. "
+                "Close it first. Nothing was changed.",
+                owner=owner,
+                **applied,
+            )
+
     if args.get("diametric") is not None:
         display = _display_dimension(doc, name)
         if display is None:
             return result(False, f"No display dimension named '{name}' was found to restyle.")
         display.Diametric = bool(args["diametric"])
-        restyled["diametric"] = bool(display.Diametric)
-    if args.get("value_mm") is not None:
-        target, applied = to_m(args["value_mm"]), {"value_mm": float(args["value_mm"]), **restyled}
-    elif args.get("value_deg") is not None:
-        target, applied = to_rad(args["value_deg"]), {"value_deg": float(args["value_deg"]), **restyled}
-    elif restyled:
+        applied["diametric"] = bool(display.Diametric)
+    if target is None:
         if doc.SketchManager.ActiveSketch is None:
             rebuild(doc)
         actual = float(safe(dimension, "SystemValue", 0.0) or 0.0)
         return result(
             True,
-            f"Set {name} to {'diametric' if restyled['diametric'] else 'linear'} display.",
+            f"Set {name} to {'diametric' if applied['diametric'] else 'linear'} display.",
             value_mm=round(to_mm(actual), 6),
-            **restyled,
+            **applied,
         )
-    else:
-        return result(False, "Pass value_mm, value_deg, or diametric.")
 
+    previous = safe(dimension, "SystemValue", None)
+    status_before = sketch_status(owner_sketch) if owner_sketch is not None else None
     flag_methods(dimension, "SetSystemValue3")
     code = int(dimension.SetSystemValue3(target, 2, empty_variant()))
     actual = float(safe(dimension, "SystemValue", target) or 0.0)
+    data: dict[str, Any] = {**applied, "owner": owner}
+    if owner_sketch is not None:
+        data["sketch_status_before"] = status_before
     if abs(actual - target) > 1e-9:
+        # The open sketch's solver rejects the value on the spot (measured);
+        # a closed sketch only shows the rejection after the rebuild below.
         return result(
             False,
             f"SOLIDWORKS did not accept the new value for {name}; the sketch may be over defined.",
             status=code,
-            **applied,
+            **data,
         )
-    if doc.SketchManager.ActiveSketch is not None:
-        return result(True, f"Set {name} in the open sketch.", **applied)
-    rebuilt = rebuild(doc)
-    return result(rebuilt, f"Set {name}." if rebuilt else f"Set {name}, but the rebuild reported a problem.", **applied)
+
+    sketch_open = doc.SketchManager.ActiveSketch is not None   # then it is the owner's sketch
+    rebuilt = None
+    if not sketch_open:
+        rebuilt = rebuild(doc)
+        # After the rebuild SystemValue reads the stored value again: the old one
+        # when the solver rejected the change (measured 2026-10-09 on 2016 SP3).
+        actual = float(safe(dimension, "SystemValue", actual) or 0.0)
+    status_after = sketch_status(owner_sketch) if owner_sketch is not None else None
+    try:
+        data[f"previous_value_{unit}"] = round(convert(float(previous)), 6)
+    except (TypeError, ValueError):
+        data[f"previous_value_{unit}"] = None
+    data[f"actual_value_{unit}"] = round(convert(actual), 6)
+    if owner_sketch is not None:
+        data["sketch_status"] = status_after
+
+    if status_after in UNSOLVED_SKETCH_STATUS:
+        if status_before in UNSOLVED_SKETCH_STATUS:
+            message = (f"{name} was not applied: sketch '{owner}' was already {status_before} before the change "
+                       f"and is {status_after} now, so the geometry did not move. Reopen the sketch with edit_sketch "
+                       "and resolve the conflict first.")
+        else:
+            message = (f"Setting {name} left sketch '{owner}' {status_after}, so the geometry did not move. "
+                       "Remove a conflicting relation or dimension first.")
+        return result(False, message, **data)
+    if abs(actual - target) > 1e-9:
+        requested, read_back = data[f"value_{unit}"], data[f"actual_value_{unit}"]
+        return result(
+            False,
+            f"{name} reads {read_back} {unit} after the rebuild, not the requested {requested} {unit}; "
+            "SOLIDWORKS did not apply the value. An equation or a conflicting constraint may drive it.",
+            **data,
+        )
+    if sketch_open:
+        return result(True, f"Set {name} in the open sketch.", **data)
+    if not rebuilt:
+        return result(False, f"Set {name}, but the rebuild reported a problem.", rebuilt=False, **data)
+    return result(True, f"Set {name}.", **data)
 
 
 # swDimensionDrivenState_e

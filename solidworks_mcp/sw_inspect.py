@@ -56,6 +56,7 @@ from .sw_core import (
     tool,
     to_deg,
     to_mm,
+    unsolved_sketches,
     value,
     volume_total_mm3,
     whats_wrong,
@@ -336,19 +337,36 @@ def measure(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "check_errors",
     "Read-only: rebuild the active document and report every feature that SOLIDWORKS flags. "
-    "The COM API returns null far more often than it raises, so call this after a suspicious build.",
-    {"rebuild_first": {"type": "boolean", "default": True}},
+    "The COM API returns null far more often than it raises, so call this after a suspicious build. "
+    "sketches: true also reads the solve state of every sketch and lists the unsolved ones (over_defined, "
+    "no_solution, invalid_solution), which SOLIDWORKS never flags itself; that costs one pass over the feature "
+    "tree, so ask for it after a parametric change such as set_dimension rather than after every feature.",
+    {
+        "rebuild_first": {"type": "boolean", "default": True},
+        "sketches": {
+            "type": "boolean",
+            "default": False,
+            "description": "Also report sketches the solver cannot solve; ok is then false when any exist.",
+        },
+    },
 )
 def check_errors(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     rebuilt = rebuild(doc) if bool(args.get("rebuild_first", True)) else None
     problems = whats_wrong(doc)
-    return result(
-        not problems,
-        "No feature errors or warnings." if not problems else f"{len(problems)} features are flagged.",
-        problems=problems,
-        rebuilt=rebuilt,
-    )
+    check_sketches = bool(args.get("sketches", False))
+    data: dict[str, Any] = {"problems": problems, "rebuilt": rebuilt, "sketches_checked": check_sketches}
+    notes = [] if not problems else [f"{len(problems)} features are flagged"]
+    if check_sketches:
+        unsolved = unsolved_sketches(doc)
+        data["unsolved_sketches"] = unsolved
+        if unsolved:
+            notes.append(f"{len(unsolved)} sketches cannot be solved ("
+                         + ", ".join(f"{row['sketch']}: {row['sketch_status']}" for row in unsolved) + ")")
+    if not notes:
+        return result(True, "No feature errors or warnings." if not check_sketches
+                      else "No feature errors or warnings, and every sketch solves.", **data)
+    return result(False, "; ".join(notes) + ".", **data)
 
 
 # --------------------------------------------------------------------------
