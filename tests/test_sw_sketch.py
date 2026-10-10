@@ -14,9 +14,11 @@
 
 """Offline tests for the parametric sketch tools: set_dimension judges a change by readback and sketch state (#14).
 
-The fakes reproduce what was measured on SOLIDWORKS 2016 SP3 on 2026-10-09: SetSystemValue3 stores the value and
-SystemValue reads it back at once; after EditRebuild3 SystemValue reads the stored value again, the old one when the
-solver rejected the change; GetConstrainedStatus of a closed sketch is readable through the owning feature.
+The fakes reproduce what was measured on SOLIDWORKS 2016 SP3 on 2026-10-09 and 2026-10-10: SetSystemValue3 stores
+the value and SystemValue reads it back at once; after EditRebuild3 SystemValue reads the stored value again, the old
+one when the solver rejected the change, and the sketch state changes at that rebuild; GetConstrainedStatus of a
+closed sketch is readable through the owning feature; the open sketch's solver rejects a value on the spot and the
+open sketch reads its new state at once.
 """
 
 from __future__ import annotations
@@ -37,15 +39,13 @@ FULLY, OVER, NO_SOLUTION = 3, 4, 5   # swConstrainedStatus_e
 
 
 class FakeSketch:
-    """An ISketch whose GetConstrainedStatus answers from a queue; the last entry repeats."""
+    """An ISketch whose GetConstrainedStatus answers `code`; a test changes `code` to model the solver."""
 
-    def __init__(self, *codes: int) -> None:
-        self.codes = list(codes)
+    def __init__(self, code: int) -> None:
+        self.code = code
 
     def GetConstrainedStatus(self) -> int:  # noqa: N802 - COM member name
-        if len(self.codes) > 1:
-            return self.codes.pop(0)
-        return self.codes[0]
+        return self.code
 
 
 class FakeOwner:
@@ -64,16 +64,18 @@ class FakeOwner:
 class FakeDimension:
     """IDimension: SetSystemValue3 stores the value unless `rejects`, which models the open sketch's solver."""
 
-    def __init__(self, system_value: float, owner, rejects: bool = False) -> None:
+    def __init__(self, system_value, owner, rejects: bool = False) -> None:
         self.SystemValue = system_value
         self._owner = owner
         self._rejects = rejects
         self.set_calls: list[float] = []
+        self.owner_calls = 0
 
     def _FlagAsMethod(self, *names: str) -> None:
         pass
 
     def GetFeatureOwner(self):  # noqa: N802 - COM member name
+        self.owner_calls += 1
         if isinstance(self._owner, Exception):
             raise self._owner
         return self._owner
@@ -110,10 +112,15 @@ class FakeDoc:
         return self._rebuilt
 
 
-def revert(dimension: FakeDimension, value: float):
-    def _revert() -> None:
-        dimension.SystemValue = value
-    return _revert
+def during_rebuild(dimension: FakeDimension | None = None, value=None, sketch: FakeSketch | None = None,
+                   code: int | None = None):
+    """What the measured rebuild does: the stored value reverts and the sketch state changes, both only then."""
+    def _apply() -> None:
+        if dimension is not None:
+            dimension.SystemValue = value
+        if sketch is not None and code is not None:
+            sketch.code = code
+    return _apply
 
 
 class SetDimensionTests(unittest.TestCase):
@@ -124,12 +131,12 @@ class SetDimensionTests(unittest.TestCase):
                 unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None):
             return sw_sketch.set_dimension({"full_name": self.NAME, **args})
 
-    def sketch_owner(self, *codes: int, name: str = "P_Skizze") -> tuple[FakeOwner, FakeSketch]:
-        sketch = FakeSketch(*codes)
+    def sketch_owner(self, code: int, name: str = "P_Skizze") -> tuple[FakeOwner, FakeSketch]:
+        sketch = FakeSketch(code)
         return FakeOwner(name, sw_core.SKETCH_2D_TYPE, sketch), sketch
 
     def test_closed_sketch_value_applied_and_fully_defined(self) -> None:
-        owner, _ = self.sketch_owner(FULLY, FULLY)
+        owner, _ = self.sketch_owner(FULLY)
         dimension = FakeDimension(0.080, owner)
         doc = FakeDoc(dimension)
         answer = self.call(doc, value_mm=90)
@@ -142,13 +149,14 @@ class SetDimensionTests(unittest.TestCase):
         self.assertAlmostEqual(data["actual_value_mm"], 90.0)
         self.assertEqual((data["sketch_status_before"], data["sketch_status"]), ("fully_defined", "fully_defined"))
 
-    def test_measured_fault_value_reverts_and_sketch_is_no_solution(self) -> None:
-        """The #14 reproduction: SystemValue reads 6 at once, 5 after the rebuild, and the sketch is no_solution."""
-        owner, _ = self.sketch_owner(FULLY, NO_SOLUTION)
+    def test_measured_fault_value_reverts_and_sketch_is_no_solution_at_the_rebuild(self) -> None:
+        """The #14 reproduction: SystemValue reads 6 at once; the rebuild reverts it to 5 and the sketch turns no_solution."""
+        owner, sketch = self.sketch_owner(FULLY)
         dimension = FakeDimension(0.005, owner)
-        doc = FakeDoc(dimension, on_rebuild=revert(dimension, 5.0000000000000435e-3))
+        doc = FakeDoc(dimension, on_rebuild=during_rebuild(dimension, 5.0000000000000435e-3, sketch, NO_SOLUTION))
         answer = self.call(doc, value_mm=6)
         self.assertFalse(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 1)
         self.assertIn("no_solution", answer["message"])
         self.assertIn("P_Skizze", answer["message"])
         self.assertIn("did not move", answer["message"])
@@ -159,9 +167,9 @@ class SetDimensionTests(unittest.TestCase):
         self.assertAlmostEqual(data["previous_value_mm"], 5.0)
         self.assertEqual(data["value_mm"], 6.0)
 
-    def test_unsolved_status_alone_fails_even_when_the_value_reads_back(self) -> None:
-        owner, _ = self.sketch_owner(FULLY, OVER)
-        doc = FakeDoc(FakeDimension(0.005, owner))
+    def test_unsolved_status_after_the_rebuild_fails_even_when_the_value_reads_back(self) -> None:
+        owner, sketch = self.sketch_owner(FULLY)
+        doc = FakeDoc(FakeDimension(0.005, owner), on_rebuild=during_rebuild(sketch=sketch, code=OVER))
         answer = self.call(doc, value_mm=6)
         self.assertFalse(answer["ok"], answer)
         self.assertEqual(answer["data"]["sketch_status"], "over_defined")
@@ -169,25 +177,34 @@ class SetDimensionTests(unittest.TestCase):
 
     def test_reverted_value_alone_fails_even_when_the_sketch_solves(self) -> None:
         """A dimension driven by an equation reads the equation's value after the rebuild."""
-        owner, _ = self.sketch_owner(FULLY, FULLY)
+        owner, _ = self.sketch_owner(FULLY)
         dimension = FakeDimension(0.005, owner)
-        doc = FakeDoc(dimension, on_rebuild=revert(dimension, 0.005))
+        doc = FakeDoc(dimension, on_rebuild=during_rebuild(dimension, 0.005))
         answer = self.call(doc, value_mm=6)
         self.assertFalse(answer["ok"], answer)
         self.assertIn("did not apply", answer["message"])
         self.assertIn("5.0 mm", answer["message"])
         self.assertEqual(answer["data"]["sketch_status"], "fully_defined")
 
+    def test_unreadable_value_after_the_rebuild_is_not_a_success(self) -> None:
+        dimension = FakeDimension(0.010, FakeOwner("Boss-Extrude1", "Extrusion"))
+        doc = FakeDoc(dimension, on_rebuild=during_rebuild(dimension, None))
+        answer = self.call(doc, value_mm=12)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn("could not be read back", answer["message"])
+        self.assertIsNone(answer["data"]["actual_value_mm"])
+
     def test_sketch_already_unsolved_before_the_change(self) -> None:
-        owner, _ = self.sketch_owner(NO_SOLUTION, NO_SOLUTION)
+        owner, _ = self.sketch_owner(NO_SOLUTION)
         doc = FakeDoc(FakeDimension(0.005, owner))
         answer = self.call(doc, value_mm=5)
         self.assertFalse(answer["ok"], answer)
         self.assertIn("already no_solution", answer["message"])
+        self.assertIn("edit_sketch", answer["message"])
         self.assertEqual(answer["data"]["sketch_status_before"], "no_solution")
 
     def test_owner_sketch_open_is_not_rebuilt_and_reports_its_status(self) -> None:
-        owner, sketch = self.sketch_owner(FULLY, FULLY)
+        owner, sketch = self.sketch_owner(FULLY)
         dimension = FakeDimension(0.090, owner)
         doc = FakeDoc(dimension, active_sketch=sketch)
         answer = self.call(doc, value_mm=85)
@@ -197,20 +214,55 @@ class SetDimensionTests(unittest.TestCase):
         self.assertEqual(answer["data"]["sketch_status"], "fully_defined")
         self.assertAlmostEqual(answer["data"]["actual_value_mm"], 85.0)
 
-    def test_owner_sketch_open_rejection_is_caught_by_the_immediate_readback(self) -> None:
-        owner, sketch = self.sketch_owner(NO_SOLUTION, NO_SOLUTION)
-        doc = FakeDoc(FakeDimension(0.005, owner, rejects=True), active_sketch=sketch)
+    def test_owner_sketch_open_rejection_names_the_state_the_open_sketch_reads(self) -> None:
+        """Measured 2026-10-10: in the open, fully defined sketch the solver rejects 6 at once and reads no_solution."""
+        owner, sketch = self.sketch_owner(FULLY)
+        dimension = FakeDimension(0.005, owner, rejects=True)
+
+        def reject(target, scope, config):
+            dimension.set_calls.append(target)
+            sketch.code = NO_SOLUTION
+            return 0
+        dimension.SetSystemValue3 = reject
+        doc = FakeDoc(dimension, active_sketch=sketch)
         answer = self.call(doc, value_mm=6)
         self.assertFalse(answer["ok"], answer)
-        self.assertIn("did not accept", answer["message"])
         self.assertEqual(doc.rebuilds, 0)
+        self.assertIn("did not accept 6.0 mm", answer["message"])
+        self.assertIn("no_solution", answer["message"])
+        self.assertIn("still reads 5.0 mm", answer["message"])
+        data = answer["data"]
+        self.assertEqual((data["sketch_status_before"], data["sketch_status"]), ("fully_defined", "no_solution"))
+        self.assertAlmostEqual(data["previous_value_mm"], 5.0)
+        self.assertAlmostEqual(data["actual_value_mm"], 5.0)
+
+    def test_feature_dimension_rejection_does_not_guess_a_sketch(self) -> None:
+        dimension = FakeDimension(0.010, FakeOwner("Boss-Extrude1", "Extrusion"), rejects=True)
+        answer = self.call(FakeDoc(dimension), value_mm=12)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn("'Boss-Extrude1'", answer["message"])
+        self.assertNotIn("sketch", answer["message"])
+        self.assertNotIn("sketch_status", answer["data"])
+
+    def test_owner_sketch_open_and_still_unsolved_says_so_without_edit_sketch(self) -> None:
+        """Live (h) of #16: the value is stored in the open, unsolved sketch, which keeps reading no_solution."""
+        owner, sketch = self.sketch_owner(NO_SOLUTION)
+        doc = FakeDoc(FakeDimension(0.005, owner), active_sketch=sketch)
+        answer = self.call(doc, value_mm=5)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn("open sketch", answer["message"])
+        self.assertIn("close_sketch", answer["message"])
+        self.assertNotIn("edit_sketch", answer["message"])
+        self.assertNotIn("not applied", answer["message"])
+        self.assertEqual(answer["data"]["sketch_status"], "no_solution")
 
     def test_another_sketch_open_changes_nothing(self) -> None:
-        owner, _ = self.sketch_owner(FULLY, FULLY)
+        owner, _ = self.sketch_owner(FULLY)
         dimension = FakeDimension(0.080, owner)
         doc = FakeDoc(dimension, active_sketch=FakeSketch(FULLY))
         answer = self.call(doc, value_mm=90)
         self.assertFalse(answer["ok"], answer)
+        self.assertIn("does not own", answer["message"])
         self.assertIn("Nothing was changed", answer["message"])
         self.assertEqual(dimension.set_calls, [])
         self.assertEqual(doc.rebuilds, 0)
@@ -222,6 +274,16 @@ class SetDimensionTests(unittest.TestCase):
         answer = self.call(doc, value_mm=12)
         self.assertFalse(answer["ok"], answer)
         self.assertEqual(dimension.set_calls, [])
+
+    def test_unreadable_owner_with_a_sketch_open_is_refused_and_says_why(self) -> None:
+        for owner in (None, RuntimeError("COM")):
+            with self.subTest(owner=owner):
+                dimension = FakeDimension(0.010, owner)
+                answer = self.call(FakeDoc(dimension, active_sketch=FakeSketch(FULLY)), value_mm=12)
+                self.assertFalse(answer["ok"], answer)
+                self.assertIn("could not be read", answer["message"])
+                self.assertNotIn("does not own", answer["message"])
+                self.assertEqual(dimension.set_calls, [])
 
     def test_feature_dimension_is_judged_by_the_readback_after_the_rebuild(self) -> None:
         dimension = FakeDimension(0.010, FakeOwner("Boss-Extrude1", "Extrusion"))
@@ -235,7 +297,7 @@ class SetDimensionTests(unittest.TestCase):
         self.assertAlmostEqual(data["actual_value_mm"], 12.0)
 
         reverting = FakeDimension(0.010, FakeOwner("Boss-Extrude1", "Extrusion"))
-        doc = FakeDoc(reverting, on_rebuild=revert(reverting, 0.010))
+        doc = FakeDoc(reverting, on_rebuild=during_rebuild(reverting, 0.010))
         answer = self.call(doc, value_mm=12)
         self.assertFalse(answer["ok"], answer)
         self.assertIn("did not apply", answer["message"])
@@ -258,7 +320,7 @@ class SetDimensionTests(unittest.TestCase):
                 self.assertNotIn("sketch_status", answer["data"])
 
     def test_rebuild_false_fails_as_before(self) -> None:
-        owner, _ = self.sketch_owner(FULLY, FULLY)
+        owner, _ = self.sketch_owner(FULLY)
         doc = FakeDoc(FakeDimension(0.080, owner), rebuilt=False)
         answer = self.call(doc, value_mm=90)
         self.assertFalse(answer["ok"], answer)
@@ -266,16 +328,20 @@ class SetDimensionTests(unittest.TestCase):
         self.assertIs(answer["data"]["rebuilt"], False)
 
     def test_diametric_only_path_is_unchanged(self) -> None:
-        dimension = FakeDimension(0.040, RuntimeError("GetFeatureOwner must not be called on the restyle path"))
-        display = unittest.mock.Mock(Diametric=False)
-        doc = FakeDoc(dimension)
-        with unittest.mock.patch.object(sw_sketch, "_display_dimension", return_value=display):
-            answer = self.call(doc, diametric=True)
-        self.assertTrue(answer["ok"], answer)
-        self.assertIs(display.Diametric, True)
-        self.assertEqual(doc.rebuilds, 1)
-        self.assertEqual(dimension.set_calls, [])
-        self.assertEqual(answer["data"], {"value_mm": 40.0, "diametric": True})
+        """No owner lookup, no SetSystemValue3, and an open sketch does not block a pure restyle."""
+        for active in (None, FakeSketch(FULLY)):
+            with self.subTest(sketch_open=active is not None):
+                dimension = FakeDimension(0.040, FakeOwner("Skizze9", sw_core.SKETCH_2D_TYPE, FakeSketch(FULLY)))
+                display = unittest.mock.Mock(Diametric=False)
+                doc = FakeDoc(dimension, active_sketch=active)
+                with unittest.mock.patch.object(sw_sketch, "_display_dimension", return_value=display):
+                    answer = self.call(doc, diametric=True)
+                self.assertTrue(answer["ok"], answer)
+                self.assertIs(display.Diametric, True)
+                self.assertEqual(doc.rebuilds, 0 if active is not None else 1)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertEqual(dimension.owner_calls, 0)
+                self.assertEqual(answer["data"], {"value_mm": 40.0, "diametric": True})
 
     def test_another_sketch_open_blocks_before_a_restyle_with_value(self) -> None:
         owner, _ = self.sketch_owner(FULLY)
@@ -300,20 +366,28 @@ class SketchStatusTests(unittest.TestCase):
         self.assertEqual(sw_core.sketch_status(FakeSketch(FULLY)), "fully_defined")
         self.assertEqual(sw_core.sketch_status(FakeSketch(99)), "status_99")
         self.assertEqual(sw_core.sketch_status(object()), "unknown")
+        self.assertTrue(sw_core.unreadable_sketch_state("unknown"))
+        self.assertTrue(sw_core.unreadable_sketch_state("status_99"))
+        self.assertFalse(sw_core.unreadable_sketch_state("under_defined"))
+        self.assertFalse(sw_core.unreadable_sketch_state("no_solution"))
 
     def test_open_sketch_status_reports_closed_without_a_sketch(self) -> None:
         self.assertEqual(sw_sketch._sketch_status(FakeDoc(FakeDimension(0.0, None))), "closed")
         self.assertEqual(sw_sketch._sketch_status(FakeDoc(FakeDimension(0.0, None), active_sketch=FakeSketch(OVER))),
                          "over_defined")
 
-    def test_unsolved_sketches_walks_only_sketch_features(self) -> None:
+    def test_sketch_states_reads_only_sketch_features_and_marks_unreadable_ones(self) -> None:
         good = FakeOwner("Skizze1", sw_core.SKETCH_2D_TYPE, FakeSketch(FULLY))
         bad = FakeOwner("3DSkizze1", sw_core.SKETCH_3D_TYPE, FakeSketch(NO_SOLUTION))
         broken = FakeOwner("Skizze2", sw_core.SKETCH_2D_TYPE, None)
-        with unittest.mock.patch.object(sw_core, "sketch_features", return_value=[good, bad, broken]) as walk:
-            rows = sw_core.unsolved_sketches(object())
-        self.assertEqual(rows, [{"sketch": "3DSkizze1", "sketch_status": "no_solution"}])
-        self.assertEqual(walk.call_args.kwargs, {"include_3d": True})
+        extrude = FakeOwner("Boss-Extrude1", "Extrusion", FakeSketch(NO_SOLUTION))
+        with unittest.mock.patch.object(sw_core, "iter_feature_objects", return_value=[good, extrude, bad, broken]):
+            states = sw_core.sketch_states(object())
+            unsolved = sw_core.unsolved_sketches(object())
+        self.assertEqual(states, [{"sketch": "Skizze1", "sketch_status": "fully_defined"},
+                                  {"sketch": "3DSkizze1", "sketch_status": "no_solution"},
+                                  {"sketch": "Skizze2", "sketch_status": "unknown"}])
+        self.assertEqual(unsolved, [{"sketch": "3DSkizze1", "sketch_status": "no_solution"}])
 
 
 if __name__ == "__main__":

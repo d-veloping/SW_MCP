@@ -30,17 +30,20 @@ from solidworks_mcp import sw_inspect  # noqa: E402
 
 class CheckErrorsSketchTests(unittest.TestCase):
     PROBLEM = {"feature": "Boss-Extrude1", "code": 1, "is_warning": False}
+    UNSOLVED = {"sketch": "P_Skizze", "sketch_status": "no_solution"}
+    SOLVED = {"sketch": "K_Skizze", "sketch_status": "fully_defined"}
+    UNREADABLE = {"sketch": "Skizze2", "sketch_status": "unknown"}
 
-    def call(self, args: dict, problems: list, unsolved: list) -> tuple[dict, unittest.mock.Mock]:
-        walk = unittest.mock.Mock(return_value=unsolved)
+    def call(self, args: dict, problems: list, states: list) -> tuple[dict, unittest.mock.Mock]:
+        walk = unittest.mock.Mock(return_value=states)
         with unittest.mock.patch.object(sw_inspect, "active_document", return_value=(None, object())), \
                 unittest.mock.patch.object(sw_inspect, "rebuild", return_value=True), \
                 unittest.mock.patch.object(sw_inspect, "whats_wrong", return_value=problems), \
-                unittest.mock.patch.object(sw_inspect, "unsolved_sketches", walk):
+                unittest.mock.patch.object(sw_inspect, "sketch_states", walk):
             return sw_inspect.check_errors(args), walk
 
     def test_default_does_not_walk_the_sketches_and_answers_as_before(self) -> None:
-        answer, walk = self.call({}, [], [{"sketch": "P_Skizze", "sketch_status": "no_solution"}])
+        answer, walk = self.call({}, [], [self.UNSOLVED])
         walk.assert_not_called()
         self.assertTrue(answer["ok"])
         self.assertEqual(answer["message"], "No feature errors or warnings.")
@@ -53,26 +56,36 @@ class CheckErrorsSketchTests(unittest.TestCase):
         self.assertNotIn("unsolved_sketches", answer["data"])
 
     def test_unsolved_sketch_fails_the_check_without_feature_problems(self) -> None:
-        unsolved = [{"sketch": "P_Skizze", "sketch_status": "no_solution"}]
-        answer, walk = self.call({"sketches": True}, [], unsolved)
+        answer, walk = self.call({"sketches": True}, [], [self.SOLVED, self.UNSOLVED])
         walk.assert_called_once()
         self.assertFalse(answer["ok"])
         self.assertIn("P_Skizze: no_solution", answer["message"])
         self.assertEqual(answer["data"]["problems"], [])
-        self.assertEqual(answer["data"]["unsolved_sketches"], unsolved)
+        self.assertEqual(answer["data"]["unsolved_sketches"], [self.UNSOLVED])
+        self.assertEqual(answer["data"]["unreadable_sketches"], [])
         self.assertTrue(answer["data"]["sketches_checked"])
 
     def test_every_sketch_solved_keeps_ok(self) -> None:
-        answer, _ = self.call({"sketches": True}, [], [])
+        answer, _ = self.call({"sketches": True}, [], [self.SOLVED])
         self.assertTrue(answer["ok"])
-        self.assertIn("every sketch solves", answer["message"])
+        self.assertIn("no sketch reads an unsolved state", answer["message"])
+        self.assertEqual(answer["data"]["unsolved_sketches"], [])
+
+    def test_unreadable_sketch_is_named_and_does_not_fail_the_check(self) -> None:
+        answer, _ = self.call({"sketches": True}, [], [self.SOLVED, self.UNREADABLE])
+        self.assertTrue(answer["ok"])
+        self.assertIn("1 sketches could not be read (Skizze2)", answer["message"])
+        self.assertNotIn("every sketch", answer["message"])
+        self.assertEqual(answer["data"]["unreadable_sketches"], [self.UNREADABLE])
         self.assertEqual(answer["data"]["unsolved_sketches"], [])
 
     def test_feature_problems_and_unsolved_sketches_are_both_named(self) -> None:
-        answer, _ = self.call({"sketches": True}, [self.PROBLEM], [{"sketch": "Skizze2", "sketch_status": "over_defined"}])
+        answer, _ = self.call({"sketches": True}, [self.PROBLEM],
+                              [{"sketch": "Skizze2", "sketch_status": "over_defined"}, self.UNREADABLE])
         self.assertFalse(answer["ok"])
         self.assertIn("1 features are flagged", answer["message"])
         self.assertIn("Skizze2: over_defined", answer["message"])
+        self.assertIn("could not be read", answer["message"])
 
 
 if __name__ == "__main__":

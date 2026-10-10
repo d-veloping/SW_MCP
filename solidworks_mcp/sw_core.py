@@ -732,11 +732,11 @@ def sketch_status(sketch: Any) -> str:
     return SKETCH_STATUS.get(code, f"status_{code}")
 
 
-def unsolved_sketches(doc: Any) -> list[dict[str, Any]]:
-    """Every sketch feature whose solve state is in UNSOLVED_SKETCH_STATUS, in tree order.
+def sketch_states(doc: Any) -> list[dict[str, Any]]:
+    """Every sketch feature with its solve state, in tree order; ``"unknown"`` when it cannot be read.
 
-    SOLIDWORKS does not flag such a sketch through GetWhatsWrong (SW_MCP#14), so
-    this is the only readback for it.  One pass over the feature tree.
+    SOLIDWORKS does not flag a sketch it cannot solve through GetWhatsWrong
+    (SW_MCP#14); this is how check_errors reads it.  One pass over the feature tree.
     """
     rows: list[dict[str, Any]] = []
     for feature in sketch_features(doc, include_3d=True):
@@ -745,9 +745,18 @@ def unsolved_sketches(doc: Any) -> list[dict[str, Any]]:
         except Exception:
             sketch = None
         status = sketch_status(sketch) if sketch is not None else "unknown"
-        if status in UNSOLVED_SKETCH_STATUS:
-            rows.append({"sketch": str(feature_property(feature, "Name", "")), "sketch_status": status})
+        rows.append({"sketch": str(feature_property(feature, "Name", "")), "sketch_status": status})
     return rows
+
+
+def unreadable_sketch_state(status: str) -> bool:
+    """Whether a state from sketch_status means the sketch was not read (an error or a code outside the table)."""
+    return status == "unknown" or status.startswith("status_")
+
+
+def unsolved_sketches(doc: Any) -> list[dict[str, Any]]:
+    """The rows of sketch_states whose state is in UNSOLVED_SKETCH_STATUS."""
+    return [row for row in sketch_states(doc) if row["sketch_status"] in UNSOLVED_SKETCH_STATUS]
 
 
 def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
