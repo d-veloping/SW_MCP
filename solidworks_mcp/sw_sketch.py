@@ -1049,8 +1049,8 @@ def _dimension_owner(dimension: Any) -> tuple[str, Any | None]:
     ``IDimension.GetFeatureOwner`` resolves the owner directly, also for the
     short form ``D1@Sketch1`` (0.12-0.16 s measured 2026-10-09 on 2016 SP3);
     a lookup by name would walk the feature tree (1.2-1.9 s).  An owner that
-    cannot be read counts as a non-sketch owner, so only the value readback
-    judges the change.
+    cannot be read counts as a non-sketch owner: with no sketch open only the
+    value readback judges the change, with a sketch open the change is refused.
     """
     try:
         owner = value(dimension, "GetFeatureOwner")
@@ -1082,9 +1082,10 @@ def _same_sketch(open_sketch: Any, owner_sketch: Any | None) -> bool:
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
     "find names. Linear values are millimetres, angular values are degrees. diametric switches a "
     "dimension measured to a centerline between radius and diameter display. A value change is "
-    "rebuilt, read back, and judged by the owning sketch's solve state: ok is false when the value "
-    "did not stick or the sketch is left over_defined, no_solution or invalid_solution, because the "
-    "geometry then did not move. While a sketch other than the owner is open, nothing is changed.",
+    "rebuilt (unless its own sketch is open), read back, and judged by the owning sketch's solve "
+    "state: ok is false when the value did not stick or the sketch is left over_defined, no_solution "
+    "or invalid_solution, because the geometry then did not move; a sketch state that cannot be read "
+    "does not count as unsolved. While a sketch other than the owner is open, nothing is changed.",
     {
         "full_name": {"type": "string"},
         "value_mm": {"type": "number"},
@@ -1117,10 +1118,11 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
         if open_sketch is not None and not _same_sketch(open_sketch, owner_sketch):
             # Without a rebuild the change cannot be read back or judged, and
             # EditRebuild3 would close the caller's sketch (SW_MCP#14).
+            why = (f"A sketch is open and the owner of {name} could not be read" if not owner
+                   else f"A sketch that does not own {name} is open")
             return result(
                 False,
-                f"A sketch that does not own {name} is open, so the change could not be rebuilt and checked. "
-                "Close it first. Nothing was changed.",
+                f"{why}, so the change could not be rebuilt and checked. Close it first. Nothing was changed.",
                 owner=owner,
                 **applied,
             )
@@ -1142,20 +1144,32 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
             **applied,
         )
 
-    previous = safe(dimension, "SystemValue", None)
+    previous = _system_value(dimension)
     status_before = sketch_status(owner_sketch) if owner_sketch is not None else None
     flag_methods(dimension, "SetSystemValue3")
     code = int(dimension.SetSystemValue3(target, 2, empty_variant()))
-    actual = float(safe(dimension, "SystemValue", target) or 0.0)
+    actual = _system_value(dimension)
     data: dict[str, Any] = {**applied, "owner": owner}
     if owner_sketch is not None:
         data["sketch_status_before"] = status_before
-    if abs(actual - target) > 1e-9:
-        # The open sketch's solver rejects the value on the spot (measured);
-        # a closed sketch only shows the rejection after the rebuild below.
+    requested = data[f"value_{unit}"]
+    data[f"previous_value_{unit}"] = _rounded(convert, previous)
+    if actual is None or abs(actual - target) > 1e-9:
+        # The open sketch's solver rejects the value on the spot and the sketch
+        # reads its new state at once (measured 2026-10-10 on 2016 SP3: the
+        # issue's part, fully_defined before, no_solution right after); a closed
+        # sketch shows the rejection only after the rebuild below.
+        status_after = sketch_status(owner_sketch) if owner_sketch is not None else None
+        data[f"actual_value_{unit}"] = _rounded(convert, actual)
+        if owner_sketch is not None:
+            data["sketch_status"] = status_after
+            where = f"sketch '{owner}', which reads {status_after}"
+        else:
+            where = f"'{owner}'" if owner else "its owner"
         return result(
             False,
-            f"SOLIDWORKS did not accept the new value for {name}; the sketch may be over defined.",
+            f"SOLIDWORKS did not accept {requested} {unit} for {name} in {where}; the dimension still reads "
+            f"{data[f'actual_value_{unit}']} {unit} and the geometry did not move.",
             status=code,
             **data,
         )
@@ -1166,18 +1180,18 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
         rebuilt = rebuild(doc)
         # After the rebuild SystemValue reads the stored value again: the old one
         # when the solver rejected the change (measured 2026-10-09 on 2016 SP3).
-        actual = float(safe(dimension, "SystemValue", actual) or 0.0)
+        actual = _system_value(dimension)
     status_after = sketch_status(owner_sketch) if owner_sketch is not None else None
-    try:
-        data[f"previous_value_{unit}"] = round(convert(float(previous)), 6)
-    except (TypeError, ValueError):
-        data[f"previous_value_{unit}"] = None
-    data[f"actual_value_{unit}"] = round(convert(actual), 6)
+    data[f"actual_value_{unit}"] = _rounded(convert, actual)
     if owner_sketch is not None:
         data["sketch_status"] = status_after
 
     if status_after in UNSOLVED_SKETCH_STATUS:
-        if status_before in UNSOLVED_SKETCH_STATUS:
+        if sketch_open:
+            message = (f"{name} is stored in the open sketch '{owner}', which still reads {status_after}, so the "
+                       "geometry does not move. Resolve the conflict, then close_sketch and check with check_errors "
+                       "sketches: true.")
+        elif status_before in UNSOLVED_SKETCH_STATUS:
             message = (f"{name} was not applied: sketch '{owner}' was already {status_before} before the change "
                        f"and is {status_after} now, so the geometry did not move. Reopen the sketch with edit_sketch "
                        "and resolve the conflict first.")
@@ -1185,12 +1199,13 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
             message = (f"Setting {name} left sketch '{owner}' {status_after}, so the geometry did not move. "
                        "Remove a conflicting relation or dimension first.")
         return result(False, message, **data)
+    if actual is None:
+        return result(False, f"{name} could not be read back after the rebuild, so the change is unverified.", **data)
     if abs(actual - target) > 1e-9:
-        requested, read_back = data[f"value_{unit}"], data[f"actual_value_{unit}"]
         return result(
             False,
-            f"{name} reads {read_back} {unit} after the rebuild, not the requested {requested} {unit}; "
-            "SOLIDWORKS did not apply the value. An equation or a conflicting constraint may drive it.",
+            f"{name} reads {data[f'actual_value_{unit}']} {unit} after the rebuild, not the requested {requested} "
+            f"{unit}; SOLIDWORKS did not apply the value. An equation or a conflicting constraint may drive it.",
             **data,
         )
     if sketch_open:
@@ -1198,6 +1213,18 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
     if not rebuilt:
         return result(False, f"Set {name}, but the rebuild reported a problem.", rebuilt=False, **data)
     return result(True, f"Set {name}.", **data)
+
+
+def _system_value(dimension: Any) -> float | None:
+    """``IDimension.SystemValue`` as a float, None when it cannot be read; a missing readback is never a success."""
+    try:
+        return float(safe(dimension, "SystemValue", None))
+    except (TypeError, ValueError):
+        return None
+
+
+def _rounded(convert: Any, raw: float | None) -> float | None:
+    return round(convert(raw), 6) if raw is not None else None
 
 
 # swDimensionDrivenState_e

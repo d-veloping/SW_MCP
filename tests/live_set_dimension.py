@@ -25,9 +25,13 @@ extrude 10 mm (40 000 mm³), where changes do apply.  Checks:
 (c) F: check_errors {} answers problems [] and sketches_checked false; with sketches true it answers ok false and
     names P_Skizze as no_solution;
 (d) K: 80 → 90 answers ok true, fully_defined, and the volume is 45 000;
-(e) K, open sketch: edit_sketch, 90 → 85 answers ok true with a sketch_status; close_sketch, volume 42 500;
+(e) K, open sketch: edit_sketch, 90 → 85 answers ok true with a sketch_status; close_sketch, volume 42 500.  The
+    state reads fully_defined before and after, so this check does not tell whether an open sketch's state lags;
 (f) K, feature dimension: the extrude depth 10 → 12 answers ok true, volume 51 000;
-(g) K with its sketch open: setting the extrude depth answers ok false, the depth stays 12, volume unchanged.
+(g) K with its sketch open: setting the extrude depth answers ok false, the depth stays 12, volume unchanged;
+(i) a second part F, open path: edit_sketch, the radius change inside the sketch answers ok false with
+    sketch_status no_solution and actual_value_mm ≈ 5; after close_sketch the sketch solves again
+    (unsolved_sketches []) and the volume is unchanged.
 (h) recorded, not asserted: F's recovery edit_sketch → set_dimension 5 → close_sketch, then the sketch state and the
     volume; and the time of every set_dimension call.
 
@@ -35,7 +39,8 @@ Run this only on a workstation with SOLIDWORKS already running and nothing else 
 
     ..\\.venv\\Scripts\\python.exe tests\\live_set_dimension.py
 
-Both parts are closed without saving.  The output is one JSON object; exit code 0 when (a) to (g) hold.
+Every part is closed without saving.  The output is one JSON object, also when a step raises; exit code 0 when (a)
+to (g) and (i) hold.
 """
 
 from __future__ import annotations
@@ -93,6 +98,10 @@ class Run:
         created = self.call("create_new_document", {"kind": "part"})
         return ((created.get("data") or {}).get("document") or {}).get("title")
 
+    def close_part(self, label: str, title: str | None) -> None:
+        if title:
+            self.report["steps"].append({f"close_{label}": self.call("close_document", {"title": title}).get("ok")})
+
     def build_f(self) -> None:
         self.call("create_sketch", {"plane": "front", "name": "P_Skizze"})
         for index, (x1, y1, _) in enumerate(CORNERS):
@@ -122,16 +131,13 @@ def close_to(actual: float | None, wanted: float, tolerance: float = 1e-3) -> bo
     return actual is not None and abs(float(actual) - wanted) <= tolerance
 
 
-def main() -> int:
-    run = Run()
+def part_f(run: Run) -> None:
+    """The reproduction, closed path: (a), (b), (c) and the recording (h)."""
     checks, recorded = run.report["checks"], run.report["recorded"]
-    title = None
+    title = run.new_part()
     try:
-        # Part F: the reproduction.
-        title = run.new_part()
         run.build_f()
-        volume_f = run.volume()
-        checks["f_built"] = close_to(volume_f, F_VOLUME)
+        checks["f_built"] = close_to(run.volume(), F_VOLUME)
         name = run.dimension("P_Skizze", 5)
         changed = run.call("set_dimension", {"full_name": name, "value_mm": 6})
         recorded["a_answer"] = changed
@@ -146,20 +152,20 @@ def main() -> int:
                                     and with_sketches.get("ok") is False
                                     and data(with_sketches, "unsolved_sketches") == [{"sketch": "P_Skizze",
                                                                                       "sketch_status": "no_solution"}])
-        # (h) recovery, recorded only.
         run.call("edit_sketch", {"sketch_name": "P_Skizze"})
         recorded["h_open_status"] = data(run.call("get_sketch_status"), "sketch_status")
         recorded["h_set_back"] = run.call("set_dimension", {"full_name": name, "value_mm": 5})
         run.call("close_sketch")
         recorded["h_after"] = {"check_errors": run.call("check_errors", {"sketches": True}), "volume": run.volume()}
     finally:
-        if title:
-            run.report["steps"].append({"close_f": run.call("close_document", {"title": title}).get("ok")})
-        title = None
+        run.close_part("f", title)
 
+
+def part_k(run: Run) -> None:
+    """The control: (d), (e), (f), (g)."""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
     try:
-        # Part K: the control.
-        title = run.new_part()
         extrude = run.build_k()
         checks["k_built"] = close_to(run.volume(), 40000)
         width = run.dimension("K_Skizze", 80)
@@ -186,9 +192,38 @@ def main() -> int:
         checks["g_other_sketch_open_blocks"] = (blocked.get("ok") is False and close_to(depth_now, 12, 1e-6)
                                                 and close_to(run.volume(), 51000))
     finally:
-        if title:
-            run.report["steps"].append({"close_k": run.call("close_document", {"title": title}).get("ok")})
+        run.close_part("k", title)
+
+
+def part_f_open(run: Run) -> None:
+    """The reproduction again, open path: (i)."""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
+    try:
+        run.build_f()
+        name = run.dimension("P_Skizze", 5)
+        run.call("edit_sketch", {"sketch_name": "P_Skizze"})
+        changed = run.call("set_dimension", {"full_name": name, "value_mm": 6})
+        recorded["i_answer"] = changed
+        run.call("close_sketch")
+        after = run.call("check_errors", {"sketches": True})
+        recorded["i_after_close"] = after
+        checks["i_open_path_rejects"] = (changed.get("ok") is False and data(changed, "sketch_status") == "no_solution"
+                                         and close_to(data(changed, "actual_value_mm"), 5, 1e-6)
+                                         and data(after, "unsolved_sketches") == [] and close_to(run.volume(), F_VOLUME))
+    finally:
+        run.close_part("f_open", title)
+
+
+def main() -> int:
+    run = Run()
+    try:
+        part_f(run)
+        part_k(run)
+        part_f_open(run)
+    finally:
         print(json.dumps(run.report, indent=2, default=str))
+    checks = run.report["checks"]
     return 0 if checks and all(checks.values()) else 1
 
 

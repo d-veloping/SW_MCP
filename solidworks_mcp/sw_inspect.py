@@ -56,7 +56,9 @@ from .sw_core import (
     tool,
     to_deg,
     to_mm,
-    unsolved_sketches,
+    sketch_states,
+    unreadable_sketch_state,
+    UNSOLVED_SKETCH_STATUS,
     value,
     volume_total_mm3,
     whats_wrong,
@@ -340,7 +342,8 @@ def measure(args: dict[str, Any]) -> dict[str, Any]:
     "The COM API returns null far more often than it raises, so call this after a suspicious build. "
     "sketches: true also reads the solve state of every sketch and lists the unsolved ones (over_defined, "
     "no_solution, invalid_solution), which SOLIDWORKS never flags itself; that costs one pass over the feature "
-    "tree, so ask for it after a parametric change such as set_dimension rather than after every feature.",
+    "tree, so ask for it after a parametric change such as set_dimension rather than after every feature. "
+    "unreadable_sketches names sketches whose state could not be read; they do not fail the check.",
     {
         "rebuild_first": {"type": "boolean", "default": True},
         "sketches": {
@@ -357,16 +360,24 @@ def check_errors(args: dict[str, Any]) -> dict[str, Any]:
     check_sketches = bool(args.get("sketches", False))
     data: dict[str, Any] = {"problems": problems, "rebuilt": rebuilt, "sketches_checked": check_sketches}
     notes = [] if not problems else [f"{len(problems)} features are flagged"]
+    caveat = ""
     if check_sketches:
-        unsolved = unsolved_sketches(doc)
+        states = sketch_states(doc)
+        unsolved = [row for row in states if row["sketch_status"] in UNSOLVED_SKETCH_STATUS]
+        unreadable = [row for row in states if unreadable_sketch_state(row["sketch_status"])]
         data["unsolved_sketches"] = unsolved
+        data["unreadable_sketches"] = unreadable
         if unsolved:
             notes.append(f"{len(unsolved)} sketches cannot be solved ("
                          + ", ".join(f"{row['sketch']}: {row['sketch_status']}" for row in unsolved) + ")")
+        if unreadable:
+            caveat = (f" {len(unreadable)} sketches could not be read ("
+                      + ", ".join(row["sketch"] for row in unreadable) + ").")
     if not notes:
-        return result(True, "No feature errors or warnings." if not check_sketches
-                      else "No feature errors or warnings, and every sketch solves.", **data)
-    return result(False, "; ".join(notes) + ".", **data)
+        return result(True, ("No feature errors or warnings." if not check_sketches
+                             else "No feature errors or warnings, and no sketch reads an unsolved state.") + caveat,
+                      **data)
+    return result(False, "; ".join(notes) + "." + caveat, **data)
 
 
 # --------------------------------------------------------------------------
