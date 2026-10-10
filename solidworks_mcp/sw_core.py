@@ -705,6 +705,51 @@ def open_sketch_name(doc: Any, sketch: Any) -> str:
     return latest_sketch(doc, include_3d=True)[0]
 
 
+# swConstrainedStatus_e, 1-based.
+SKETCH_STATUS = {
+    1: "unknown", 2: "under_defined", 3: "fully_defined",
+    4: "over_defined", 5: "no_solution", 6: "invalid_solution",
+    7: "autosolve_off",
+}
+# States in which the solver has given up on the sketch: a dimension or relation
+# stored in such a sketch moves no geometry.
+UNSOLVED_SKETCH_STATUS = frozenset({"over_defined", "no_solution", "invalid_solution"})
+
+
+def sketch_status(sketch: Any) -> str:
+    """The solve state of ``sketch`` (an ISketch), open or closed; ``"unknown"`` when it cannot be read.
+
+    A closed sketch answers without EditSketch: ``GetConstrainedStatus`` on the
+    ISketch behind a sketch feature reads ``no_solution`` and ``fully_defined``
+    the same as the open sketch does (measured 2026-10-09 on SOLIDWORKS 2016
+    SP3, SW_MCP#14).  A parametric change can therefore be judged after the
+    rebuild instead of by opening the sketch.
+    """
+    try:
+        code = int(value(sketch, "GetConstrainedStatus"))
+    except Exception:
+        return "unknown"
+    return SKETCH_STATUS.get(code, f"status_{code}")
+
+
+def unsolved_sketches(doc: Any) -> list[dict[str, Any]]:
+    """Every sketch feature whose solve state is in UNSOLVED_SKETCH_STATUS, in tree order.
+
+    SOLIDWORKS does not flag such a sketch through GetWhatsWrong (SW_MCP#14), so
+    this is the only readback for it.  One pass over the feature tree.
+    """
+    rows: list[dict[str, Any]] = []
+    for feature in sketch_features(doc, include_3d=True):
+        try:
+            sketch = value(feature, "GetSpecificFeature2")
+        except Exception:
+            sketch = None
+        status = sketch_status(sketch) if sketch is not None else "unknown"
+        if status in UNSOLVED_SKETCH_STATUS:
+            rows.append({"sketch": str(feature_property(feature, "Name", "")), "sketch_status": status})
+    return rows
+
+
 def resolve_sketch(doc: Any, sketch_name: str | None, include_3d: bool = False) -> tuple[str, Any]:
     """Resolve an explicit sketch name, or fall back to the newest sketch.
 

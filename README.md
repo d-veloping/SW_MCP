@@ -210,7 +210,7 @@ metal parts only.
 | `capture_screenshot` | Returns the view as an **image**, so the model can look at its own work. |
 | `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
-| `check_errors` | What SOLIDWORKS thinks is wrong — see below. |
+| `check_errors` | What SOLIDWORKS thinks is wrong — see below. With `sketches: true` also every sketch the solver cannot solve, which SOLIDWORKS never flags itself. |
 | `set_view` | Named view plus zoom-to-fit. |
 
 ### Assemblies
@@ -293,6 +293,15 @@ failure reports which relations that selection *would* accept.
 **Most failures are silent.** SOLIDWORKS returns null far more often than it
 raises. Every feature tool therefore rebuilds and reports
 `ModelDocExtension.GetWhatsWrong`, and `check_errors` exposes it directly.
+
+**A sketch that cannot solve is not an error to SOLIDWORKS.** `SetSystemValue3`
+stores a dimension value the solver then rejects: the sketch is left
+`no_solution`, nothing moves, the rebuild returns true and `GetWhatsWrong` is
+empty. So `set_dimension` reads the value back *after* the rebuild (it reverts
+to the old one) and reads the owning sketch's `GetConstrainedStatus`, which
+works on a closed sketch, and fails on either signal. `check_errors` reads the
+same state for every sketch when asked with `sketches: true`; that is one pass
+over the feature tree, so it is off by default. Measured on 2016 SP3.
 
 **`sketch_trim` needs its target selected.** Pass the segment in `selection`;
 the point alone only tells SOLIDWORKS which piece to discard.
