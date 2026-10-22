@@ -436,6 +436,17 @@ class DimensionTests(Base):
         self.assertIs(first["parentheses"], False)
         self.assertTrue(first["visible"])
 
+    def test_a_hidden_dimension_in_the_walk_is_left_out(self) -> None:
+        # documented behaviour: the walk also returns suppressed dimensions
+        self.parent.displays[1].annotation.Visible = 3
+        with unittest.mock.patch.object(View, "shown", lambda view: list(view.displays)):
+            listed = sw_drawing.list_drawing_dimensions({})["data"]["dimensions"]
+            self.assertEqual(len(listed), 3)
+            self.assertTrue(all(d["visible"] for d in listed))
+            answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["data"]["selected"], 1)
+
     def second_sheet(self, size=(0.42, 0.297)) -> View:
         second = View("Drawing View5")
         second.displays = [DisplayDimension(second, Dimension("D1@Skizze1@Teil.Part", 0.0304), 350, 100)]
@@ -556,6 +567,33 @@ class AxisPointTests(unittest.TestCase):
         details = sw_core._surface_details(Surface())
         self.assertEqual(details["axis_point_mm"], [10.0, 20.0, 30.0])
         self.assertEqual(details["radius_mm"], 5.0)
+
+    def test_a_bore_is_concave_and_a_shaft_is_not(self) -> None:
+        class Surface:
+            Identity = 4002
+            CylinderParams = (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.004)
+
+            def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+                pass
+
+        class Face:
+            def __init__(self, sense) -> None:
+                self.FaceInSurfaceSense = sense
+                self.GetArea = 1e-4
+
+            def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+                pass
+
+            def GetSurface(self):  # noqa: N802 - COM member name
+                return Surface()
+
+        class Body:
+            def GetFaces(self):  # noqa: N802 - COM member name
+                return (Face(True), Face(False), Face(None))
+
+        with unittest.mock.patch.object(sw_core, "iter_body_context", return_value=[(Body(), "Body", None)]):
+            faces = sw_core.enumerate_faces(object())
+        self.assertEqual([f["concave"] for f in faces], [True, False, None])
 
 
 if __name__ == "__main__":

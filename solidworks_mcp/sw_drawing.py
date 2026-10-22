@@ -1019,7 +1019,8 @@ def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
 
 
 def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
-    """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size."""
+    """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size. A
+    display the walk returns although it is hidden (documented for suppressed dimensions) is left out."""
     sizes: dict[str, tuple[float, float] | None] = {}
     entries: list[dict[str, Any]] = []
     for sheet_name, view in _views_of_every_sheet(doc):
@@ -1033,6 +1034,8 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
                 sizes[sheet_name] = None
         for display in _display_dimensions(view):
             entry = _dimension_entry(name, display)
+            if entry.get("visible") is False:
+                continue
             entry["sheet"] = sheet_name
             size = sizes[sheet_name]
             text = entry.get("text_mm")
@@ -1084,7 +1087,7 @@ def _on_sheet(doc: Any, sheet: str, act: Any) -> Any:
     "swDimensionType_e of the display (type2), where its text sits on its sheet and whether that is outside the sheet, "
     "whether it shows in parentheses, and the name to select it by. `duplicates` lists every model dimension visible in "
     "more than one view of the same sheet; insert_model_annotations produces those even with duplicate_dimensions "
-    "false. Hidden dimensions are not listed: SOLIDWORKS leaves them out of the walk.",
+    "false. Hidden dimensions are not listed.",
     {"view_name": {"type": "string", "description": "Only this view, on whichever sheet it is."}},
 )
 def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:

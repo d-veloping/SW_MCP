@@ -1374,6 +1374,11 @@ def enumerate_faces(doc: Any) -> list[dict[str, Any]]:
             surface = safe(face, "GetSurface")
             if surface is not None:
                 entry.update(_surface_details(surface, matrix))
+            if entry.get("surface_type") == "cylinder":
+                # The face runs against its surface's outward normal exactly when the material lies outside the
+                # cylinder: a bore (measured on SOLIDWORKS 2016 SP3: every bore true, every shaft or boss false).
+                sense = safe(face, "FaceInSurfaceSense")
+                entry["concave"] = None if sense is None else bool(sense)
             faces.append(entry)
             index += 1
     return faces
