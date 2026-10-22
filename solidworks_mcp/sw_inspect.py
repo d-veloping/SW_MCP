@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from .sw_core import (
+    as_list,
+    bodies_extents,
     body_extents,
     active_document,
     apply_selection,
@@ -213,12 +215,23 @@ def list_features(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "get_bounding_box",
-    "Read-only: overall bounding box of the active part, in millimetres.",
-    {},
+    "Read-only: overall bounding box of the active part, in millimetres. GetPartBox is documented as approximate; "
+    "`exact` takes the extreme points of every solid body instead (parts only).",
+    {"exact": {"type": "boolean", "default": False, "description": "Exact box from IBody2.GetExtremePoint."}},
 )
 def get_bounding_box(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     box = None
+    if bool(args.get("exact")):
+        if document_type(doc) != 1:
+            return result(False, "exact works on parts only.")
+        bodies = as_list(flag_methods(doc, "GetBodies2").GetBodies2(0, True))   # swSolidBody, visible only
+        box = bodies_extents(bodies) if bodies else None
+        if box is None:
+            return result(False, "The active part has no solid body to bound.")
+        low, high = mm_point(box[0:3]), mm_point(box[3:6])
+        return result(True, "Read the exact bounding box.", min_mm=low, max_mm=high, exact=True,
+                      size_mm=[round(high[i] - low[i], 6) for i in range(3)])
     try:
         # NoConversion=True keeps GetPartBox in system units (metres); passing
         # False returns document units, which would be silently 1000x off here.

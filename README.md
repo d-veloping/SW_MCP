@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-112 tools: sketching with real relations and driving dimensions, the solid
+115 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -223,7 +223,8 @@ metal parts only.
 `insert_section_view`, `insert_detail_view`, `list_drawing_views`,
 `activate_drawing_view`, `create_drawing_sketch`, `set_drawing_view`,
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
-`insert_centerlines`, `add_note`.
+`insert_centerlines`, `add_note`, `list_drawing_dimensions`,
+`hide_drawing_dimensions`, `arrange_drawing_dimensions`.
 
 `insert_standard_views`, `insert_model_view`, `insert_projected_view` and
 `set_drawing_view` take `display_mode`: `hidden_lines_removed` (SOLIDWORKS'
@@ -233,8 +234,30 @@ as applied only when it reads back from the view; otherwise the tool returns
 `ok: false` with the style each view ended up in. `insert_standard_views`
 applies it only to the views it places.
 
-For section and detail views, call `create_drawing_sketch` after activating the
-parent view, then use the normal `draw_line` or `draw_circle` sketch tools.
+`insert_section_view` takes the cutting line as two sheet points or as a model
+point it passes through (`through_model_mm`) plus `direction`, and draws it in
+the parent view's own sketch, whose coordinates are `(sheet - view position) /
+view scale`, not sheet millimetres. Drawn at sheet coordinates the line lies
+beside the part and SOLIDWORKS still creates a "section view" that cuts nothing
+(issue #2). The tool succeeds only when the new view is a section with hatched
+faces; otherwise it deletes the view again and returns `ok: false`.
+`insert_detail_view` converts its circle the same way. `list_drawing_views`
+reports each view's outline, hatched faces, section lines and the transform
+from model to sheet millimetres.
+
+`insert_model_annotations` puts the same model dimension into several views,
+also with `duplicate_dimensions: false` and also when called view by view
+(measured on 2016 SP3: 3 to 41 duplicates per part). `list_drawing_dimensions`
+lists every visible dimension with its view, model dimension and text position
+and names the duplicates; `hide_drawing_dimensions` hides or deletes a list of
+them in one selection and one call (the part stays unchanged), and
+`arrange_drawing_dimensions` auto-arranges one view's dimensions. A dimension is
+selected by its selection name: `IAnnotation.Select3` does not select drawing
+dimensions.
+
+For hand-made section and detail views, call `create_drawing_sketch` after
+activating the parent view, then use the normal `draw_line` or `draw_circle`
+sketch tools; their coordinates are the view sketch's, as above.
 
 ---
 

@@ -1309,6 +1309,7 @@ def _surface_details(surface: Any, matrix: Sequence[float] | None = None) -> dic
         if identity == 4002:  # cylinder: root(3), axis(3), radius
             params = surface.CylinderParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
+            details["axis_point_mm"] = mm_point(apply_transform(params[0:3], matrix))
             details["radius_mm"] = round(to_mm(params[6]), 6)
         elif identity == 4004:  # sphere: center(3), radius
             params = surface.SphereParams
@@ -1317,6 +1318,7 @@ def _surface_details(surface: Any, matrix: Sequence[float] | None = None) -> dic
         elif identity == 4003:  # cone
             params = surface.ConeParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
+            details["axis_point_mm"] = mm_point(apply_transform(params[0:3], matrix))
         elif identity == 4005:  # torus
             params = surface.TorusParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
