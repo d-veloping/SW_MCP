@@ -98,6 +98,7 @@ class View:
         self.transform = transform or Transform([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0, scale, 0, 0, 0])
         self.next = None
         self.displays: list[DisplayDimension] = []
+        self.section = None
 
     def shown(self) -> list[DisplayDimension]:
         return [d for d in self.displays if d.annotation.Visible == 1]
@@ -130,6 +131,9 @@ class View:
     def GetFirstDisplayDimension5(self):  # noqa: N802 - COM member name
         shown = self.shown()
         return shown[0] if shown else None
+
+    def GetSection(self):  # noqa: N802 - COM member name
+        return self.section
 
 
 class SketchManager:
@@ -214,9 +218,11 @@ class Drawing:
     def CreateSectionViewAt5(self, x, y, z, label, options, excluded, depth):  # noqa: N802 - COM member name
         self.section_calls.append((x, y, label, options, depth))
         # SOLIDWORKS turns the selected line into a section line of the active view, cut or not
-        self.active.section_lines.append(SectionLine(f"Section Line{len(self.section_calls)}"))
+        line = SectionLine(f"Section Line{len(self.section_calls)}")
+        self.active.section_lines.append(line)
         view = self.next_section
         if view is not None:
+            view.section = line
             self.views.append(view)
         return view
 
@@ -315,6 +321,17 @@ class SectionViewTests(Base):
         self.assertFalse(answer["ok"])
         self.assertEqual([line.name for line in self.parent.section_lines], ["Section Line1"])
         self.assertEqual(answer["data"]["parent_section_lines"], 1)
+
+    def test_deleting_a_section_view_takes_its_cutting_line(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        self.assertEqual(len(self.parent.section_lines), 1)
+        answer = sw_drawing.delete_drawing_view({"name": "Section View A-A"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertTrue(answer["data"]["line_removed"])
+        self.assertEqual(self.parent.section_lines, [])
+        self.assertFalse(sw_drawing.delete_drawing_view({"name": "Section View A-A"})["ok"])
 
     def test_bad_model_point_is_refused(self) -> None:
         answer = sw_drawing.insert_section_view({"through_model_mm": [1, 2], "place_x_mm": 80, "place_y_mm": 150})

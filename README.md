@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-115 tools: sketching with real relations and driving dimensions, the solid
+116 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -220,7 +220,7 @@ metal parts only.
 ### Engineering drawings
 `create_drawing`, `list_sheets`, `add_sheet`, `activate_sheet`,
 `insert_standard_views`, `insert_model_view`, `insert_projected_view`,
-`insert_section_view`, `insert_detail_view`, `list_drawing_views`,
+`insert_section_view`, `insert_detail_view`, `delete_drawing_view`, `list_drawing_views`,
 `activate_drawing_view`, `create_drawing_sketch`, `set_drawing_view`,
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
 `insert_centerlines`, `add_note`, `list_drawing_dimensions`,
@@ -240,7 +240,9 @@ the parent view's own sketch, whose coordinates are `(sheet - view position) /
 view scale`, not sheet millimetres. Drawn at sheet coordinates the line lies
 beside the part and SOLIDWORKS still creates a "section view" that cuts nothing
 (issue #2). The tool succeeds only when the new view is a section with hatched
-faces; otherwise it deletes the view again and returns `ok: false`.
+faces; otherwise it deletes the view and its cutting line again and returns
+`ok: false`. `delete_drawing_view` removes a section view together with its
+cutting line, which SOLIDWORKS otherwise leaves in the parent.
 `insert_detail_view` converts its circle the same way. `list_drawing_views`
 reports each view's outline, hatched faces, section lines and the transform
 from model to sheet millimetres.

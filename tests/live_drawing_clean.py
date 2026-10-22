@@ -24,8 +24,8 @@ Steps: the exact box and the faces are read on the part; an A3 drawing gets
 the circular view (left) and a section through the box centre; a second
 section with its line beside the part must fail and leave neither view nor cutting line behind;
 model dimensions go into every view, the duplicates are hidden in one call
-(the section keeps its own), one view is arranged, a detail view is placed,
-and the drawing is saved as <output root>/live_drawing_clean/section.pdf to
+(the section keeps its own), one view is arranged, a detail view is placed, a reversed section is placed and deleted with its line,
+and the drawing is saved as <output root>/live_drawing_clean/section_<part>.pdf to
 look at. The drawing is closed without saving; the part is closed again only
 when this run opened it, and must not be dirty.
 """
@@ -46,6 +46,7 @@ from solidworks_mcp.sw_core import OUTPUT_ROOT, active_document, as_list, runnin
 from solidworks_mcp.sw_drawing import (
     arrange_drawing_dimensions,
     create_drawing,
+    delete_drawing_view,
     hide_drawing_dimensions,
     insert_detail_view,
     insert_model_annotations,
@@ -129,7 +130,15 @@ def main() -> int:
                                      "radius_mm": 8, "place_x_mm": 380, "place_y_mm": 60, "label": "Z",
                                      "scale_numerator": 1, "scale_denominator": 1})
         report["detail"] = {"ok": answer["ok"], "message": answer["message"]}
-        pdf = OUTPUT_ROOT / "live_drawing_clean" / "section.pdf"
+        answer = insert_section_view({"parent_view": circle, "through_model_mm": centre, "direction": "horizontal",
+                                      "place_x_mm": 300, "place_y_mm": 40, "label": "C", "reverse": True})
+        lines_with_c = answer.get("data", {}).get("parent_section_lines")
+        gone = delete_drawing_view({"name": answer.get("data", {}).get("view", {}).get("name", "")})
+        lines_after = next(v for v in require(list_drawing_views({}), "list_drawing_views")["data"]["views"]
+                           if v["name"] == circle)["section_lines"]
+        report["delete_view"] = {"section_ok": answer["ok"], "lines_with_c": lines_with_c, "delete_ok": gone["ok"],
+                                 "line_removed": gone.get("data", {}).get("line_removed"), "lines_after": lines_after}
+        pdf = OUTPUT_ROOT / "live_drawing_clean" / f"section_{Path(part).stem}.pdf"
         report["pdf"] = str(pdf) if _save_as(drawing, str(pdf)) else None
     finally:
         running_app().CloseDoc(title)
@@ -149,6 +158,8 @@ def main() -> int:
         report["dimensions_after"]["duplicates"] == 0,
         report.get("arrange", {}).get("ok") is True,
         report["detail"]["ok"],
+        report["delete_view"]["section_ok"] and report["delete_view"]["delete_ok"]
+        and report["delete_view"]["lines_after"] == report["delete_view"]["lines_with_c"] - 1,
         report["part_dirty"] is False,
     ]
     print("checks", checks)

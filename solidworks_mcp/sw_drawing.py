@@ -1102,6 +1102,39 @@ def arrange_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "delete_drawing_view",
+    "Delete a drawing view. For a section view, also delete its cutting line from the parent view, which "
+    "SOLIDWORKS otherwise leaves behind. Succeeds only when the view is gone afterwards.",
+    {"name": {"type": "string", "description": "View name from list_drawing_views."}},
+    ["name"],
+)
+def delete_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing()
+    name = str(args["name"])
+    view = _find_view(doc, name)
+    if view is None:
+        return result(False, f"No view named '{name}'. Call list_drawing_views for the names.")
+    section = safe(view, "GetSection") if int(safe(view, "Type", 0) or 0) == 2 else None
+    line_name = str(safe(section, "GetName", "") or "") if section is not None else ""
+    owner = None
+    if line_name:
+        owner = next((v for v in _iter_views(doc) if not _is_sheet(v) and any(
+            str(safe(line, "GetName", "") or "") == line_name for line in as_list(safe(v, "GetSectionLines")))), None)
+    removed = _delete_view(doc, name)
+    line_removed = None
+    if line_name and owner is not None:
+        still = [line for line in as_list(safe(owner, "GetSectionLines"))
+                 if str(safe(line, "GetName", "") or "") == line_name]
+        line_removed = all(_delete_section_line(doc, line) for line in still)
+    rebuild(doc)
+    gone = _find_view(doc, name) is None
+    ok = removed and gone and line_removed is not False
+    return result(ok, f"Deleted view '{name}'" + (" and its cutting line." if line_removed else ".") if ok
+                  else f"View '{name}' was not deleted completely (view gone: {gone}, cutting line removed: "
+                       f"{line_removed}).", removed=gone, line_removed=line_removed)
+
+
+@tool(
     "activate_drawing_view",
     "Make a drawing view the active one, which is what section, detail, projected views and "
     "sketching inside a view all operate on.",
