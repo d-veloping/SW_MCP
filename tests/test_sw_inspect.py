@@ -75,10 +75,6 @@ class CheckErrorsSketchTests(unittest.TestCase):
         self.assertIn("Skizze2: over_defined", answer["message"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ExactBoundingBoxTests(unittest.TestCase):
     """`exact` spans every solid body, hidden ones included: a hidden body outside the visible one widens the box."""
 
@@ -116,3 +112,7 @@ class ExactBoundingBoxTests(unittest.TestCase):
         answer = self.call(self.Part([], []))
         self.assertFalse(answer["ok"])
         self.assertIn("no solid body", answer["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()
