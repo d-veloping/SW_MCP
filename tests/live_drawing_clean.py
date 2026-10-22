@@ -24,10 +24,10 @@ Steps: the exact box and the faces are read on the part; an A3 drawing gets
 the circular view (left) and a section through the box centre; a second
 section with its line beside the part must fail and leave neither view nor cutting line behind;
 model dimensions go into every view, the duplicates are hidden in one call
-(the section keeps its own), one view is arranged, a detail view is placed, a reversed section is placed and deleted with its line,
-
+(the section keeps its own), one view is arranged, a detail view is placed, a reversed section is placed and deleted with its line, a label in use is refused,
 and the drawing is saved as <output root>/live_drawing_clean/section_<part>.pdf to
-look at; a second sheet gets a view with dimensions, which must be listed too. The drawing is closed without saving; the part is closed again only
+look at; a second sheet gets a view with dimensions, which must be listed too, and
+with that sheet active a dimension of the first sheet is hidden and its section arranged. The drawing is closed without saving; the part is closed again only
 when this run opened it, and must not be dirty.
 """
 
@@ -135,6 +135,9 @@ def main() -> int:
         answer = insert_section_view({"parent_view": circle, "through_model_mm": centre, "direction": "horizontal",
                                       "place_x_mm": 300, "place_y_mm": 40, "label": "C", "reverse": True})
         lines_with_c = answer.get("data", {}).get("parent_section_lines")
+        again = insert_section_view({"parent_view": circle, "through_model_mm": centre, "direction": "vertical",
+                                     "place_x_mm": 120, "place_y_mm": 60, "label": "A"})
+        report["label_in_use"] = {"ok": again["ok"], "labels": again.get("data", {}).get("labels_in_use")}
         gone = delete_drawing_view({"name": answer.get("data", {}).get("view", {}).get("name", "")})
         lines_after = next(v for v in require(list_drawing_views({}), "list_drawing_views")["data"]["views"]
                            if v["name"] == circle)["section_lines"]
@@ -151,6 +154,13 @@ def main() -> int:
         listed = require(list_drawing_dimensions({}), "list_drawing_dimensions")["data"]["dimensions"]
         report["second_sheet"] = {"added": added.get("data", {}).get("dimensions_added"), "before": before,
                                   "after": len(listed), "in_other_view": sum(1 for d in listed if d["view"] == other)}
+        # acting on the first sheet while the second is active: its sheet is activated and the second again after
+        target = next((d for d in listed if d["view"] == section), None)
+        hidden = hide_drawing_dimensions({"dimensions": [{"view": section, "full_name": target["full_name"]}]})             if target else {"ok": False, "data": {}}
+        arranged = arrange_drawing_dimensions({"view_name": section})
+        current = str(value(value(drawing, "GetCurrentSheet"), "GetName"))
+        report["inactive_sheet"] = {"hide_ok": hidden["ok"], "remaining": hidden.get("data", {}).get("remaining"),
+                                    "arrange_ok": arranged["ok"], "current_sheet": current}
     finally:
         running_app().CloseDoc(title)
         report["part_dirty"] = part_dirty(part)
@@ -172,6 +182,9 @@ def main() -> int:
         report["delete_view"]["section_ok"] and report["delete_view"]["delete_ok"]
         and report["delete_view"]["lines_after"] == report["delete_view"]["lines_with_c"] - 1,
         report["part_dirty"] is False,
+        report["label_in_use"]["ok"] is False and "A" in (report["label_in_use"]["labels"] or []),
+        report["inactive_sheet"]["hide_ok"] and report["inactive_sheet"]["arrange_ok"]
+        and report["inactive_sheet"]["current_sheet"] == "Blatt2",
         report["second_sheet"]["in_other_view"] > 0
         and report["second_sheet"]["after"] == report["second_sheet"]["before"] + report["second_sheet"]["in_other_view"],
     ]

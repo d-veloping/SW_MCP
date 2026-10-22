@@ -190,7 +190,8 @@ member that was refused. The boxes of the sheet metal, weldment and
 body, exact on the geometry; for a rotated assembly component `list_bodies`
 transforms the two corners, which is exact only without rotation);
 `get_bounding_box` keeps `GetPartBox`, which SOLIDWORKS documents as
-approximate, so it is for orientation, not for a check.
+approximate, so it is for orientation, not for a check, unless it is called
+with `exact: true`, which takes the extreme points of every visible solid body.
 `sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
 metal parts only.
 
@@ -250,10 +251,12 @@ from model to sheet millimetres.
 `insert_model_annotations` puts the same model dimension into several views,
 also with `duplicate_dimensions: false` and also when called view by view
 (measured on 2016 SP3: 3 to 41 duplicates per part). `list_drawing_dimensions`
-lists every visible dimension with its view, model dimension and text position
-and names the duplicates; `hide_drawing_dimensions` hides or deletes a list of
+lists every visible dimension of every sheet with its sheet, view, model
+dimension and text position and names the duplicates within a sheet; `hide_drawing_dimensions` hides or deletes a list of
 them in one selection and one call (the part stays unchanged), and
-`arrange_drawing_dimensions` auto-arranges one view's dimensions. A dimension is
+`arrange_drawing_dimensions` auto-arranges one view's dimensions, all or none.
+Both activate the view's sheet for that and the previous sheet again afterwards.
+A section label already used on the sheet is refused. A dimension is
 selected by its selection name: `IAnnotation.Select3` does not select drawing
 dimensions.
 

@@ -151,11 +151,19 @@ class SketchManager:
 
 
 class SectionLine:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, label: str = "A") -> None:
         self.name = name
+        self.label = label
+        self.view: "View | None" = None
 
     def GetName(self) -> str:  # noqa: N802 - COM member name
         return self.name
+
+    def GetLabel(self) -> str:  # noqa: N802 - COM member name
+        return self.label
+
+    def GetSectionView(self):  # noqa: N802 - COM member name
+        return self.view
 
 
 class Extension:
@@ -174,8 +182,9 @@ class Extension:
         elif kind == "SECTIONLINE":
             hit = [line for v in self.doc.views for line in v.section_lines if line.name == name]
         else:
-            hit = [d for v in self.doc.views + self.doc.other_sheet for d in v.displays
-                   if name and d.GetNameForSelection() == name]
+            # like SOLIDWORKS is assumed to: only what is on the active sheet can be selected
+            shown = self.doc.views if self.doc.current == "Sheet1" else self.doc.other_sheet
+            hit = [d for v in shown for d in v.displays if name and d.GetNameForSelection() == name]
         self.doc.selection.extend(hit)
         return bool(hit)
 
@@ -209,6 +218,9 @@ class Drawing:
         self.hidden_calls = 0
         self.aligned: list[tuple] = []
         self.other_sheet: list[View] = []   # views of a second sheet: GetViews lists them, the view chain does not
+        self.current = "Sheet1"
+        self.sizes = {"Sheet1": (0.42, 0.297), "Sheet2": (0.42, 0.297)}
+        self.activated: list[str] = []
 
     def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
         pass
@@ -224,6 +236,14 @@ class Drawing:
             sheets.append((View("Sheet2", kind=1), *self.other_sheet))
         return tuple(sheets)
 
+    def Sheet(self, name):  # noqa: N802 - COM member name
+        return Sheet(name, self.sizes[name])
+
+    def ActivateSheet(self, name):  # noqa: N802 - COM member name
+        self.activated.append(name)
+        self.current = name
+        return True
+
     def ActivateView(self, name: str) -> bool:  # noqa: N802 - COM member name
         self.active = next((v for v in self.views if v.name == name), None)
         return self.active is not None
@@ -231,11 +251,12 @@ class Drawing:
     def CreateSectionViewAt5(self, x, y, z, label, options, excluded, depth):  # noqa: N802 - COM member name
         self.section_calls.append((x, y, label, options, depth))
         # SOLIDWORKS turns the selected line into a section line of the active view, cut or not
-        line = SectionLine(f"Section Line{len(self.section_calls)}")
+        line = SectionLine(f"Section Line{len(self.section_calls)}", label)
         self.active.section_lines.append(line)
         view = self.next_section
         if view is not None:
             view.section = line
+            line.view = view
             self.views.append(view)
         return view
 
@@ -245,12 +266,21 @@ class Drawing:
             item.annotation.Visible = 3
 
     def GetCurrentSheet(self):  # noqa: N802 - COM member name
-        return Sheet()
+        return Sheet(self.current, self.sizes[self.current])
 
 
 class Sheet:
+    def __init__(self, name: str = "Sheet1", size=(0.42, 0.297)) -> None:
+        self.name, self.size = name, size
+
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def GetName(self) -> str:  # noqa: N802 - COM member name
+        return self.name
+
     def GetProperties2(self):  # noqa: N802 - COM member name
-        return (8, 0, 1, 1, True, 0.42, 0.297)
+        return (8, 0, 1, 1, True, *self.size)
 
 
 class Base(unittest.TestCase):
@@ -355,6 +385,23 @@ class SectionViewTests(Base):
         self.assertTrue(answer["data"]["line_removed"])
         self.assertEqual(self.parent.section_lines, [])
 
+    def test_a_label_in_use_is_refused_before_anything_is_drawn(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        answer = sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
+                                                 "place_x_mm": 80, "place_y_mm": 50, "label": "A"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["labels_in_use"], ["A"])
+        self.assertEqual(len(self.doc.sketch.lines), 1)
+
+    def test_a_selected_line_without_parent_view_names_the_parent(self) -> None:
+        self.doc.ActivateView("Drawing View1")
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        answer = sw_drawing.insert_section_view({"use_selection": True, "place_x_mm": 80, "place_y_mm": 150})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual((answer["data"]["parent"], answer["data"]["parent_section_lines"]), ("Drawing View1", 1))
+
     def test_bad_model_point_is_refused(self) -> None:
         answer = sw_drawing.insert_section_view({"through_model_mm": [1, 2], "place_x_mm": 80, "place_y_mm": 150})
         self.assertFalse(answer["ok"])
@@ -389,17 +436,60 @@ class DimensionTests(Base):
         self.assertIs(first["parentheses"], False)
         self.assertTrue(first["visible"])
 
-    def test_dimensions_on_a_second_sheet_are_listed_and_hidden(self) -> None:
+    def second_sheet(self, size=(0.42, 0.297)) -> View:
         second = View("Drawing View5")
-        second.displays = [DisplayDimension(second, Dimension("D1@Skizze1@Teil.Part", 0.0304), 100, 100)]
+        second.displays = [DisplayDimension(second, Dimension("D1@Skizze1@Teil.Part", 0.0304), 350, 100)]
         self.doc.other_sheet = [second]
+        self.doc.sizes["Sheet2"] = size
+        return second
+
+    def test_dimensions_on_a_second_sheet_are_listed_with_their_sheet(self) -> None:
+        self.second_sheet()
         listed = sw_drawing.list_drawing_dimensions({})["data"]
         self.assertEqual(len(listed["dimensions"]), 5)
-        self.assertEqual(listed["duplicates"]["D1@Skizze1@Teil.Part"],
-                         ["Drawing View1", "Section View A-A", "Drawing View5"])
+        self.assertEqual([d["sheet"] for d in listed["dimensions"]], ["Sheet1"] * 4 + ["Sheet2"])
+        # a repeat on another sheet is no duplicate
+        self.assertEqual(listed["duplicates"], {f"D{i}@Skizze1@Teil.Part @ Sheet1": ["Drawing View1", "Section View A-A"]
+                                                for i in (1, 2)})
         self.assertTrue(sw_drawing.list_drawing_dimensions({"view_name": "Drawing View5"})["ok"])
+        self.assertFalse(sw_drawing.list_drawing_dimensions({"view_name": "Sheet2"})["ok"])
+
+    def test_outside_is_measured_against_the_own_sheet(self) -> None:
+        self.second_sheet(size=(0.297, 0.21))   # A4: the text at x = 350 mm lies outside
+        listed = sw_drawing.list_drawing_dimensions({})["data"]
+        # Drawing View1 holds one text at x = 500 mm (outside A3), Drawing View5 one at x = 350 mm (outside A4)
+        self.assertEqual([d["outside_sheet"] for d in listed["dimensions"]], [False, True, False, False, True])
+        self.assertEqual(listed["outside_sheet"], 2)
+
+    def test_hide_on_another_sheet_activates_it_and_back(self) -> None:
+        self.second_sheet()
         answer = sw_drawing.hide_drawing_dimensions({"dimensions": [{"view": "Drawing View5", "full_name": "D1@Skizze1@Teil.Part"}]})
         self.assertTrue(answer["ok"], answer)
+        self.assertEqual(self.doc.activated, ["Sheet2", "Sheet1"])
+        self.assertEqual(self.doc.current, "Sheet1")
+        self.assertEqual(self.doc.selection, [])
+
+    def test_arrange_on_another_sheet(self) -> None:
+        self.second_sheet()
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View5"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(self.doc.aligned, [(0, 0.006, 1)])
+        self.assertEqual(self.doc.activated, ["Sheet2", "Sheet1"])
+
+    def test_bare_dispatch_pointers_are_wrapped(self) -> None:
+        class PyIDispatch:   # what GetViews hands back on 2016 SP3: nothing readable until wrapped
+            def __init__(self, inner) -> None:
+                self.inner = inner
+        views = list(self.doc.views)
+        self.doc.GetViews = lambda: (tuple(PyIDispatch(v) for v in views),)
+        with unittest.mock.patch("win32com.client.Dispatch", side_effect=lambda o: o.inner):
+            listed = sw_drawing.list_drawing_dimensions({})["data"]
+        self.assertEqual(len(listed["dimensions"]), 4)
+
+    def test_no_sheets_listed_is_an_error(self) -> None:
+        self.doc.GetViews = lambda: None
+        with self.assertRaisesRegex(RuntimeError, "GetViews"):
+            sw_drawing.list_drawing_dimensions({})
 
     def test_arrange_selects_every_dimension_or_nothing(self) -> None:
         answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A", "spacing_mm": 6})
@@ -409,6 +499,7 @@ class DimensionTests(Base):
         answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
         self.assertFalse(answer["ok"])
         self.assertEqual(len(self.doc.aligned), 1)
+        self.assertEqual((answer["data"]["arranged"], answer["data"]["selected"]), (0, 1))
         self.assertIn("1 of 2 could be selected", answer["message"])
 
     def test_hide_in_one_call_leaves_one_of_each(self) -> None:

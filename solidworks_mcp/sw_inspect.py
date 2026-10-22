@@ -216,7 +216,7 @@ def list_features(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "get_bounding_box",
     "Read-only: overall bounding box of the active part, in millimetres. GetPartBox is documented as approximate; "
-    "`exact` takes the extreme points of every visible solid body instead (parts only), the bodies a drawing shows.",
+    "`exact` takes the extreme points of every visible solid body instead (parts only).",
     {"exact": {"type": "boolean", "default": False, "description": "Exact box from IBody2.GetExtremePoint."}},
 )
 def get_bounding_box(args: dict[str, Any]) -> dict[str, Any]:
@@ -228,7 +228,7 @@ def get_bounding_box(args: dict[str, Any]) -> dict[str, Any]:
         bodies = as_list(flag_methods(doc, "GetBodies2").GetBodies2(0, True))   # swSolidBody, visible only
         box = bodies_extents(bodies) if bodies else None
         if box is None:
-            return result(False, "The active part has no solid body to bound.")
+            return result(False, "The active part has no visible solid body, or the box of one could not be read.")
         low, high = mm_point(box[0:3]), mm_point(box[3:6])
         return result(True, "Read the exact bounding box.", min_mm=low, max_mm=high, exact=True,
                       size_mm=[round(high[i] - low[i], 6) for i in range(3)])
