@@ -953,10 +953,17 @@ def _current_sheet_name(doc: Any) -> str:
     return str(safe(value(doc, "GetCurrentSheet"), "GetName", "") or "")
 
 
+DIMENSION_WALK_LIMIT = 20000
+
+
 def _display_dimensions(view: Any) -> list[Any]:
-    """The display dimensions SOLIDWORKS walks for a view; hidden ones are no longer part of the walk."""
+    """The display dimensions SOLIDWORKS walks for a view; hidden ones are no longer part of the walk. A walk that
+    does not end within DIMENSION_WALK_LIMIT steps is an error, never a silently shortened list."""
     found, display = [], safe(view, "GetFirstDisplayDimension5")
-    while display is not None and len(found) < 2000:
+    while display is not None:
+        if len(found) >= DIMENSION_WALK_LIMIT:
+            raise RuntimeError(f"The dimension walk of view '{safe(view, 'GetName2', '')}' did not end after "
+                               f"{DIMENSION_WALK_LIMIT} dimensions.")
         found.append(display)
         display = safe(display, "GetNext5")
     return found

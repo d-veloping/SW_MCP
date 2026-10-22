@@ -486,6 +486,11 @@ class DimensionTests(Base):
             listed = sw_drawing.list_drawing_dimensions({})["data"]
         self.assertEqual(len(listed["dimensions"]), 4)
 
+    def test_an_endless_dimension_walk_is_an_error(self) -> None:
+        with unittest.mock.patch.object(sw_drawing, "DIMENSION_WALK_LIMIT", 1):
+            with self.assertRaisesRegex(RuntimeError, "did not end"):
+                sw_drawing.list_drawing_dimensions({})
+
     def test_no_sheets_listed_is_an_error(self) -> None:
         self.doc.GetViews = lambda: None
         with self.assertRaisesRegex(RuntimeError, "GetViews"):

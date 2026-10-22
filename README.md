@@ -191,7 +191,7 @@ body, exact on the geometry; for a rotated assembly component `list_bodies`
 transforms the two corners, which is exact only without rotation);
 `get_bounding_box` keeps `GetPartBox`, which SOLIDWORKS documents as
 approximate, so it is for orientation, not for a check, unless it is called
-with `exact: true`, which takes the extreme points of every visible solid body.
+with `exact: true`, which takes the extreme points of every solid body, hidden ones included.
 `sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
 metal parts only.
 
