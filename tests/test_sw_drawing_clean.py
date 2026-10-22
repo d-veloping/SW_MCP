@@ -487,7 +487,12 @@ class DimensionTests(Base):
         self.assertEqual(len(listed["dimensions"]), 4)
 
     def test_an_endless_dimension_walk_is_an_error(self) -> None:
-        with unittest.mock.patch.object(sw_drawing, "DIMENSION_WALK_LIMIT", 1):
+        longest = max(len(sw_drawing._display_dimensions(v)) for v in self.doc.views)
+        self.assertGreater(longest, 1)
+        # a walk of exactly the limit ends normally, one more is an error
+        with unittest.mock.patch.object(sw_drawing, "DIMENSION_WALK_LIMIT", longest):
+            self.assertTrue(sw_drawing.list_drawing_dimensions({})["ok"])
+        with unittest.mock.patch.object(sw_drawing, "DIMENSION_WALK_LIMIT", longest - 1):
             with self.assertRaisesRegex(RuntimeError, "did not end"):
                 sw_drawing.list_drawing_dimensions({})
 

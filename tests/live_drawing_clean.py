@@ -180,6 +180,7 @@ def main() -> int:
         report.get("arrange", {}).get("ok") is True,
         report["detail"]["ok"],
         report["delete_view"]["section_ok"] and report["delete_view"]["delete_ok"]
+        and report["delete_view"]["line_removed"] is True
         and report["delete_view"]["lines_after"] == report["delete_view"]["lines_with_c"] - 1,
         report["part_dirty"] is False,
         report["label_in_use"]["ok"] is False and "A" in (report["label_in_use"]["labels"] or []),
