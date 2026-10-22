@@ -77,7 +77,7 @@ class DisplayDimension:
         return self.annotation
 
     def GetNameForSelection(self) -> str:  # noqa: N802 - COM member name
-        return f"{self.dimension.FullName}@{self.view.name}"
+        return "" if getattr(self, "unselectable", False) else f"{self.dimension.FullName}@{self.view.name}"
 
     def GetNext5(self):  # noqa: N802 - COM member name
         shown = self.view.shown()
@@ -174,9 +174,14 @@ class Extension:
         elif kind == "SECTIONLINE":
             hit = [line for v in self.doc.views for line in v.section_lines if line.name == name]
         else:
-            hit = [d for v in self.doc.views for d in v.displays if d.GetNameForSelection() == name]
+            hit = [d for v in self.doc.views + self.doc.other_sheet for d in v.displays
+                   if name and d.GetNameForSelection() == name]
         self.doc.selection.extend(hit)
         return bool(hit)
+
+    def AlignDimensions(self, kind, spacing):  # noqa: N802 - COM member name
+        self.doc.aligned.append((kind, round(spacing, 6), len(self.doc.selection)))
+        return True
 
     def DeleteSelection2(self, options):  # noqa: N802 - COM member name
         for item in list(self.doc.selection):
@@ -202,6 +207,8 @@ class Drawing:
         self.section_calls: list[tuple] = []
         self.next_section: View | None = None
         self.hidden_calls = 0
+        self.aligned: list[tuple] = []
+        self.other_sheet: list[View] = []   # views of a second sheet: GetViews lists them, the view chain does not
 
     def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
         pass
@@ -210,6 +217,12 @@ class Drawing:
         for a, b in zip(self.views, self.views[1:] + [None]):
             a.next = b
         return self.views[0]
+
+    def GetViews(self):  # noqa: N802 - COM member name
+        sheets = [tuple(self.views)]
+        if self.other_sheet:
+            sheets.append((View("Sheet2", kind=1), *self.other_sheet))
+        return tuple(sheets)
 
     def ActivateView(self, name: str) -> bool:  # noqa: N802 - COM member name
         self.active = next((v for v in self.views if v.name == name), None)
@@ -333,6 +346,15 @@ class SectionViewTests(Base):
         self.assertEqual(self.parent.section_lines, [])
         self.assertFalse(sw_drawing.delete_drawing_view({"name": "Section View A-A"})["ok"])
 
+    def test_a_selected_line_without_parent_view_is_cleaned_up_too(self) -> None:
+        self.doc.ActivateView("Drawing View1")
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=0)
+        answer = sw_drawing.insert_section_view({"use_selection": True, "place_x_mm": 80, "place_y_mm": 150})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["parent"], "Drawing View1")
+        self.assertTrue(answer["data"]["line_removed"])
+        self.assertEqual(self.parent.section_lines, [])
+
     def test_bad_model_point_is_refused(self) -> None:
         answer = sw_drawing.insert_section_view({"through_model_mm": [1, 2], "place_x_mm": 80, "place_y_mm": 150})
         self.assertFalse(answer["ok"])
@@ -366,6 +388,28 @@ class DimensionTests(Base):
         self.assertEqual(first["value_mm"], 30.4)
         self.assertIs(first["parentheses"], False)
         self.assertTrue(first["visible"])
+
+    def test_dimensions_on_a_second_sheet_are_listed_and_hidden(self) -> None:
+        second = View("Drawing View5")
+        second.displays = [DisplayDimension(second, Dimension("D1@Skizze1@Teil.Part", 0.0304), 100, 100)]
+        self.doc.other_sheet = [second]
+        listed = sw_drawing.list_drawing_dimensions({})["data"]
+        self.assertEqual(len(listed["dimensions"]), 5)
+        self.assertEqual(listed["duplicates"]["D1@Skizze1@Teil.Part"],
+                         ["Drawing View1", "Section View A-A", "Drawing View5"])
+        self.assertTrue(sw_drawing.list_drawing_dimensions({"view_name": "Drawing View5"})["ok"])
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [{"view": "Drawing View5", "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertTrue(answer["ok"], answer)
+
+    def test_arrange_selects_every_dimension_or_nothing(self) -> None:
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A", "spacing_mm": 6})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(self.doc.aligned, [(0, 0.006, 2)])
+        self.section.displays[1].unselectable = True
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(len(self.doc.aligned), 1)
+        self.assertIn("1 of 2 could be selected", answer["message"])
 
     def test_hide_in_one_call_leaves_one_of_each(self) -> None:
         answer = sw_drawing.hide_drawing_dimensions({"dimensions": [

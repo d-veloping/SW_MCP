@@ -25,8 +25,9 @@ the circular view (left) and a section through the box centre; a second
 section with its line beside the part must fail and leave neither view nor cutting line behind;
 model dimensions go into every view, the duplicates are hidden in one call
 (the section keeps its own), one view is arranged, a detail view is placed, a reversed section is placed and deleted with its line,
+
 and the drawing is saved as <output root>/live_drawing_clean/section_<part>.pdf to
-look at. The drawing is closed without saving; the part is closed again only
+look at; a second sheet gets a view with dimensions, which must be listed too. The drawing is closed without saving; the part is closed again only
 when this run opened it, and must not be dirty.
 """
 
@@ -44,6 +45,7 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp.sw_core import OUTPUT_ROOT, active_document, as_list, running_app, value
 from solidworks_mcp.sw_drawing import (
+    add_sheet,
     arrange_drawing_dimensions,
     create_drawing,
     delete_drawing_view,
@@ -140,6 +142,15 @@ def main() -> int:
                                  "line_removed": gone.get("data", {}).get("line_removed"), "lines_after": lines_after}
         pdf = OUTPUT_ROOT / "live_drawing_clean" / f"section_{Path(part).stem}.pdf"
         report["pdf"] = str(pdf) if _save_as(drawing, str(pdf)) else None
+        # a second sheet: its dimensions are listed with those of the first
+        before = len(require(list_drawing_dimensions({}), "list_drawing_dimensions")["data"]["dimensions"])
+        require(add_sheet({"name": "Blatt2", "paper_size": "A3"}), "add_sheet")
+        other = require(insert_model_view({"view": "front", "x_mm": 200, "y_mm": 150, "model_path": part,
+                                           "scale": scale}), "insert_model_view")["data"]["view"]["name"]
+        added = insert_model_annotations({"all_views": False, "view_name": other})
+        listed = require(list_drawing_dimensions({}), "list_drawing_dimensions")["data"]["dimensions"]
+        report["second_sheet"] = {"added": added.get("data", {}).get("dimensions_added"), "before": before,
+                                  "after": len(listed), "in_other_view": sum(1 for d in listed if d["view"] == other)}
     finally:
         running_app().CloseDoc(title)
         report["part_dirty"] = part_dirty(part)
@@ -161,6 +172,8 @@ def main() -> int:
         report["delete_view"]["section_ok"] and report["delete_view"]["delete_ok"]
         and report["delete_view"]["lines_after"] == report["delete_view"]["lines_with_c"] - 1,
         report["part_dirty"] is False,
+        report["second_sheet"]["in_other_view"] > 0
+        and report["second_sheet"]["after"] == report["second_sheet"]["before"] + report["second_sheet"]["in_other_view"],
     ]
     print("checks", checks)
     return 0 if all(checks) else 1

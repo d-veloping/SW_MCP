@@ -216,7 +216,7 @@ def list_features(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "get_bounding_box",
     "Read-only: overall bounding box of the active part, in millimetres. GetPartBox is documented as approximate; "
-    "`exact` takes the extreme points of every solid body instead (parts only).",
+    "`exact` takes the extreme points of every visible solid body instead (parts only), the bodies a drawing shows.",
     {"exact": {"type": "boolean", "default": False, "description": "Exact box from IBody2.GetExtremePoint."}},
 )
 def get_bounding_box(args: dict[str, Any]) -> dict[str, Any]:
