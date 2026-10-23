@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-112 tools: sketching with real relations and driving dimensions, the solid
+116 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -190,7 +190,8 @@ member that was refused. The boxes of the sheet metal, weldment and
 body, exact on the geometry; for a rotated assembly component `list_bodies`
 transforms the two corners, which is exact only without rotation);
 `get_bounding_box` keeps `GetPartBox`, which SOLIDWORKS documents as
-approximate, so it is for orientation, not for a check.
+approximate, so it is for orientation, not for a check, unless it is called
+with `exact: true`, which takes the extreme points of every solid body, hidden ones included.
 `sheet_metal_flatten` and `export_flat_pattern` take single-body sheet
 metal parts only.
 
@@ -208,7 +209,7 @@ metal parts only.
 | Tool | Purpose |
 | --- | --- |
 | `capture_screenshot` | Returns the view as an **image**, so the model can look at its own work. |
-| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices. Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
+| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices; cylinders with axis, a point on it, radius and `concave` (true when the material lies outside, as for a bore; null when unreadable). Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
 | `check_errors` | What SOLIDWORKS thinks is wrong — see below. With `sketches: true` also every sketch the solver cannot solve, which SOLIDWORKS never flags itself. |
 | `set_view` | Named view plus zoom-to-fit. |
@@ -220,10 +221,11 @@ metal parts only.
 ### Engineering drawings
 `create_drawing`, `list_sheets`, `add_sheet`, `activate_sheet`,
 `insert_standard_views`, `insert_model_view`, `insert_projected_view`,
-`insert_section_view`, `insert_detail_view`, `list_drawing_views`,
+`insert_section_view`, `insert_detail_view`, `delete_drawing_view`, `list_drawing_views`,
 `activate_drawing_view`, `create_drawing_sketch`, `set_drawing_view`,
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
-`insert_centerlines`, `add_note`.
+`insert_centerlines`, `add_note`, `list_drawing_dimensions`,
+`hide_drawing_dimensions`, `arrange_drawing_dimensions`.
 
 `insert_standard_views`, `insert_model_view`, `insert_projected_view` and
 `set_drawing_view` take `display_mode`: `hidden_lines_removed` (SOLIDWORKS'
@@ -231,10 +233,54 @@ default), `hidden_lines_visible` (hidden edges dashed, so bores and steps show
 without a section), `wireframe`, `shaded`, `shaded_with_edges`. The style counts
 as applied only when it reads back from the view; otherwise the tool returns
 `ok: false` with the style each view ended up in. `insert_standard_views`
-applies it only to the views it places.
+applies it only to the views it places. A `scale` on `insert_model_view` or
+`set_drawing_view` counts the same way: it must read back from the view.
 
-For section and detail views, call `create_drawing_sketch` after activating the
-parent view, then use the normal `draw_line` or `draw_circle` sketch tools.
+Every drawing tool (`sw_drawing`, all but `create_drawing`) takes an optional
+`document` (the drawing's title). When another document is active, the call is refused with
+`ok: false` and `active_document`, and nothing is changed; the check runs in the
+same call. A read SOLIDWORKS refuses where the answer proves something (the view
+chain, cutting lines, the dimension walk) fails the call instead of counting as
+"none there". A dimension whose model dimension cannot be read is listed with
+`readable: false`; one whose visibility or drawing layer cannot be read with
+`visible: null`: it may be hidden, counts for no duplicate, and
+`arrange_drawing_dimensions` arranges no view that has one.
+
+`insert_section_view` takes the cutting line as two sheet points or as a model
+point it passes through (`through_model_mm`) plus `direction`, and draws it in
+the parent view's own sketch, whose coordinates are `(sheet - view position) /
+view scale`, not sheet millimetres. Drawn at sheet coordinates the line lies
+beside the part and SOLIDWORKS still creates a "section view" that cuts nothing
+(issue #2). The tool succeeds only when the new view is a section with hatched
+faces; otherwise it deletes the view and its cutting line again and returns
+`ok: false`. When SOLIDWORKS returns no view at all, the call fails and the line
+it drew may remain in the parent (`parent_section_lines` is read back). The
+parent must not be rotated; an unreadable position, scale or angle fails the
+call. `delete_drawing_view` removes a section view together with its cutting
+line, which SOLIDWORKS otherwise leaves in the parent. Deletions are read back:
+`DeleteSelection2` also answers true for what stays, so `removed` and
+`line_removed` say what is gone from the drawing afterwards.
+`insert_detail_view` converts its circle the same way. `list_drawing_views`
+reports each view's outline, hatched faces, section lines and the transform
+from model to sheet millimetres.
+
+`insert_model_annotations` puts the same model dimension into several views,
+also with `duplicate_dimensions: false` and also when called view by view
+(measured on 2016 SP3: 3 to 41 duplicates per part). `list_drawing_dimensions`
+lists every visible dimension of every sheet (not those hidden or on a hidden
+layer) with its sheet, view, layer, model dimension and text position and names the duplicates within a sheet. The
+value key follows the model dimension's kind: `value_mm` for a length, `value_deg` for an angle, `value` for an integer
+such as a pattern count. `hide_drawing_dimensions` hides a list of
+them in one selection and one call (the part stays unchanged), and
+`arrange_drawing_dimensions` auto-arranges one view's dimensions, all or none, and reports how many texts moved.
+Both activate the view's sheet for that and the previous sheet again afterwards.
+A section label already used on the sheet is refused. A dimension is
+selected by its selection name: `IAnnotation.Select3` does not select drawing
+dimensions.
+
+For hand-made section and detail views, call `create_drawing_sketch` after
+activating the parent view, then use the normal `draw_line` or `draw_circle`
+sketch tools; their coordinates are the view sketch's, as above.
 
 ---
 

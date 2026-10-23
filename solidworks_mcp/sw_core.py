@@ -26,6 +26,7 @@ metres and radians throughout, so conversion happens once, at this boundary.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
@@ -183,15 +184,32 @@ TOOLS: list[Tool] = []
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
 
+class ToolFailure(RuntimeError):
+    """A tool cannot give a truthful answer: a read SOLIDWORKS refused, or the active document is not the one the
+    caller named. The handler returns ok false with this message and `data` instead of raising: the call has an
+    answer, and the caller decides what an unreadable drawing means for it."""
+
+    def __init__(self, message: str, **data: Any) -> None:
+        super().__init__(message)
+        self.data = data
+
+
 def tool(
     name: str,
     description: str,
     properties: dict[str, Any] | None = None,
     required: Sequence[str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register one MCP tool and its handler."""
+    """Register one MCP tool and its handler; a ToolFailure inside the handler becomes its ok false answer."""
 
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(tool_fn)
+        def fn(args: dict[str, Any]) -> Any:
+            try:
+                return tool_fn(args)
+            except ToolFailure as exc:
+                return result(False, str(exc), **exc.data)
+
         TOOLS.append(
             Tool(
                 name=name,
@@ -245,6 +263,17 @@ def to_rad(value: float) -> float:
 
 def to_deg(value: float) -> float:
     return math.degrees(float(value))
+
+
+def dimension_value(kind: int, system_value: float) -> dict[str, Any]:
+    """A model dimension's value under the key its kind asks for. `kind` is IDimension.GetType, swDimensionParamType_e
+    (checked 2026-10-23 in SolidWorks.Interop.swconst of 2016 SP3: linear 0, angular 1, integer 2, unknown -1):
+    1 an angle (value_deg), 2 an integer such as a pattern count (value), anything else a length (value_mm)."""
+    if kind == 1:
+        return {"value_deg": round(to_deg(system_value), 6)}
+    if kind == 2:
+        return {"value": int(round(float(system_value)))}
+    return {"value_mm": round(to_mm(system_value), 6)}
 
 
 def mm_point(point: Iterable[float]) -> list[float]:
@@ -1309,6 +1338,7 @@ def _surface_details(surface: Any, matrix: Sequence[float] | None = None) -> dic
         if identity == 4002:  # cylinder: root(3), axis(3), radius
             params = surface.CylinderParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
+            details["axis_point_mm"] = mm_point(apply_transform(params[0:3], matrix))
             details["radius_mm"] = round(to_mm(params[6]), 6)
         elif identity == 4004:  # sphere: center(3), radius
             params = surface.SphereParams
@@ -1317,6 +1347,7 @@ def _surface_details(surface: Any, matrix: Sequence[float] | None = None) -> dic
         elif identity == 4003:  # cone
             params = surface.ConeParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
+            details["axis_point_mm"] = mm_point(apply_transform(params[0:3], matrix))
         elif identity == 4005:  # torus
             params = surface.TorusParams
             details["axis"] = [round(v, 6) for v in rotate_vector(params[3:6], matrix)]
@@ -1372,6 +1403,11 @@ def enumerate_faces(doc: Any) -> list[dict[str, Any]]:
             surface = safe(face, "GetSurface")
             if surface is not None:
                 entry.update(_surface_details(surface, matrix))
+            if entry.get("surface_type") == "cylinder":
+                # The face runs against its surface's outward normal exactly when the material lies outside the
+                # cylinder: a bore (measured on SOLIDWORKS 2016 SP3: every bore true, every shaft or boss false).
+                sense = safe(face, "FaceInSurfaceSense")
+                entry["concave"] = None if sense is None else bool(sense)
             faces.append(entry)
             index += 1
     return faces

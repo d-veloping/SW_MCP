@@ -75,5 +75,44 @@ class CheckErrorsSketchTests(unittest.TestCase):
         self.assertIn("Skizze2: over_defined", answer["message"])
 
 
+class ExactBoundingBoxTests(unittest.TestCase):
+    """`exact` spans every solid body, hidden ones included: a hidden body outside the visible one widens the box."""
+
+    class Body:
+        def __init__(self, box: list[float]) -> None:
+            self.box = box
+
+    class Part:
+        def __init__(self, visible: list, hidden: list) -> None:
+            self.visible, self.hidden, self.calls = visible, hidden, []
+
+        def GetBodies2(self, kind: int, visible_only: bool) -> tuple:
+            self.calls.append((kind, visible_only))
+            return tuple(self.visible if visible_only else self.visible + self.hidden)
+
+    @staticmethod
+    def union(bodies: list) -> list[float]:
+        return [min(b.box[i] for b in bodies) for i in range(3)] + [max(b.box[i + 3] for b in bodies) for i in range(3)]
+
+    def call(self, part: "ExactBoundingBoxTests.Part") -> dict:
+        with unittest.mock.patch.object(sw_inspect, "active_document", return_value=(None, part)), \
+                unittest.mock.patch.object(sw_inspect, "document_type", return_value=1), \
+                unittest.mock.patch.object(sw_inspect, "bodies_extents", side_effect=self.union):
+            return sw_inspect.get_bounding_box({"exact": True})
+
+    def test_a_hidden_body_widens_the_exact_box(self) -> None:
+        part = self.Part([self.Body([0, 0, 0, 0.1, 0.05, 0.01])], [self.Body([0.2, 0, 0, 0.3, 0.05, 0.01])])
+        answer = self.call(part)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(part.calls, [(0, False)])
+        self.assertEqual((answer["data"]["min_mm"], answer["data"]["max_mm"]), ([0, 0, 0], [300, 50, 10]))
+        self.assertTrue(answer["data"]["exact"])
+
+    def test_no_solid_body_is_an_error(self) -> None:
+        answer = self.call(self.Part([], []))
+        self.assertFalse(answer["ok"])
+        self.assertIn("no solid body", answer["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

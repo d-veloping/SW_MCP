@@ -64,6 +64,7 @@ from .sw_core import (
     sketch_names,
     sketch_segment_objects,
     tool,
+    dimension_value,
     to_deg,
     to_m,
     to_mm,
@@ -1251,12 +1252,7 @@ def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
                     "driven": {_DIMENSION_DRIVEN: True, _DIMENSION_DRIVING: False}.get(state),
                     "driven_state": state,
                 }
-                # Dimension type 3 is angular in swDimensionType_e; everything
-                # else we surface here is a length.
-                if int(safe(dimension, "GetType", 0) or 0) == 3:
-                    entry["value_deg"] = round(to_deg(system_value), 6)
-                else:
-                    entry["value_mm"] = round(to_mm(system_value), 6)
+                entry.update(dimension_value(int(safe(dimension, "GetType", 0) or 0), system_value))
                 dimensions.append(entry)
             except Exception:
                 logger.info("Skipped an unreadable display dimension on %s", owner)

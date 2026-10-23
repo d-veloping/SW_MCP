@@ -25,18 +25,28 @@ not interchangeable, so both are exposed:
   model has nothing worth importing.
 
 Sheet coordinates are millimetres from the lower-left corner of the sheet.
+
+Geometry sketched while a view is active belongs to that view's own sketch,
+whose coordinates are not sheet coordinates: a point sits at
+``(sheet - view position) / view scale`` (measured on 2016 SP3, d-veloping/ClauSW#157).
+Section lines and detail circles are converted that way before they are drawn;
+drawn at sheet coordinates they land beside the part, and SOLIDWORKS still
+creates a "section view" that cuts nothing (issue #2).
 """
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
 from .sw_core import (
+    ToolFailure,
     active_document,
     as_list,
     byref_long,
     call_versioned,
+    dimension_value,
     clear_selection,
     document_info,
     document_type,
@@ -132,11 +142,45 @@ _DRAWING_METHODS = (
 )
 
 
-def require_drawing() -> tuple[Any, Any]:
+DOCUMENT_SCHEMA = {
+    "type": "string",
+    "description": "Title of the drawing this call is meant for. When another document is active the call is refused "
+                   "and changes nothing; without it the call acts on whatever drawing is active.",
+}
+
+
+def drawing_tool(name: str, description: str, properties: dict[str, Any] | None = None,
+                 required: list[str] | None = None) -> Any:
+    """A tool on the active drawing; it takes the optional `document` that require_drawing checks."""
+    return tool(name, description, {**(properties or {}), "document": DOCUMENT_SCHEMA}, required)
+
+
+def require_drawing(args: dict[str, Any] | None = None) -> tuple[Any, Any]:
+    """The active drawing. With `document` in args, the active document must carry that title, checked in the same
+    call that then acts on it; a mismatch is a ToolFailure and nothing is touched."""
     app, doc = active_document()
+    wanted = str((args or {}).get("document") or "")
+    if wanted:
+        title = str(_read(doc, "GetTitle") or "")
+        if title != wanted:
+            raise ToolFailure(f"The active document is '{title}', not '{wanted}'; nothing was changed.",
+                              active_document=title)
     if document_type(doc) != 3:
         raise RuntimeError("This tool requires an active drawing document.")
     return app, flag_methods(doc, *_DRAWING_METHODS)
+
+
+def _read(obj: Any, member: str) -> Any:
+    """A COM member whose answer proves something, also when it is empty or absent. A read SOLIDWORKS refuses is a
+    ToolFailure, never None or an empty list: 'not readable' must not pass for 'not there'."""
+    try:
+        return value(obj, member)
+    except Exception as exc:
+        raise ToolFailure(f"SOLIDWORKS could not read {member}: {exc}", readable=False) from exc
+
+
+def _section_lines(view: Any) -> list[Any]:
+    return as_list(_read(view, "GetSectionLines"))
 
 
 def _ensure_model_open(app: Any, model: str) -> None:
@@ -203,19 +247,17 @@ def _open_model_path(app: Any, model_path: str | None) -> str:
 
 
 def _iter_views(doc: Any) -> list[Any]:
-    """Every view on every sheet, in SOLIDWORKS' own order.
+    """The current sheet and its views, in SOLIDWORKS' own order.
 
-    GetFirstView returns the sheet itself, and its 'next' chain walks the views
-    on that sheet before moving to the next sheet.
+    GetFirstView returns the current sheet itself, and its 'next' chain walks
+    the views on that sheet only (measured on 2016 SP3 with a second sheet,
+    d-veloping/ClauSW#157); _views_of_every_sheet reads all sheets.
     """
     views: list[Any] = []
-    try:
-        node = value(doc, "GetFirstView")
-    except Exception:
-        return views
+    node = _read(doc, "GetFirstView")
     while node is not None:
         views.append(node)
-        node = safe(node, "GetNextView")
+        node = _read(node, "GetNextView")
     return views
 
 
@@ -265,6 +307,16 @@ def _view_entry(view: Any, index: int) -> dict[str, Any]:
             mode = _display_mode(view)
             if mode is not None:
                 entry["display_mode"] = mode
+            outline = safe(view, "GetOutline")
+            if outline is not None and len(outline) >= 4:
+                entry["outline_mm"] = [round(to_mm(c), 4) for c in list(outline)[:4]]
+            hatches = safe(view, "GetFaceHatchCount")
+            if hatches is not None:
+                entry["face_hatches"] = int(hatches)
+            try:
+                entry["section_lines"] = len(_section_lines(view))
+            except ToolFailure:
+                entry["section_lines"] = None   # unreadable, not none
     position = safe(view, "Position")
     if position is not None and len(position) >= 2:
         entry["position_mm"] = [round(to_mm(position[0]), 4), round(to_mm(position[1]), 4)]
@@ -347,9 +399,9 @@ def _sheet_names(doc: Any) -> list[str]:
     return [str(n) for n in as_list(safe(doc, "GetSheetNames"))]
 
 
-@tool("list_sheets", "Read-only: list the sheets of the active drawing, with the active one marked.", {})
+@drawing_tool("list_sheets", "Read-only: list the sheets of the active drawing, with the active one marked.", {})
 def list_sheets(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     current = value(doc, "GetCurrentSheet")
     active = str(safe(current, "GetName", "") or "")
     sheets = []
@@ -366,7 +418,7 @@ def list_sheets(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Read {len(sheets)} sheets.", **payload)
 
 
-@tool(
+@drawing_tool(
     "add_sheet",
     "Add a sheet to the active drawing.",
     {
@@ -378,7 +430,7 @@ def list_sheets(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def add_sheet(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     name = str(args.get("name") or f"Sheet{len(_sheet_names(doc)) + 1}")
     size = PAPER_SIZES[str(args.get("paper_size", "A3"))]
     ok = bool(
@@ -391,14 +443,14 @@ def add_sheet(args: dict[str, Any]) -> dict[str, Any]:
     return result(ok, f"Added sheet '{name}'." if ok else "SOLIDWORKS did not add the sheet.", sheets=_sheet_names(doc))
 
 
-@tool(
+@drawing_tool(
     "activate_sheet",
     "Make a sheet the active one.",
     {"name": {"type": "string"}},
     ["name"],
 )
 def activate_sheet(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     name = str(args["name"])
     ok = bool(doc.ActivateSheet(name))
     return result(ok, f"Activated sheet '{name}'." if ok else f"No sheet named '{name}'.", sheets=_sheet_names(doc))
@@ -409,7 +461,7 @@ def activate_sheet(args: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@tool(
+@drawing_tool(
     "insert_standard_views",
     "Place the standard set of views (front, top, side, isometric) for a model in one call, "
     "laid out by projection angle. first_angle follows ISO/GB convention.",
@@ -421,7 +473,7 @@ def activate_sheet(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def insert_standard_views(args: dict[str, Any]) -> dict[str, Any]:
-    app, doc = require_drawing()
+    app, doc = require_drawing(args)
     model = _open_model_path(app, args.get("model_path"))
     first_angle = bool(args.get("first_angle", True))
     before = {str(safe(v, "GetName2", "")) for v in _iter_views(doc) if not _is_sheet(v)}
@@ -443,7 +495,7 @@ def insert_standard_views(args: dict[str, Any]) -> dict[str, Any]:
     return result(ok, message, **data)
 
 
-@tool(
+@drawing_tool(
     "insert_model_view",
     "Place one named orientation of a model at a point on the sheet. Position is millimetres from "
     "the sheet's lower-left corner.",
@@ -463,7 +515,7 @@ def insert_standard_views(args: dict[str, Any]) -> dict[str, Any]:
     ["x_mm", "y_mm"],
 )
 def insert_model_view(args: dict[str, Any]) -> dict[str, Any]:
-    app, doc = require_drawing()
+    app, doc = require_drawing(args)
     model = _open_model_path(app, args.get("model_path"))
     wanted = str(args.get("view", "front"))
     resolved = _model_view_name(app, model, wanted)
@@ -478,12 +530,14 @@ def insert_model_view(args: dict[str, Any]) -> dict[str, Any]:
             model=model,
             resolved_view_name=resolved,
         )
-    display = _apply_view_options(view, args)
+    scale, display = _apply_view_options(view, args)
     rebuild(doc)
-    if display is not None and not display["ok"]:
-        return result(False, f"Placed the {wanted} view, but " + _display_failure([display]),
-                      view=_view_entry(view, -1), model=model, display=[display])
-    return result(True, f"Placed the {wanted} view.", view=_view_entry(view, -1), model=model)
+    failure = _options_failure(scale, display)
+    if failure:
+        return result(False, f"Placed the {wanted} view, but {failure}", view=_view_entry(view, -1), model=model,
+                      **_options_data(scale, display))
+    return result(True, f"Placed the {wanted} view.", view=_view_entry(view, -1), model=model,
+                  **_options_data(scale, None))
 
 
 def _model_view_name(app: Any, model: str, wanted: str) -> str:
@@ -518,19 +572,47 @@ def _model_view_name(app: Any, model: str, wanted: str) -> str:
     return english[wanted]
 
 
-def _apply_view_options(view: Any, args: dict[str, Any]) -> dict[str, Any] | None:
-    """Scale and display style of one view.  Returns the display outcome of
-    _set_display_mode when a display_mode was asked for, else None."""
-    if args.get("scale"):
-        try:
-            view.ScaleDecimal = float(args["scale"])
-        except Exception:
-            logger.info("Could not override the view scale.")
+def _set_scale(view: Any, wanted: float) -> dict[str, Any]:
+    """Apply a view scale and report whether it reads back (relative 1e-6)."""
+    outcome: dict[str, Any] = {"view": str(safe(view, "GetName2", "") or ""), "requested": wanted}
+    try:
+        view.ScaleDecimal = wanted
+    except Exception:
+        logger.info("Could not override the scale of view %s", outcome["view"], exc_info=True)
+    actual = safe(view, "ScaleDecimal")
+    outcome["actual"] = round(float(actual), 9) if _finite(actual) else None
+    outcome["ok"] = _finite(actual) and abs(float(actual) - wanted) <= 1e-6 * max(1.0, abs(wanted))
+    return outcome
+
+
+def _apply_view_options(view: Any, args: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Scale and display style of one view, each read back: (scale outcome, display outcome), None where it was not
+    asked for."""
+    scale = _set_scale(view, float(args["scale"])) if args.get("scale") else None
     mode = args.get("display_mode")
-    return _set_display_mode(view, str(mode)) if mode else None
+    return scale, (_set_display_mode(view, str(mode)) if mode else None)
 
 
-@tool(
+def _options_failure(scale: dict[str, Any] | None, display: dict[str, Any] | None) -> str:
+    """What did not read back as asked, or '' when everything did."""
+    parts = []
+    if scale is not None and not scale["ok"]:
+        parts.append(f"SOLIDWORKS did not apply scale {scale['requested']:g} (reads {scale['actual']}).")
+    if display is not None and not display["ok"]:
+        parts.append(_display_failure([display]))
+    return " ".join(parts)
+
+
+def _options_data(scale: dict[str, Any] | None, display: dict[str, Any] | None) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    if scale is not None:
+        data["scale"] = scale
+    if display is not None:
+        data["display"] = [display]
+    return data
+
+
+@drawing_tool(
     "insert_projected_view",
     "Project a new view off an existing one. Name the parent and a direction and the placement is "
     "worked out for you; pass x_mm/y_mm instead to place it exactly. Millimetres.",
@@ -545,7 +627,7 @@ def _apply_view_options(view: Any, args: dict[str, Any]) -> dict[str, Any] | Non
     },
 )
 def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     parent_name = args.get("parent_view")
     parent = None
     for view in _iter_views(doc):
@@ -589,7 +671,7 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
             parent=parent_name,
             point_mm=[round(to_mm(x), 2), round(to_mm(y), 2)],
         )
-    display = _apply_view_options(view, {"display_mode": args.get("display_mode")})
+    _, display = _apply_view_options(view, {"display_mode": args.get("display_mode")})
     rebuild(doc)
     if display is not None and not display["ok"]:
         return result(False, f"Projected a view from '{parent_name}', but " + _display_failure([display]),
@@ -597,30 +679,141 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Projected a view from '{parent_name}'.", parent=parent_name, view=_view_entry(view, -1))
 
 
+def _find_view(doc: Any, name: str | None) -> Any | None:
+    """The model view called `name`, or the last one placed when no name is given."""
+    found = None
+    for view in _iter_views(doc):
+        if _is_sheet(view):
+            continue
+        if name:
+            if str(safe(view, "GetName2", "")) == str(name):
+                return view
+        else:
+            found = view
+    return found
+
+
+def _finite(number: Any) -> bool:
+    return isinstance(number, (int, float)) and not isinstance(number, bool) and math.isfinite(number)
+
+
+def _view_scale(view: Any) -> float:
+    scale = _read(view, "ScaleDecimal")
+    if not _finite(scale) or scale <= 0:
+        raise ToolFailure(f"View '{safe(view, 'GetName2', '')}' reports no usable scale ({scale!r}).", readable=False)
+    return float(scale)
+
+
+def _sketch_point(view: Any, x_mm: float, y_mm: float) -> tuple[float, float]:
+    """A sheet point (mm) in the coordinates of the view's own sketch (metres): (sheet - position) / scale, which holds
+    for a view that is not rotated. An unreadable position, scale or angle, or a rotated view, is a ToolFailure, never
+    a point guessed from defaults."""
+    name = safe(view, "GetName2", "")
+    position = as_list(_read(view, "Position"))
+    if len(position) < 2 or not all(_finite(c) for c in position[:2]):
+        raise ToolFailure(f"View '{name}' reports no usable position ({position!r}).", readable=False)
+    angle = _read(view, "Angle")
+    if not _finite(angle):
+        raise ToolFailure(f"View '{name}' reports no usable angle ({angle!r}).", readable=False)
+    if abs(angle) > 1e-9:
+        raise ToolFailure(f"View '{name}' is rotated by {math.degrees(angle):g} degrees; sketching into a rotated "
+                          "view is not supported.")
+    scale = _view_scale(view)
+    return (to_m(x_mm) - float(position[0])) / scale, (to_m(y_mm) - float(position[1])) / scale
+
+
+def _model_to_sheet(view: Any) -> dict[str, Any] | None:
+    """IView.ModelToViewTransform as rotation (row-major, as ArrayData stores it), translation and scale; None when
+    SOLIDWORKS does not report thirteen finite numbers."""
+    data = safe(safe(view, "ModelToViewTransform"), "ArrayData")
+    if data is None or len(data) < 13 or not all(_finite(c) for c in list(data)[:13]):
+        return None
+    data = [float(c) for c in data]
+    return {"rotation": [round(c, 9) for c in data[0:9]],
+            "translation_mm": [round(to_mm(c), 6) for c in data[9:12]], "scale": round(data[12], 9)}
+
+
+def _sheet_point(view: Any, point_mm: list[float]) -> tuple[float, float]:
+    """Where a model point (mm) appears on the sheet (mm): sheet = p·R·s + t."""
+    transform = _model_to_sheet(view)
+    if transform is None:
+        raise ToolFailure(f"View '{safe(view, 'GetName2', '')}' does not report its model transform.", readable=False)
+    r, t, s = transform["rotation"], transform["translation_mm"], transform["scale"]
+    p = [float(c) for c in point_mm]
+    return (s * (r[0] * p[0] + r[3] * p[1] + r[6] * p[2]) + t[0],
+            s * (r[1] * p[0] + r[4] * p[1] + r[7] * p[2]) + t[1])
+
+
+def _delete_selected(doc: Any, name: str, kind: str) -> None:
+    """Select one object by name and ask SOLIDWORKS to delete it. Its answer proves nothing (it says True also for
+    what stays), so this returns nothing and never raises; the caller reads the drawing again."""
+    try:
+        clear_selection(doc)
+        if bool(extension(doc).SelectByID2(name, kind, 0.0, 0.0, 0.0, False, 0, nothing(), 0)):
+            flag_methods(extension(doc), "DeleteSelection2").DeleteSelection2(0)
+    except Exception:
+        logger.info("Could not delete %s '%s'.", kind, name, exc_info=True)
+    finally:
+        clear_selection(doc)
+
+
+def _model_views(doc: Any) -> list[tuple[str, Any]]:
+    """(name, view) of every model view on the active sheet, name and type read with _read: a proof that a view is
+    gone must not rest on a name or type that could not be read."""
+    found = []
+    for view in _iter_views(doc):
+        if int(_read(view, "Type") or 0) != 1:
+            found.append((str(_read(view, "GetName2") or ""), view))
+    return found
+
+
+def _section_line_names(doc: Any) -> set[str]:
+    return {str(_read(line, "GetName") or "") for _, v in _model_views(doc) for line in _section_lines(v)}
+
+
+def _section_labels(doc: Any) -> set[str]:
+    return {str(_read(line, "GetLabel") or "") for v in _iter_views(doc) if not _is_sheet(v)
+            for line in _section_lines(v)} - {""}
+
+
+def _section_line_of(doc: Any, view_name: str) -> tuple[str, str] | None:
+    """(parent view, cutting line name) of the line whose section view is `view_name`, or None."""
+    for parent, view in _model_views(doc):
+        for line in _section_lines(view):
+            section = _read(line, "GetSectionView")   # None for a line whose view is gone
+            if section is not None and str(_read(section, "GetName2") or "") == view_name:
+                return parent, str(_read(line, "GetName") or "")
+    return None
+
+
+def _delete_view_and_line(doc: Any, name: str) -> tuple[bool, bool | None, str | None]:
+    """Delete a view and, for a section view, its cutting line, which SOLIDWORKS otherwise leaves in the parent.
+    (view gone, line gone or None without a line, parent): both read back after the deletion."""
+    line = _section_line_of(doc, name) if int(_read(_find_view(doc, name), "Type") or 0) == 2 else None
+    _delete_selected(doc, name, "DRAWINGVIEW")
+    if line is not None:
+        _delete_selected(doc, line[1], "SECTIONLINE")
+    rebuild(doc)
+    line_gone = None if line is None else line[1] not in _section_line_names(doc)
+    return name not in {n for n, _ in _model_views(doc)}, line_gone, None if line is None else line[0]
+
+
 def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, Any]:
     """Activate a view, draw one entity inside it, and leave it selected.
 
     Sketch geometry in a drawing belongs to whichever view is active, so the
     activate/draw/select dance has to happen together or the entity lands on
-    the sheet instead of in the view.
+    the sheet instead of in the view.  `draw` gets the sketch manager and the
+    view, to convert sheet coordinates with _sketch_point.
     """
-    parent = None
-    for view in _iter_views(doc):
-        if int(safe(view, "Type", 1) or 1) == 1:
-            continue
-        if parent_view:
-            if str(safe(view, "GetName2", "")) == str(parent_view):
-                parent = view
-                break
-        else:
-            parent = view
+    parent = _find_view(doc, parent_view)
     if parent is None:
         raise RuntimeError("No parent drawing view. Place a view before sectioning or detailing it.")
 
     name = str(safe(parent, "GetName2", ""))
     if not bool(doc.ActivateView(name)):
         raise RuntimeError(f"Could not activate view '{name}'.")
-    entity = draw(sketch_manager(doc))
+    entity = draw(sketch_manager(doc), parent)
     if entity is None:
         raise RuntimeError("SOLIDWORKS did not draw the reference geometry in the view.")
     clear_selection(doc)
@@ -631,21 +824,32 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     return name, entity
 
 
-@tool(
+@drawing_tool(
     "insert_section_view",
     "Create a section view: give the cutting line's two endpoints and where the section should "
-    "sit, and the line is drawn in the parent view for you. Coordinates are millimetres on the "
-    "sheet, so read the parent's position from list_drawing_views first.",
+    "sit, and the line is drawn in the parent view for you. Give the line either as two points in "
+    "millimetres on the sheet (read the parent's position from list_drawing_views first) or as a model "
+    "point it passes through plus a direction, which draws it across the whole parent view. Succeeds only "
+    "when SOLIDWORKS actually cut: the new view must be a section view with hatched faces. A view that cut "
+    "nothing is deleted again with its cutting line and the call fails (removed, line_removed as read back "
+    "afterwards); when SOLIDWORKS returns no view at all the call fails, and the line it drew may remain in the "
+    "parent (parent_section_lines is read back). The parent view must not be rotated.",
     {
         "x1_mm": {"type": "number", "description": "Cutting line start, on the sheet."},
         "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number", "description": "Cutting line end, on the sheet."},
         "y2_mm": {"type": "number"},
+        "through_model_mm": {"type": "array", "items": {"type": "number"},
+                             "description": "Model point [x, y, z] in millimetres the cutting line passes through, "
+                                            "instead of x1..y2."},
+        "direction": {"type": "string", "enum": ["vertical", "horizontal"], "default": "vertical",
+                      "description": "Direction of the cutting line on the sheet, with through_model_mm."},
         "place_x_mm": {"type": "number", "description": "Where the section view goes."},
         "place_y_mm": {"type": "number"},
         "parent_view": {"type": "string", "description": "View to cut. Defaults to the last one placed."},
         "label": {"type": "string", "default": "A"},
         "depth_mm": {"type": "number", "default": 0, "description": "Partial-section depth; 0 cuts all the way."},
+        "reverse": {"type": "boolean", "default": False, "description": "Look the other way along the cutting line."},
         "exclude_fasteners": {"type": "boolean", "default": False},
         "use_selection": {"type": "boolean", "default": False, "description": "Use the already-selected line instead of drawing one."},
     },
@@ -654,42 +858,97 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
 def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
     from .sw_core import empty_variant
 
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     parent = args.get("parent_view")
+    line_mm: list[float] | None = None
+    label = str(args.get("label", "A"))
+    if label in _section_labels(doc):
+        # two lines with one label would make the clean-up and delete_drawing_view ambiguous
+        return result(False, f"Label '{label}' is already used by a cutting line on this sheet; pass another label.",
+                      labels_in_use=sorted(_section_labels(doc)))
     if not bool(args.get("use_selection", False)):
-        for key in ("x1_mm", "y1_mm", "x2_mm", "y2_mm"):
-            if args.get(key) is None:
-                return result(False, f"Pass the cutting line endpoints, or set use_selection. Missing {key}.")
-        parent, _ = _draw_in_view(
-            doc, parent,
-            lambda sm: sm.CreateLine(
-                to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-                to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-            ),
-        )
+        through = args.get("through_model_mm")
+        if through is not None:
+            if not isinstance(through, (list, tuple)) or len(through) != 3:
+                return result(False, "through_model_mm takes three numbers [x, y, z].")
+            view = _find_view(doc, parent)
+            if view is None:
+                return result(False, "No parent drawing view. Place a view before sectioning it.")
+            outline = [to_mm(c) for c in list(safe(view, "GetOutline") or [])[:4]]
+            if len(outline) != 4:
+                return result(False, "SOLIDWORKS did not report the parent view's outline.")
+            px, py = _sheet_point(view, list(through))
+            margin = 5.0
+            if str(args.get("direction", "vertical")) == "vertical":
+                line_mm = [px, outline[1] - margin, px, outline[3] + margin]
+            else:
+                line_mm = [outline[0] - margin, py, outline[2] + margin, py]
+        else:
+            for key in ("x1_mm", "y1_mm", "x2_mm", "y2_mm"):
+                if args.get(key) is None:
+                    return result(False, "Pass the cutting line endpoints or through_model_mm, or set "
+                                         f"use_selection. Missing {key}.")
+            line_mm = [float(args[k]) for k in ("x1_mm", "y1_mm", "x2_mm", "y2_mm")]
 
-    # swCreateSectionViewAtOptions_e: 1 = section, 2 = exclude fasteners.
-    options = 1 | (2 if bool(args.get("exclude_fasteners", False)) else 0)
+        def draw(sm: Any, view: Any) -> Any:
+            a = _sketch_point(view, line_mm[0], line_mm[1])
+            b = _sketch_point(view, line_mm[2], line_mm[3])
+            return sm.CreateLine(a[0], a[1], 0.0, b[0], b[1], 0.0)
+
+        parent, _ = _draw_in_view(doc, parent, draw)
+
+    # swCreateSectionViewAtOptions_e, read from the type library: 1 = NotAligned, 2 = OffsetSection,
+    # 4 = ChangeDirection, 8 = ScaleWithModel, 16 = Partial, 32 = DisplaySurfaceCut, 64 = ExcludeFasteners.
+    # 0 is the aligned full section.
+    options = (4 if bool(args.get("reverse", False)) else 0) | (64 if bool(args.get("exclude_fasteners", False)) else 0)
     view = doc.CreateSectionViewAt5(
         to_m(args["place_x_mm"]), to_m(args["place_y_mm"]), 0.0,
-        str(args.get("label", "A")), options, empty_variant(),
+        label, options, empty_variant(),
         to_m(args.get("depth_mm", 0)),
     )
+    extra: dict[str, Any] = {"line_mm": [round(c, 4) for c in line_mm]} if line_mm else {}
     if view is None:
+        # never observed: the line this call drew, or a cutting line made from it, may still be in the parent view
+        parent_view = _find_view(doc, parent) if parent else None
+        if parent_view is not None:
+            extra["parent_section_lines"] = len(_section_lines(parent_view))
         return result(
             False,
-            "SOLIDWORKS did not create the section view. Check that the cutting line actually "
-            "crosses the parent view's geometry.",
-            parent=parent,
+            "SOLIDWORKS did not create the section view. Check that the cutting line actually crosses the parent "
+            "view's geometry. The line drawn for it may still be in the parent view.",
+            parent=parent, **extra,
         )
     rebuild(doc)
+    entry = _view_entry(view, -1)
+    if entry.get("type") != "section" or not entry.get("face_hatches"):
+        removed, line_removed, owner = _delete_view_and_line(doc, entry["name"]) if entry.get("name") else (False, None, None)
+        parent = owner or parent
+        parent_view = _find_view(doc, parent) if parent else None
+        if parent_view is not None:
+            extra["parent_section_lines"] = len(_section_lines(parent_view))
+        return result(
+            False,
+            f"SOLIDWORKS placed '{entry.get('name')}' but it cut nothing (type {entry.get('type')}, "
+            f"{entry.get('face_hatches', 0)} hatched faces); "
+            + ("the view was deleted again" if removed else "the view could not be deleted and is still on the sheet")
+            + (", and so was its cutting line. " if line_removed
+               else ", but its cutting line is still in the parent view. " if line_removed is False
+               else "; no cutting line of it was found. ")
+            + "Check that the cutting line crosses the part.",
+            parent=parent, view=entry, removed=removed, line_removed=line_removed, **extra,
+        )
+    owner = _section_line_of(doc, entry["name"])
+    parent = owner[0] if owner else parent
+    parent_view = _find_view(doc, parent) if parent else None
+    if parent_view is not None:
+        extra["parent_section_lines"] = len(_section_lines(parent_view))
     return result(
-        True, f"Created section view {args.get('label', 'A')}.",
-        parent=parent, view=_view_entry(view, -1),
+        True, f"Created section view {label} with {entry['face_hatches']} hatched faces.",
+        parent=parent, view=entry, **extra,
     )
 
 
-@tool(
+@drawing_tool(
     "insert_detail_view",
     "Create a detail view: give the detail circle's centre and radius and where the enlarged view "
     "should sit, and the circle is drawn in the parent view for you. Coordinates are millimetres "
@@ -714,18 +973,17 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
     ["place_x_mm", "place_y_mm"],
 )
 def insert_detail_view(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     parent = args.get("parent_view")
     if not bool(args.get("use_selection", False)):
         for key in ("center_x_mm", "center_y_mm", "radius_mm"):
             if args.get(key) is None:
                 return result(False, f"Pass the detail circle, or set use_selection. Missing {key}.")
-        parent, _ = _draw_in_view(
-            doc, parent,
-            lambda sm: sm.CreateCircleByRadius(
-                to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0, to_m(args["radius_mm"])
-            ),
-        )
+        def draw(sm: Any, view: Any) -> Any:
+            cx, cy = _sketch_point(view, float(args["center_x_mm"]), float(args["center_y_mm"]))
+            return sm.CreateCircleByRadius(cx, cy, 0.0, to_m(args["radius_mm"]) / _view_scale(view))
+
+        parent, _ = _draw_in_view(doc, parent, draw)
 
     detail_args = (
         to_m(args["place_x_mm"]), to_m(args["place_y_mm"]), 0.0,
@@ -758,19 +1016,383 @@ def insert_detail_view(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-@tool(
+@drawing_tool(
     "list_drawing_views",
-    "Read-only: list the views on the active drawing with their names, types, positions, scales, "
-    "and how many dimensions each carries. The first entry is the sheet itself.",
+    "Read-only: list the views on the active sheet of the drawing with their names, types, positions, scales, "
+    "outlines, hatched faces, section lines drawn in them, how many dimensions each carries, and the "
+    "transform from model millimetres to sheet millimetres (sheet = p·R·scale + translation, R row-major). "
+    "The first entry is the sheet itself.",
     {},
 )
 def list_drawing_views(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
-    views = [_view_entry(v, i) for i, v in enumerate(_iter_views(doc))]
+    _, doc = require_drawing(args)
+    views = []
+    for i, v in enumerate(_iter_views(doc)):
+        entry = _view_entry(v, i)
+        if not _is_sheet(v):
+            transform = _model_to_sheet(v)
+            if transform is not None:
+                entry["model_to_sheet"] = transform
+        views.append(entry)
     return result(True, f"Read {len(views)} drawing views.", views=views)
 
 
-@tool(
+def _sheet_size_mm(sheet: Any) -> tuple[float, float] | None:
+    """Width and height of an ISheet from GetProperties2 ([size, template, scale1, scale2, first angle, w, h])."""
+    properties = safe(sheet, "GetProperties2")
+    if properties is None or len(properties) < 7:
+        return None
+    return to_mm(properties[5]), to_mm(properties[6])
+
+
+def _current_sheet_name(doc: Any) -> str:
+    return str(safe(value(doc, "GetCurrentSheet"), "GetName", "") or "")
+
+
+DIMENSION_WALK_LIMIT = 20000
+
+
+def _display_dimensions(view: Any) -> list[Any]:
+    """The display dimensions SOLIDWORKS walks for a view. On 2016 SP3 hidden ones are no longer part of the walk; the
+    API documentation says suppressed ones are, so _all_dimensions filters them. A walk that does not end within
+    DIMENSION_WALK_LIMIT steps is an error, never a silently shortened list, and so is a step SOLIDWORKS refuses."""
+    found, display = [], _read(view, "GetFirstDisplayDimension5")
+    while display is not None:
+        if len(found) >= DIMENSION_WALK_LIMIT:
+            raise RuntimeError(f"The dimension walk of view '{safe(view, 'GetName2', '')}' did not end after "
+                               f"{DIMENSION_WALK_LIMIT} dimensions.")
+        found.append(display)
+        display = _read(display, "GetNext5")
+    return found
+
+
+def _dimension_entry(view_name: str, display: Any) -> dict[str, Any]:
+    """One display dimension. `readable` is false when the model dimension behind it, its name or its value cannot be
+    read; such an entry carries neither a name nor a value rather than an empty name or 0. `visible` is None when the
+    annotation's visibility or its layer cannot be read: the layer may hide it."""
+    entry: dict[str, Any] = {"view": view_name, "readable": False}
+    try:
+        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+        full_name = str(value(dimension, "FullName") or "")
+        system_value = value(dimension, "SystemValue")
+        if full_name and _finite(system_value):
+            entry.update(full_name=full_name, **dimension_value(int(value(dimension, "GetType")), system_value))
+            entry["readable"] = True
+    except Exception:
+        logger.info("Could not read the model dimension behind a display dimension in %s", view_name)
+    kind = safe(display, "Type2")
+    entry["type2"] = int(kind) if kind is not None else None
+    parentheses = safe(display, "ShowParenthesis")
+    entry["parentheses"] = bool(parentheses) if parentheses is not None else None
+    annotation = safe(display, "GetAnnotation")
+    position = safe(annotation, "GetPosition") if annotation is not None else None
+    if position is not None and len(position) >= 2:
+        entry["text_mm"] = [round(to_mm(position[0]), 3), round(to_mm(position[1]), 3)]
+    visible = safe(annotation, "Visible") if annotation is not None else None
+    entry["visible"] = None if visible is None else int(visible) == 1   # swAnnotationVisibilityState_e
+    try:
+        layer = value(annotation, "Layer")
+    except Exception:
+        layer = None
+        if entry["visible"]:
+            entry["visible"] = None
+    entry["layer"] = str(layer) if layer else None
+    entry["selection_name"] = str(safe(display, "GetNameForSelection", "") or "")
+    return entry
+
+
+def _late_bound(obj: Any) -> Any:
+    """IDrawingDoc.GetViews hands back bare PyIDispatch pointers (measured on 2016 SP3): no member reads until wrapped."""
+    if type(obj).__name__ == "PyIDispatch":
+        import win32com.client
+
+        return win32com.client.Dispatch(obj)
+    return obj
+
+
+def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
+    """(sheet name, model view) for every sheet: IDrawingDoc.GetViews gives one array per sheet, the sheet first. A
+    drawing always has a sheet, so an empty answer is an error, not an empty drawing; a sheet name or a view type that
+    cannot be read is a ToolFailure, so no view drops out of a list that proves something is gone."""
+    sheets = as_list(safe(doc, "GetViews"))
+    if not sheets:
+        raise RuntimeError("SOLIDWORKS did not list the views of the drawing's sheets (GetViews).")
+    found: list[tuple[str, Any]] = []
+    for sheet_views in sheets:
+        views = [_late_bound(v) for v in as_list(sheet_views)]
+        sheet_name = str(_read(views[0], "GetName2") or "") if views else ""
+        found.extend((sheet_name, v) for v in views[1:] if int(_read(v, "Type") or 0) != 1)
+    return found
+
+
+def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
+    """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size. A
+    display the walk returns although it is hidden (documented for suppressed dimensions) is left out, and so is one
+    on a hidden drawing layer: IAnnotation.Visible does not see the layer. One whose visibility or layer cannot be
+    read stays in the list with `visible: None`: it may be hidden, and it must not pass for visible or for gone."""
+    sizes: dict[str, tuple[float, float] | None] = {}
+    layers: dict[str, bool | None] = {}
+
+    def layer_shown(name: str) -> bool | None:
+        """True or False as read; None when the layer or its visibility cannot be read. A layer the manager does not
+        return (the default layer) hides nothing."""
+        if name not in layers:
+            try:
+                found = flag_methods(safe(doc, "GetLayerManager"), "GetLayer").GetLayer(name)
+                shown = True if found is None else value(found, "Visible")
+                layers[name] = None if shown is None else bool(shown)
+            except Exception:
+                layers[name] = None
+        return layers[name]
+
+    entries: list[dict[str, Any]] = []
+    for sheet_name, view in _views_of_every_sheet(doc):
+        name = str(_read(view, "GetName2") or "")
+        if view_names is not None and name not in view_names:
+            continue
+        if sheet_name not in sizes:
+            try:
+                sizes[sheet_name] = _sheet_size_mm(flag_methods(doc, "Sheet").Sheet(sheet_name))
+            except Exception:
+                sizes[sheet_name] = None
+        for display in _display_dimensions(view):
+            entry = _dimension_entry(name, display)
+            shown = layer_shown(entry["layer"]) if entry.get("layer") else True
+            if entry["visible"] is False or shown is False:
+                continue
+            if shown is None:
+                entry["visible"] = None
+            entry["sheet"] = sheet_name
+            size = sizes[sheet_name]
+            text = entry.get("text_mm")
+            entry["outside_sheet"] = None if size is None or not text else not (
+                0.0 <= text[0] <= size[0] and 0.0 <= text[1] <= size[1])
+            entries.append(entry)
+    return entries
+
+
+def _view_sheet(doc: Any, view_name: str) -> str | None:
+    return next((sheet for sheet, v in _views_of_every_sheet(doc) if str(safe(v, "GetName2", "")) == view_name), None)
+
+
+def _duplicates(entries: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Model dimensions visible in more than one view of the same sheet; a dimension repeated on another sheet is a
+    deliberate repeat, not a duplicate. Keyed `full_name` on a single sheet, `full_name @ sheet` otherwise."""
+    views: dict[tuple[str, str], list[str]] = {}
+    for entry in entries:
+        if entry.get("readable") and entry.get("visible"):
+            views.setdefault((entry["full_name"], entry.get("sheet", "")), []).append(entry["view"])
+    one_sheet = len({sheet for _, sheet in views}) <= 1
+    return {(name if one_sheet else f"{name} @ {sheet}"): found for (name, sheet), found in views.items()
+            if len(found) > 1}
+
+
+def _outside_sheet(entries: list[dict[str, Any]]) -> int:
+    return sum(1 for e in entries if e.get("outside_sheet"))
+
+
+def _on_sheet(doc: Any, sheet: str, act: Any) -> Any:
+    """Run `act` with `sheet` active and the previous sheet active again afterwards; the selection is cleared on the
+    way out. A sheet that does not become active is a ToolFailure; after an exception in `act` that exception is the
+    one raised, also when going back fails."""
+    previous = _current_sheet_name(doc)
+    switched = bool(sheet) and sheet != previous
+    if switched and not bool(doc.ActivateSheet(sheet)):
+        raise ToolFailure(f"Could not activate sheet '{sheet}'.")
+    try:
+        outcome = act()
+    except BaseException:
+        clear_selection(doc)
+        if switched:
+            try:
+                doc.ActivateSheet(previous)
+            except Exception:
+                logger.info("Could not activate sheet '%s' again.", previous, exc_info=True)
+        raise
+    clear_selection(doc)
+    if switched and not bool(doc.ActivateSheet(previous)):
+        raise ToolFailure(f"Could not activate sheet '{previous}' again after working on '{sheet}'.")
+    return outcome
+
+
+def _select_dimensions(doc: Any, entries: list[dict[str, Any]]) -> list[str]:
+    """Add each entry's display to the selection by name; returns '<view>: <full_name>' of those that could not be
+    selected."""
+    ext, missed = extension(doc), []
+    for entry in entries:
+        name = entry.get("selection_name")
+        if not (name and bool(ext.SelectByID2(name, "DIMENSION", 0.0, 0.0, 0.0, True, 0, nothing(), 0))):
+            missed.append(f"{entry['view']}: {entry.get('full_name')}")
+    return missed
+
+
+@drawing_tool(
+    "list_drawing_dimensions",
+    "Read-only: every visible dimension on every sheet of the active drawing, or on one view, with its sheet, the "
+    "view it sits in, the model dimension behind it (full_name, as set_dimension takes it), its value, "
+    "swDimensionType_e of the display (type2), where its text sits on its sheet and whether that is outside the sheet, "
+    "whether it shows in parentheses, and the name to select it by. `duplicates` lists every model dimension visible in "
+    "more than one view of the same sheet; insert_model_annotations produces those even with duplicate_dimensions "
+    "false. Hidden dimensions, also those on a hidden drawing layer, are not listed; each entry names its layer. An "
+    "entry whose model dimension cannot be read has readable false and no full_name or value; one whose visibility "
+    "or layer cannot be read has visible null (it may be hidden) and counts for no duplicate; a walk SOLIDWORKS "
+    "refuses fails the call.",
+    {"view_name": {"type": "string", "description": "Only this view, on whichever sheet it is."}},
+)
+def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    view_name = args.get("view_name")
+    if view_name and _view_sheet(doc, str(view_name)) is None:
+        return result(False, f"No view named '{view_name}' on any sheet.")
+    entries = _all_dimensions(doc, {str(view_name)} if view_name else None)
+    return result(True, f"Read {len(entries)} dimensions.", dimensions=entries, duplicates=_duplicates(entries),
+                  outside_sheet=_outside_sheet(entries))
+
+
+@drawing_tool(
+    "hide_drawing_dimensions",
+    "Hide dimensions on the active drawing: name each by its view and the full_name list_drawing_dimensions reports. "
+    "Per sheet, every display of that model dimension in that view is selected by name, then one HideDimension acts "
+    "on all of them; a view on another sheet has its sheet activated for that and the previous sheet activated again. "
+    "The part is not changed. Succeeds only when the list read afterwards is readable in those views and none of them "
+    "is still in it; a dimension that is already hidden is not listed and counts as not on the drawing.",
+    {
+        "dimensions": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"view": {"type": "string"}, "full_name": {"type": "string"}},
+                      "required": ["view", "full_name"]},
+        },
+    },
+    ["dimensions"],
+)
+def hide_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    wanted = [(str(d.get("view", "")), str(d.get("full_name", ""))) for d in (args.get("dimensions") or [])
+              if isinstance(d, dict)]
+    if not wanted:
+        return result(False, "Name at least one dimension as {view, full_name}.")
+    targets = set(wanted)
+    views = {v for v, _ in targets}
+    entries = _all_dimensions(doc, views)
+    found = [e for e in entries if (e["view"], e.get("full_name", "")) in targets]
+    missing = sorted({f"{v}: {n}" for v, n in targets} - {f"{e['view']}: {e.get('full_name', '')}" for e in found})
+    selected, unselected = 0, []
+    for sheet in sorted({e["sheet"] for e in found}):
+        on_sheet = [e for e in found if e["sheet"] == sheet]
+
+        def act(on_sheet: list[dict[str, Any]] = on_sheet) -> int:
+            clear_selection(doc)
+            missed = _select_dimensions(doc, on_sheet)
+            unselected.extend(missed)
+            if len(missed) < len(on_sheet):
+                flag_methods(doc, "HideDimension").HideDimension()
+            return len(on_sheet) - len(missed)
+
+        selected += _on_sheet(doc, sheet, act)
+    rebuild(doc)
+    after = _all_dimensions(doc, views)
+    remaining = sorted({f"{e['view']}: {e.get('full_name')}" for e in after
+                        if e.get("readable") and e.get("visible") and (e["view"], e.get("full_name", "")) in targets})
+    # an entry that cannot be read could be one of the targets: what it is, or whether it shows, is not known
+    unreadable = sorted({e["view"] for e in after if not e.get("readable") or e.get("visible") is None})
+    ok = selected > 0 and not remaining and not missing and not unselected and not unreadable
+    if ok:
+        message = f"Hid {selected} dimensions."
+    else:
+        parts = []
+        if missing:
+            parts.append(f"not on the drawing: {', '.join(missing)}")
+        if unselected:
+            parts.append(f"could not be selected: {', '.join(unselected)}")
+        if remaining:
+            parts.append(f"still visible: {', '.join(remaining)}")
+        if unreadable:
+            parts.append(f"not readable afterwards in: {', '.join(unreadable)}")
+        message = "Not every dimension went away; " + "; ".join(parts or ["nothing was selected"]) + "."
+    everything = _all_dimensions(doc)
+    return result(ok, message, selected=selected, missing=missing, unselected=unselected, remaining=remaining,
+                  unreadable_views=unreadable, dimensions_left=len(everything), duplicates=_duplicates(everything))
+
+
+@drawing_tool(
+    "arrange_drawing_dimensions",
+    "Auto-arrange the visible dimensions of one drawing view (AlignDimensions with AutoArrange): SOLIDWORKS "
+    "spaces them out from the view at spacing_mm; a view on another sheet has its sheet activated for that and the "
+    "previous sheet activated again. Fails, arranging nothing, when not every visible dimension of the view can be "
+    "selected or for one of them it cannot be read whether it shows (visibility_unknown). Reports, read back, how "
+    "many dimension texts lie outside the view's sheet before and after and how many moved.",
+    {
+        "view_name": {"type": "string"},
+        "spacing_mm": {"type": "number", "default": 6, "description": "Space between dimension lines."},
+    },
+    ["view_name"],
+)
+def arrange_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    view_name = str(args["view_name"])
+    sheet = _view_sheet(doc, view_name)
+    if sheet is None:
+        return result(False, f"No view named '{view_name}' on any sheet.")
+    before = _all_dimensions(doc, {view_name})
+    if not before:
+        return result(True, f"View '{view_name}' carries no visible dimension; nothing to arrange.", arranged=0,
+                      selected=0, outside_before=0, outside_after=0)
+    unknown = sum(1 for e in before if e.get("visible") is None)
+    if unknown:
+        # one of them may be hidden: selecting it for the arrangement could act on what should stay hidden
+        return result(False, f"Did not arrange '{view_name}': for {unknown} of its dimensions it cannot be read "
+                      "whether they show.", arranged=0, selected=0, visibility_unknown=unknown,
+                      outside_before=_outside_sheet(before), outside_after=_outside_sheet(before))
+
+    def act() -> tuple[int, bool]:
+        clear_selection(doc)
+        count = len(before) - len(_select_dimensions(doc, before))
+        if count != len(before):
+            return count, False
+        # swAlignDimensionType_AutoArrange = 0
+        spacing = to_m(float(args.get("spacing_mm", 6)))
+        return count, bool(flag_methods(extension(doc), "AlignDimensions").AlignDimensions(0, spacing))
+
+    selected, aligned = _on_sheet(doc, sheet, act)
+    rebuild(doc)
+    after = _all_dimensions(doc, {view_name})
+    where = {e.get("selection_name"): e.get("text_mm") for e in before}
+    moved = sum(1 for e in after if e.get("selection_name") in where and e.get("text_mm") != where[e["selection_name"]])
+    return result(
+        aligned,
+        f"Arranged {selected} dimensions in '{view_name}'." if aligned
+        else f"Did not arrange the dimensions of '{view_name}': {selected} of {len(before)} could be selected"
+             + ("." if selected < len(before) else ", and AlignDimensions returned false."),
+        arranged=selected if aligned else 0, selected=selected, moved=moved, outside_before=_outside_sheet(before),
+        outside_after=_outside_sheet(after),
+    )
+
+
+@drawing_tool(
+    "delete_drawing_view",
+    "Delete a drawing view on the active sheet. For a section view, also delete its cutting line from the parent "
+    "view, which SOLIDWORKS otherwise leaves behind. Both are read back afterwards: succeeds only when the view is "
+    "gone and, for a section view, its cutting line too (removed, line_removed; line_removed null: no cutting line "
+    "found, which fails a section view; parent: the view that held it).",
+    {"name": {"type": "string", "description": "View name from list_drawing_views."}},
+    ["name"],
+)
+def delete_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    name = str(args["name"])
+    view = _find_view(doc, name)
+    if view is None:
+        return result(False, f"No view named '{name}'. Call list_drawing_views for the names.")
+    section = int(_read(view, "Type") or 0) == 2
+    gone, line_removed, parent = _delete_view_and_line(doc, name)
+    # a section view always has a cutting line: one that cannot be found is not proven gone
+    ok = gone and (line_removed is True if section else line_removed is not False)
+    return result(ok, f"Deleted view '{name}'" + (" and its cutting line." if line_removed else ".") if ok
+                  else f"View '{name}' was not deleted completely (view gone: {gone}, cutting line removed: "
+                       f"{line_removed}).", removed=gone, line_removed=line_removed, parent=parent)
+
+
+@drawing_tool(
     "activate_drawing_view",
     "Make a drawing view the active one, which is what section, detail, projected views and "
     "sketching inside a view all operate on.",
@@ -778,13 +1400,13 @@ def list_drawing_views(args: dict[str, Any]) -> dict[str, Any]:
     ["name"],
 )
 def activate_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     name = str(args["name"])
     ok = bool(doc.ActivateView(name))
     return result(ok, f"Activated view '{name}'." if ok else f"No view named '{name}'.")
 
 
-@tool(
+@drawing_tool(
     "create_drawing_sketch",
     "Open a 2D sketch in a drawing view. Use draw_line or draw_circle next to define a section or "
     "detail boundary; the sketch remains open and its geometry selected for insert_section_view or "
@@ -792,7 +1414,7 @@ def activate_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
     {"view_name": {"type": "string", "description": "Parent view to sketch in. Defaults to the active drawing view."}},
 )
 def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     view = _activate(doc, args.get("view_name"))
     name = str(safe(view, "GetName2", "") or "")
     if not name or not bool(doc.ActivateView(name)):
@@ -804,7 +1426,7 @@ def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Opened a sketch in drawing view '{name}'.", view_name=name)
 
 
-@tool(
+@drawing_tool(
     "set_drawing_view",
     "Move, rescale, or restyle an existing drawing view. Position is millimetres from the sheet's "
     "lower-left corner.",
@@ -825,7 +1447,7 @@ def create_drawing_sketch(args: dict[str, Any]) -> dict[str, Any]:
 def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
     from .sw_core import double_array
 
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     name = str(args["name"])
     target = next((v for v in _iter_views(doc) if str(safe(v, "GetName2", "")) == name), None)
     if target is None:
@@ -833,7 +1455,7 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
 
     if args.get("x_mm") is not None and args.get("y_mm") is not None:
         target.Position = double_array([to_m(args["x_mm"]), to_m(args["y_mm"])])
-    display = _apply_view_options(target, args)
+    scale, display = _apply_view_options(target, args)
     if args.get("tangent_edges"):
         mode = {"visible": 1, "hidden": 2, "phantom": 3}[str(args["tangent_edges"])]
         try:
@@ -841,9 +1463,10 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             logger.info("Could not set tangent edge display.")
     rebuild(doc)
-    if display is not None and not display["ok"]:
-        return result(False, _display_failure([display]), view=_view_entry(target, -1), display=[display])
-    return result(True, f"Updated view '{name}'.", view=_view_entry(target, -1))
+    failure = _options_failure(scale, display)
+    if failure:
+        return result(False, failure, view=_view_entry(target, -1), **_options_data(scale, display))
+    return result(True, f"Updated view '{name}'.", view=_view_entry(target, -1), **_options_data(scale, None))
 
 
 # --------------------------------------------------------------------------
@@ -851,7 +1474,7 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@tool(
+@drawing_tool(
     "insert_model_annotations",
     "Import the model's own dimensions and annotations onto the drawing (Insert > Model Items). "
     "This is the right tool when the part was modelled with the dimensions you want shown. "
@@ -878,7 +1501,7 @@ def set_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def insert_model_annotations(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     wanted = [str(t) for t in (args.get("types") or ["marked_for_drawing", "not_marked_for_drawing"])]
     mask = 0
     for name in wanted:
@@ -934,7 +1557,7 @@ def insert_model_annotations(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-@tool(
+@drawing_tool(
     "auto_dimension_view",
     "Run DimXpert over a drawing view and generate dimensions from its geometry. Use this when the "
     "model has no dimensions worth importing; to reuse the model's own dimensions call "
@@ -949,7 +1572,7 @@ def insert_model_annotations(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def auto_dimension_view(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     if args.get("view_name"):
         if not bool(doc.ActivateView(str(args["view_name"]))):
             return result(False, f"No view named '{args['view_name']}'.")
@@ -1060,7 +1683,7 @@ def _center_mark_count(view: Any) -> int | None:
         return None
 
 
-@tool(
+@drawing_tool(
     "insert_center_marks",
     "Add center marks to the circular edges of a drawing view. By default every circle in the view "
     "gets one; pass selected_only if you have already made a selection.",
@@ -1073,7 +1696,7 @@ def _center_mark_count(view: Any) -> int | None:
     },
 )
 def insert_center_marks(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     view = _activate(doc, args.get("view_name"))
     if not bool(args.get("selected_only", False)):
         # GetVisibleEntities2 does not enumerate part-view edges reliably in
@@ -1115,7 +1738,7 @@ def insert_center_marks(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-@tool(
+@drawing_tool(
     "insert_centerlines",
     "Add centerlines to a drawing view. By default every circular edge in the view is used, which "
     "is what gives bolt circles and holes their axes.",
@@ -1125,7 +1748,7 @@ def insert_center_marks(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 def insert_centerlines(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     view = _activate(doc, args.get("view_name"))
     if not bool(args.get("selected_only", False)):
         # In a drawing, the axes of circular holes are represented by automatic
@@ -1162,7 +1785,7 @@ def insert_centerlines(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-@tool(
+@drawing_tool(
     "add_note",
     "Place a text note on the sheet, for things like a 技术要求 block. Position is millimetres from "
     "the sheet's lower-left corner. Use \\n for line breaks.",
@@ -1175,7 +1798,7 @@ def insert_centerlines(args: dict[str, Any]) -> dict[str, Any]:
     ["text", "x_mm", "y_mm"],
 )
 def add_note(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+    _, doc = require_drawing(args)
     clear_selection(doc)
     note = flag_methods(doc, "InsertNote").InsertNote(str(args["text"]))
     if note is None:
