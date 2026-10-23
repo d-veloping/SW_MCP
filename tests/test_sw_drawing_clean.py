@@ -365,6 +365,19 @@ class SectionViewTests(Base):
         self.assertEqual([line.name for line in self.parent.section_lines], ["Section Line1"])
         self.assertEqual(answer["data"]["parent_section_lines"], 1)
 
+    def test_no_view_at_all_leaves_no_cutting_line(self) -> None:
+        self.doc.next_section = None   # CreateSectionViewAt5 returns null, the line became a cutting line anyway
+        answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
+                                                 "place_x_mm": 80, "place_y_mm": 50, "parent_view": "Drawing View1"})
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["line_removed"], True)
+        self.assertEqual(self.parent.section_lines, [])
+        # the label is free again
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        self.assertTrue(sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
+                                                        "place_x_mm": 80, "place_y_mm": 150,
+                                                        "parent_view": "Drawing View1"})["ok"])
+
     def test_deleting_a_section_view_takes_its_cutting_line(self) -> None:
         self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
         sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,

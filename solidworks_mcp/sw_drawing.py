@@ -705,6 +705,22 @@ def _delete_section_line(doc: Any, line: Any) -> bool:
     return bool(name) and _delete_selected(doc, name, "SECTIONLINE")
 
 
+def _delete_entity(doc: Any, entity: Any) -> bool:
+    """Select one sketch entity directly and delete it; False when SOLIDWORKS refuses, never raises."""
+    try:
+        clear_selection(doc)
+        from .sw_core import select_object
+
+        if not select_object(doc, entity, mark=0, append=False):
+            return False
+        return bool(flag_methods(extension(doc), "DeleteSelection2").DeleteSelection2(0))
+    except Exception:
+        logger.info("Could not delete the reference geometry drawn for a section.", exc_info=True)
+        return False
+    finally:
+        clear_selection(doc)
+
+
 def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, Any]:
     """Activate a view, draw one entity inside it, and leave it selected.
 
@@ -766,6 +782,7 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_drawing()
     parent = args.get("parent_view")
     line_mm: list[float] | None = None
+    drawn: Any = None
     label = str(args.get("label", "A"))
     if label in _section_labels(doc):
         # two lines with one label would make the clean-up and delete_drawing_view ambiguous
@@ -800,7 +817,7 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
             b = _sketch_point(view, line_mm[2], line_mm[3])
             return sm.CreateLine(a[0], a[1], 0.0, b[0], b[1], 0.0)
 
-        parent, _ = _draw_in_view(doc, parent, draw)
+        parent, drawn = _draw_in_view(doc, parent, draw)
 
     # every view's cutting lines before the call: the view that gains one is the parent, also with use_selection and
     # no parent_view named
@@ -816,11 +833,19 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
     )
     extra: dict[str, Any] = {"line_mm": [round(c, 4) for c in line_mm]} if line_mm else {}
     if view is None:
+        # no view, but SOLIDWORKS may still have turned the drawn line into a cutting line (which would also hold the
+        # label), or left the sketch line in the parent: remove what this call created
+        owner, added = _new_section_lines(doc, lines_before)
+        line_removed = all([_delete_section_line(doc, line) for line in added]) if added else None
+        sketch_removed = _delete_entity(doc, drawn) if drawn is not None and not added else None
         return result(
             False,
             "SOLIDWORKS did not create the section view. Check that the cutting line actually "
-            "crosses the parent view's geometry.",
-            parent=parent, **extra,
+            "crosses the parent view's geometry."
+            + (" Its cutting line could not be deleted and is still in the parent view." if line_removed is False
+               else " The drawn line could not be deleted and is still in the parent view." if sketch_removed is False
+               else ""),
+            parent=owner or parent, line_removed=line_removed, sketch_line_removed=sketch_removed, **extra,
         )
     rebuild(doc)
     entry = _view_entry(view, -1)
