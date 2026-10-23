@@ -41,7 +41,7 @@ class Transform:
 
 
 class Dimension:
-    def __init__(self, full_name: str, value_m: float, kind: int = 2) -> None:
+    def __init__(self, full_name: str, value_m: float, kind: int = 1) -> None:   # swDimensionParamType_e
         self.FullName = full_name
         self.SystemValue = value_m
         self.kind = kind
@@ -92,6 +92,7 @@ class View:
         self.name = name
         self.Type = kind
         self.Position = position
+        self.Angle = 0.0
         self.ScaleDecimal = scale
         self.outline = outline
         self.hatches = hatches
@@ -171,6 +172,8 @@ class Extension:
     def __init__(self, doc: "Drawing") -> None:
         self.doc = doc
         self.deleted = 0
+        self.no_effect: set[type] = set()   # DeleteSelection2 says True and leaves these kinds where they are
+        self.align_moves = True
 
     def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
         pass
@@ -191,10 +194,16 @@ class Extension:
 
     def AlignDimensions(self, kind, spacing):  # noqa: N802 - COM member name
         self.doc.aligned.append((kind, round(spacing, 6), len(self.doc.selection)))
+        if self.align_moves:
+            for item in self.doc.selection:
+                x, y, z = item.annotation.position
+                item.annotation.position = (x, y - 0.006, z)
         return True
 
     def DeleteSelection2(self, options):  # noqa: N802 - COM member name
         for item in list(self.doc.selection):
+            if type(item) in self.no_effect:
+                continue
             if isinstance(item, View):
                 self.doc.views.remove(item)
             elif isinstance(item, SectionLine):
@@ -368,40 +377,87 @@ class SectionViewTests(Base):
         self.assertEqual([line.name for line in self.parent.section_lines], ["Section Line1"])
         self.assertEqual(answer["data"]["parent_section_lines"], 1)
 
-    def test_no_view_at_all_leaves_no_cutting_line(self) -> None:
+    def test_no_view_at_all_fails_and_reads_the_parent_back(self) -> None:
         self.doc.next_section = None   # CreateSectionViewAt5 returns null, the line became a cutting line anyway
         answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
                                                  "place_x_mm": 80, "place_y_mm": 50, "parent_view": "Drawing View1"})
         self.assertFalse(answer["ok"])
-        self.assertIs(answer["data"]["line_removed"], True)
-        self.assertEqual(self.parent.section_lines, [])
-        # the label is free again
-        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
-        self.assertTrue(sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
-                                                        "place_x_mm": 80, "place_y_mm": 150,
-                                                        "parent_view": "Drawing View1"})["ok"])
+        self.assertEqual(answer["data"]["parent_section_lines"], 1)
+        self.assertIn("may still be in the parent view", answer["message"])
 
-    def test_no_view_and_no_cutting_line_deletes_the_drawn_line(self) -> None:
-        self.doc.next_section, self.doc.null_makes_line = None, False
-        args = {"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20, "place_x_mm": 80, "place_y_mm": 50,
-                "parent_view": "Drawing View1"}
-        answer = sw_drawing.insert_section_view(args)
+    def test_a_view_that_cut_nothing_and_whose_line_stays_says_so(self) -> None:
+        # SOLIDWORKS answers True for the deletion of the cutting line and leaves it
+        self.doc.extension.no_effect = {SectionLine}
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=0)
+        answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
+                                                 "place_x_mm": 80, "place_y_mm": 150})
         self.assertFalse(answer["ok"])
-        self.assertEqual((answer["data"]["line_removed"], answer["data"]["sketch_line_removed"]), (None, True))
-        # drawing the line still selects it, only selecting it again for the deletion fails
-        with unittest.mock.patch.object(sw_core, "select_object", side_effect=[True, False]):
-            answer = sw_drawing.insert_section_view(dict(args, label="B"))
-        self.assertIs(answer["data"]["sketch_line_removed"], False)
-        self.assertIn("drawn line could not be deleted", answer["message"])
+        self.assertEqual((answer["data"]["removed"], answer["data"]["line_removed"]), (True, False))
+        self.assertEqual(answer["data"]["parent_section_lines"], 1)
+        self.assertIn("cutting line is still in the parent view", answer["message"])
 
-    def test_no_view_and_a_cutting_line_that_stays_is_reported(self) -> None:
-        self.doc.next_section = None
-        with unittest.mock.patch.object(sw_drawing, "_delete_section_line", return_value=False):
-            answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
-                                                     "place_x_mm": 80, "place_y_mm": 50, "parent_view": "Drawing View1"})
-        self.assertIs(answer["data"]["line_removed"], False)
-        self.assertIsNone(answer["data"]["sketch_line_removed"])
-        self.assertIn("cutting line could not be deleted", answer["message"])
+    def test_a_view_that_stays_although_deletion_said_true_fails(self) -> None:
+        self.doc.extension.no_effect = {View}
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=0)
+        answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
+                                                 "place_x_mm": 80, "place_y_mm": 150})
+        self.assertIs(answer["data"]["removed"], False)
+        self.assertIn("could not be deleted and is still on the sheet", answer["message"])
+
+    def test_delete_trusts_the_drawing_not_the_answer(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        for kinds, removed, line_removed in (({SectionLine}, True, False), ({View}, False, True)):
+            with self.subTest(stays=kinds):
+                self.setUp()
+                self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+                sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
+                                                "place_x_mm": 80, "place_y_mm": 150, "parent_view": "Drawing View1"})
+                self.doc.extension.no_effect = kinds
+                answer = sw_drawing.delete_drawing_view({"name": "Section View A-A"})
+                self.assertFalse(answer["ok"])
+                self.assertEqual((answer["data"]["removed"], answer["data"]["line_removed"]), (removed, line_removed))
+
+    def test_unreadable_cutting_lines_fail_instead_of_counting_as_none(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+
+        def refused():
+            raise OSError("COM")
+        self.parent.GetSectionLines = refused
+        answer = sw_drawing.delete_drawing_view({"name": "Section View A-A"})
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["readable"], False)
+        self.assertIn("Section View A-A", [v.name for v in self.doc.views])   # nothing deleted
+        listed = sw_drawing.list_drawing_views({})["data"]["views"]
+        self.assertIsNone(next(v for v in listed if v["name"] == "Drawing View1")["section_lines"])
+
+    def test_an_unreadable_view_chain_fails(self) -> None:
+        def refused():
+            raise OSError("COM")
+        self.parent.GetNextView = refused
+        for call in (lambda: sw_drawing.list_drawing_views({}),
+                     lambda: sw_drawing.delete_drawing_view({"name": "Drawing View1"})):
+            answer = call()
+            self.assertFalse(answer["ok"])
+            self.assertIn("could not read GetNextView", answer["message"])
+
+    def test_unreadable_position_or_a_rotated_parent_draws_nothing(self) -> None:
+        for change, expected in ((lambda v: setattr(v, "Position", None), "no usable position"),
+                                 (lambda v: setattr(v, "ScaleDecimal", 0.0), "no usable scale"),
+                                 (lambda v: setattr(v, "Angle", 0.5), "is rotated")):
+            with self.subTest(expected=expected):
+                self.setUp()
+                change(self.parent)
+                self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+                answer = sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
+                                                         "place_x_mm": 80, "place_y_mm": 150,
+                                                         "parent_view": "Drawing View1"})
+                self.assertFalse(answer["ok"])
+                self.assertIn(expected, answer["message"])
+                self.assertEqual((self.doc.sketch.lines, self.doc.section_calls), ([], []))
 
     def test_deleting_a_section_view_takes_its_cutting_line(self) -> None:
         self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
@@ -616,12 +672,55 @@ class DimensionTests(Base):
         self.assertEqual(answer["data"]["duplicates"], {})
         self.assertEqual(answer["data"]["dimensions_left"], 2)
 
-    def test_delete_mode_deletes(self) -> None:
-        answer = sw_drawing.hide_drawing_dimensions({"mode": "delete", "dimensions": [
-            {"view": "Section View A-A", "full_name": "D2@Skizze1@Teil.Part"}]})
+    def test_an_unreadable_walk_fails_and_never_proves_hidden(self) -> None:
+        def refused():
+            raise OSError("COM")
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
+            {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
         self.assertTrue(answer["ok"], answer)
-        self.assertEqual(self.doc.extension.deleted, 1)
-        self.assertEqual(len(self.section.displays), 1)
+        self.parent.GetFirstDisplayDimension5 = refused
+        for call in (lambda: sw_drawing.list_drawing_dimensions({}),
+                     lambda: sw_drawing.hide_drawing_dimensions({"dimensions": [
+                         {"view": "Drawing View1", "full_name": "D2@Skizze1@Teil.Part"}]})):
+            answer = call()
+            self.assertFalse(answer["ok"])
+            self.assertIn("GetFirstDisplayDimension5", answer["message"])
+
+    def test_an_unreadable_model_dimension_is_marked_and_blocks_proof(self) -> None:
+        self.parent.displays[1].dimension = Dimension("D2@Skizze1@Teil.Part", None)
+        listed = sw_drawing.list_drawing_dimensions({})["data"]["dimensions"]
+        broken = [d for d in listed if not d["readable"]]
+        self.assertEqual(len(broken), 1)
+        self.assertNotIn("full_name", broken[0])
+        self.assertFalse({"value_mm", "value_deg"} & set(broken[0]))
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
+            {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["unreadable_views"], ["Drawing View1"])
+
+    def test_dimension_kinds_follow_the_parameter_type(self) -> None:
+        import math
+        self.section.displays[0].dimension = Dimension("A1@Skizze1@Teil.Part", math.radians(30), kind=2)
+        self.section.displays[1].dimension = Dimension("D1@LPattern1@Teil.Part", 4, kind=3)
+        listed = sw_drawing.list_drawing_dimensions({"view_name": "Section View A-A"})["data"]["dimensions"]
+        self.assertAlmostEqual(listed[0]["value_deg"], 30.0)
+        self.assertEqual((listed[1]["value"], "value_mm" in listed[1]), (4, False))
+
+    def test_going_back_to_the_previous_sheet_is_checked(self) -> None:
+        self.second_sheet()
+        self.doc.ActivateSheet = lambda name: (setattr(self.doc, "current", name) or name == "Sheet2")
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [{"view": "Drawing View5",
+                                                                     "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertFalse(answer["ok"])
+        self.assertIn("Could not activate sheet 'Sheet1' again", answer["message"])
+
+    def test_arrange_reports_what_moved(self) -> None:
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
+        self.assertEqual(answer["data"]["moved"], 2)
+        self.doc.extension.align_moves = False   # SOLIDWORKS answers True and moves nothing
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["data"]["moved"], 0)
 
     def test_a_name_that_is_not_there_fails_and_names_it(self) -> None:
         answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
@@ -636,6 +735,68 @@ class DimensionTests(Base):
             {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["data"]["remaining"], ["Drawing View1: D1@Skizze1@Teil.Part"])
+
+
+REQUIRE_DRAWING = sw_drawing.require_drawing
+
+
+class BindingTests(Base):
+    """`document` binds a call to one drawing, checked in the same call; scale and display mode count when read back."""
+
+    def bound(self, title: str = "Teil - Blatt1"):
+        self.doc.GetTitle = lambda: title
+        self.doc.GetType = lambda: 3
+        return (unittest.mock.patch.object(sw_drawing, "require_drawing", REQUIRE_DRAWING),
+                unittest.mock.patch.object(sw_drawing, "active_document", return_value=(None, self.doc)))
+
+    def test_another_active_document_changes_nothing(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        first, second = self.bound("Fremd - Blatt1")
+        with first, second:
+            for call in (lambda a: sw_drawing.delete_drawing_view(dict(a, name="Section View A-A")),
+                         lambda a: sw_drawing.hide_drawing_dimensions(dict(a, dimensions=[{"view": "x", "full_name": "y"}])),
+                         lambda a: sw_drawing.arrange_drawing_dimensions(dict(a, view_name="Drawing View1")),
+                         lambda a: sw_drawing.list_drawing_views(a)):
+                answer = call({"document": "Teil - Blatt1"})
+                self.assertFalse(answer["ok"])
+                self.assertEqual(answer["data"]["active_document"], "Fremd - Blatt1")
+        self.assertIn("Section View A-A", [v.name for v in self.doc.views])
+        self.assertEqual(self.doc.aligned, [])
+
+    def test_the_named_document_goes_ahead(self) -> None:
+        first, second = self.bound()
+        with first, second:
+            self.assertTrue(sw_drawing.list_drawing_views({"document": "Teil - Blatt1"})["ok"])
+            self.assertTrue(sw_drawing.list_drawing_views({})["ok"])
+
+    def test_every_drawing_tool_takes_document(self) -> None:
+        names = {t.name for t in sw_core.TOOLS if "document" in t.inputSchema["properties"]}
+        drawing = {name for name, fn in sw_core.HANDLERS.items() if fn.__module__ == sw_drawing.__name__}
+        self.assertEqual(drawing - names, {"create_drawing"})
+
+    def test_a_scale_that_does_not_read_back_fails(self) -> None:
+        class Stubborn(View):
+            @property
+            def ScaleDecimal(self):  # noqa: N802 - COM member name
+                return 1.0
+
+            @ScaleDecimal.setter
+            def ScaleDecimal(self, value):  # noqa: N802 - COM member name
+                pass
+        placed = []
+        self.doc.CreateDrawViewFromModelView3 = lambda *a: placed.append(Stubborn("Drawing View2")) or placed[-1]
+        with unittest.mock.patch.object(sw_drawing, "_open_model_path", return_value="C:/m/teil.sldprt"), \
+                unittest.mock.patch.object(sw_drawing, "_model_view_name", return_value="*Front"):
+            answer = sw_drawing.insert_model_view({"x_mm": 100, "y_mm": 100, "scale": 0.5})
+            self.assertFalse(answer["ok"])
+            self.assertEqual(answer["data"]["scale"], {"view": "Drawing View2", "requested": 0.5, "actual": 1.0,
+                                                       "ok": False})
+            self.assertIn("did not apply scale 0.5", answer["message"])
+            answer = sw_drawing.insert_model_view({"x_mm": 100, "y_mm": 100, "scale": 1.0})
+            self.assertTrue(answer["ok"], answer)
+            self.assertTrue(answer["data"]["scale"]["ok"])
 
 
 class AxisPointTests(unittest.TestCase):

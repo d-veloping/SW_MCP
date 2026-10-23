@@ -495,7 +495,7 @@ class SelectionSpecTests(unittest.TestCase):
 class FakeDimension:
     """A dimension as list_dimensions reads it; `state` is DrivenState, an exception instance makes it unreadable."""
 
-    def __init__(self, name: str, state, kind: int = 2, system_value: float = 0.01) -> None:
+    def __init__(self, name: str, state, kind: int = 1, system_value: float = 0.01) -> None:   # swDimensionParamType_e
         self.Name = name
         self.FullName = f"{name}@Skizze1"
         self.SystemValue = system_value
@@ -572,10 +572,13 @@ class ListDimensionsDrivenTests(unittest.TestCase):
     def test_angular_dimension_keeps_value_deg(self) -> None:
         import math
 
-        row, = self.listed(FakeDimension("A1", 1, kind=3, system_value=math.radians(15)))
+        row, count = self.listed(FakeDimension("A1", 1, kind=2, system_value=math.radians(15)),
+                                 FakeDimension("D1", 2, kind=3, system_value=6))
         self.assertAlmostEqual(row["value_deg"], 15.0)
         self.assertNotIn("value_mm", row)
         self.assertEqual((row["driven"], row["driven_state"]), (True, 1))
+        # swDimensionParamTypeInteger: a pattern count is neither a length nor an angle
+        self.assertEqual((count["value"], "value_mm" in count, "value_deg" in count), (6, False, False))
 
 
 if __name__ == "__main__":

@@ -233,7 +233,16 @@ default), `hidden_lines_visible` (hidden edges dashed, so bores and steps show
 without a section), `wireframe`, `shaded`, `shaded_with_edges`. The style counts
 as applied only when it reads back from the view; otherwise the tool returns
 `ok: false` with the style each view ended up in. `insert_standard_views`
-applies it only to the views it places.
+applies it only to the views it places. A `scale` on `insert_model_view` or
+`set_drawing_view` counts the same way: it must read back from the view.
+
+Every tool that works on the active drawing takes an optional `document` (the
+drawing's title). When another document is active, the call is refused with
+`ok: false` and `active_document`, and nothing is changed; the check runs in the
+same call. A read SOLIDWORKS refuses where the answer proves something (the view
+chain, cutting lines, the dimension walk) fails the call instead of counting as
+"none there"; a dimension whose model dimension cannot be read is listed with
+`readable: false`.
 
 `insert_section_view` takes the cutting line as two sheet points or as a model
 point it passes through (`through_model_mm`) plus `direction`, and draws it in
@@ -242,9 +251,13 @@ view scale`, not sheet millimetres. Drawn at sheet coordinates the line lies
 beside the part and SOLIDWORKS still creates a "section view" that cuts nothing
 (issue #2). The tool succeeds only when the new view is a section with hatched
 faces; otherwise it deletes the view and its cutting line again and returns
-`ok: false`. When SOLIDWORKS returns no view at all, it deletes the cutting
-line or sketch line the call made (`line_removed`, `sketch_line_removed`). `delete_drawing_view` removes a section view together with its
-cutting line, which SOLIDWORKS otherwise leaves in the parent.
+`ok: false`. When SOLIDWORKS returns no view at all, the call fails and the line
+it drew may remain in the parent (`parent_section_lines` is read back). The
+parent must not be rotated; an unreadable position, scale or angle fails the
+call. `delete_drawing_view` removes a section view together with its cutting
+line, which SOLIDWORKS otherwise leaves in the parent. Deletions are read back:
+`DeleteSelection2` also answers true for what stays, so `removed` and
+`line_removed` say what is gone from the drawing afterwards.
 `insert_detail_view` converts its circle the same way. `list_drawing_views`
 reports each view's outline, hatched faces, section lines and the transform
 from model to sheet millimetres.
@@ -253,9 +266,11 @@ from model to sheet millimetres.
 also with `duplicate_dimensions: false` and also when called view by view
 (measured on 2016 SP3: 3 to 41 duplicates per part). `list_drawing_dimensions`
 lists every visible dimension of every sheet (not those hidden or on a hidden
-layer) with its sheet, view, layer, model dimension and text position and names the duplicates within a sheet; `hide_drawing_dimensions` hides or deletes a list of
+layer) with its sheet, view, layer, model dimension and text position and names the duplicates within a sheet. The
+value key follows the model dimension's kind: `value_mm` for a length, `value_deg` for an angle, `value` for an integer
+such as a pattern count. `hide_drawing_dimensions` hides a list of
 them in one selection and one call (the part stays unchanged), and
-`arrange_drawing_dimensions` auto-arranges one view's dimensions, all or none.
+`arrange_drawing_dimensions` auto-arranges one view's dimensions, all or none, and reports how many texts moved.
 Both activate the view's sheet for that and the previous sheet again afterwards.
 A section label already used on the sheet is refused. A dimension is
 selected by its selection name: `IAnnotation.Select3` does not select drawing

@@ -26,6 +26,7 @@ metres and radians throughout, so conversion happens once, at this boundary.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
@@ -183,15 +184,32 @@ TOOLS: list[Tool] = []
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
 
+class ToolFailure(RuntimeError):
+    """A tool cannot give a truthful answer: a read SOLIDWORKS refused, or the active document is not the one the
+    caller named. The handler returns ok false with this message and `data` instead of raising, so a caller that
+    calls handlers directly can tell it from a lost session."""
+
+    def __init__(self, message: str, **data: Any) -> None:
+        super().__init__(message)
+        self.data = data
+
+
 def tool(
     name: str,
     description: str,
     properties: dict[str, Any] | None = None,
     required: Sequence[str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register one MCP tool and its handler."""
+    """Register one MCP tool and its handler; a ToolFailure inside the handler becomes its ok false answer."""
 
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(tool_fn)
+        def fn(args: dict[str, Any]) -> Any:
+            try:
+                return tool_fn(args)
+            except ToolFailure as exc:
+                return result(False, str(exc), **exc.data)
+
         TOOLS.append(
             Tool(
                 name=name,
@@ -245,6 +263,16 @@ def to_rad(value: float) -> float:
 
 def to_deg(value: float) -> float:
     return math.degrees(float(value))
+
+
+def dimension_value(kind: int, system_value: float) -> dict[str, Any]:
+    """A model dimension's value under the key its kind asks for. `kind` is IDimension.GetType, swDimensionParamType_e:
+    2 an angle (value_deg), 3 an integer such as a pattern count (value), anything else a length (value_mm)."""
+    if kind == 2:
+        return {"value_deg": round(to_deg(system_value), 6)}
+    if kind == 3:
+        return {"value": int(round(float(system_value)))}
+    return {"value_mm": round(to_mm(system_value), 6)}
 
 
 def mm_point(point: Iterable[float]) -> list[float]:
