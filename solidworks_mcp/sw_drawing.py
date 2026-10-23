@@ -1122,18 +1122,21 @@ def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
 def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
     """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size. A
     display the walk returns although it is hidden (documented for suppressed dimensions) is left out, and so is one
-    on a hidden drawing layer: IAnnotation.Visible does not see the layer."""
+    on a hidden drawing layer: IAnnotation.Visible does not see the layer. One whose visibility or layer cannot be
+    read stays in the list with `readable: false`: it may be hidden, and it must not pass for visible or for gone."""
     sizes: dict[str, tuple[float, float] | None] = {}
-    layers: dict[str, bool] = {}
+    layers: dict[str, bool | None] = {}
 
-    def layer_shown(name: str) -> bool:
+    def layer_shown(name: str) -> bool | None:
+        """True or False as read; None when the layer or its visibility cannot be read. A layer the manager does not
+        return (the default layer) hides nothing."""
         if name not in layers:
             try:
                 found = flag_methods(safe(doc, "GetLayerManager"), "GetLayer").GetLayer(name)
-                shown = safe(found, "Visible")
-                layers[name] = shown is None or bool(shown)
+                shown = True if found is None else value(found, "Visible")
+                layers[name] = None if shown is None else bool(shown)
             except Exception:
-                layers[name] = True   # an unreadable layer hides nothing it could be shown to hide
+                layers[name] = None
         return layers[name]
 
     entries: list[dict[str, Any]] = []
@@ -1148,8 +1151,11 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
                 sizes[sheet_name] = None
         for display in _display_dimensions(view):
             entry = _dimension_entry(name, display)
-            if entry.get("visible") is False or (entry.get("layer") and not layer_shown(entry["layer"])):
+            shown = layer_shown(entry["layer"]) if entry.get("layer") else True
+            if entry.get("visible") is False or shown is False:
                 continue
+            if entry.get("visible") is None or shown is None:
+                entry["readable"] = False
             entry["sheet"] = sheet_name
             size = sizes[sheet_name]
             text = entry.get("text_mm")
@@ -1168,7 +1174,7 @@ def _duplicates(entries: list[dict[str, Any]]) -> dict[str, list[str]]:
     deliberate repeat, not a duplicate. Keyed `full_name` on a single sheet, `full_name @ sheet` otherwise."""
     views: dict[tuple[str, str], list[str]] = {}
     for entry in entries:
-        if entry.get("full_name") and entry.get("visible") is not False:
+        if entry.get("full_name") and entry.get("readable"):
             views.setdefault((entry["full_name"], entry.get("sheet", "")), []).append(entry["view"])
     one_sheet = len({sheet for _, sheet in views}) <= 1
     return {(name if one_sheet else f"{name} @ {sheet}"): found for (name, sheet), found in views.items()
@@ -1222,8 +1228,8 @@ def _select_dimensions(doc: Any, entries: list[dict[str, Any]]) -> list[str]:
     "whether it shows in parentheses, and the name to select it by. `duplicates` lists every model dimension visible in "
     "more than one view of the same sheet; insert_model_annotations produces those even with duplicate_dimensions "
     "false. Hidden dimensions, also those on a hidden drawing layer, are not listed; each entry names its layer. An "
-    "entry whose model dimension cannot be read has readable false and no full_name or value; a walk SOLIDWORKS "
-    "refuses fails the call.",
+    "entry whose model dimension cannot be read has readable false and no full_name or value, and so does one "
+    "whose visibility or layer cannot be read (it keeps its name); a walk SOLIDWORKS refuses fails the call.",
     {"view_name": {"type": "string", "description": "Only this view, on whichever sheet it is."}},
 )
 def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
@@ -1306,7 +1312,7 @@ def hide_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     "Auto-arrange the visible dimensions of one drawing view (AlignDimensions with AutoArrange): SOLIDWORKS "
     "spaces them out from the view at spacing_mm; a view on another sheet has its sheet activated for that and the "
     "previous sheet activated again. Fails, arranging nothing, when not every visible dimension of the view can be "
-    "selected. Reports, read back, how many dimension texts lie outside the view's sheet before and after and how "
+    "selected or one of them cannot be read. Reports, read back, how many dimension texts lie outside the view's sheet before and after and how "
     "many moved.",
     {
         "view_name": {"type": "string"},
@@ -1324,6 +1330,12 @@ def arrange_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     if not before:
         return result(True, f"View '{view_name}' carries no visible dimension; nothing to arrange.", arranged=0,
                       selected=0, outside_before=0, outside_after=0)
+    unreadable = sum(1 for e in before if not e.get("readable"))
+    if unreadable:
+        # one of them may be hidden: selecting it for the arrangement could act on what should stay hidden
+        return result(False, f"Did not arrange '{view_name}': {unreadable} of its dimensions cannot be read.",
+                      arranged=0, selected=0, unreadable=unreadable, outside_before=_outside_sheet(before),
+                      outside_after=_outside_sheet(before))
 
     def act() -> tuple[int, bool]:
         clear_selection(doc)

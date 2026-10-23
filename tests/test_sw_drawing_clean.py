@@ -585,7 +585,7 @@ class DimensionTests(Base):
         self.assertIn("Maße", [d["layer"] for d in listed])
         self.assertTrue(sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})["ok"])
 
-    def test_an_unreadable_layer_hides_nothing(self) -> None:
+    def test_an_unreadable_layer_or_visibility_is_listed_as_unreadable(self) -> None:
         class Layer:
             Visible = None
 
@@ -601,7 +601,24 @@ class DimensionTests(Base):
         for display, layer in zip(self.parent.displays, ("Kaputt", "-Per Standard-")):
             display.annotation.Layer = layer
         self.section.displays[0].annotation.Layer = "Ohne Sichtbarkeit"
-        self.assertEqual(len(sw_drawing.list_drawing_dimensions({})["data"]["dimensions"]), 4)
+        self.section.displays[1].annotation.Visible = None   # IAnnotation.Visible not readable
+        unittest.mock.patch.object(View, "shown", lambda view: list(view.displays)).start()
+        self.addCleanup(unittest.mock.patch.stopall)
+        listed = sw_drawing.list_drawing_dimensions({})["data"]
+        # nothing drops out, nothing unreadable passes for visible: only the default layer is plainly readable
+        self.assertEqual([(d["view"], d["layer"], d["readable"]) for d in listed["dimensions"]],
+                         [("Drawing View1", "Kaputt", False), ("Drawing View1", "-Per Standard-", True),
+                          ("Section View A-A", "Ohne Sichtbarkeit", False), ("Section View A-A", None, False)])
+        self.assertEqual(listed["duplicates"], {})   # an unreadable entry proves no duplicate
+        # an arrangement could select a hidden one: refused, nothing selected
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual((answer["data"]["unreadable"], self.doc.aligned), (2, []))
+        # hiding cannot prove its targets gone while the view is unreadable
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
+            {"view": "Drawing View1", "full_name": "D2@Skizze1@Teil.Part"}]})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["unreadable_views"], ["Drawing View1"])
 
     def test_a_hidden_dimension_in_the_walk_is_left_out(self) -> None:
         # documented behaviour: the walk also returns suppressed dimensions
