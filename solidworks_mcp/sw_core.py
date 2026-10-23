@@ -186,8 +186,8 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
 class ToolFailure(RuntimeError):
     """A tool cannot give a truthful answer: a read SOLIDWORKS refused, or the active document is not the one the
-    caller named. The handler returns ok false with this message and `data` instead of raising, so a caller that
-    calls handlers directly can tell it from a lost session."""
+    caller named. The handler returns ok false with this message and `data` instead of raising: the call has an
+    answer, and the caller decides what an unreadable drawing means for it."""
 
     def __init__(self, message: str, **data: Any) -> None:
         super().__init__(message)

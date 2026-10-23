@@ -757,9 +757,18 @@ def _delete_selected(doc: Any, name: str, kind: str) -> None:
         clear_selection(doc)
 
 
+def _model_views(doc: Any) -> list[tuple[str, Any]]:
+    """(name, view) of every model view on the active sheet, name and type read with _read: a proof that a view is
+    gone must not rest on a name or type that could not be read."""
+    found = []
+    for view in _iter_views(doc):
+        if int(_read(view, "Type") or 0) != 1:
+            found.append((str(_read(view, "GetName2") or ""), view))
+    return found
+
+
 def _section_line_names(doc: Any) -> set[str]:
-    return {str(_read(line, "GetName") or "") for v in _iter_views(doc) if not _is_sheet(v)
-            for line in _section_lines(v)}
+    return {str(_read(line, "GetName") or "") for _, v in _model_views(doc) for line in _section_lines(v)}
 
 
 def _section_labels(doc: Any) -> set[str]:
@@ -769,13 +778,11 @@ def _section_labels(doc: Any) -> set[str]:
 
 def _section_line_of(doc: Any, view_name: str) -> tuple[str, str] | None:
     """(parent view, cutting line name) of the line whose section view is `view_name`, or None."""
-    for view in _iter_views(doc):
-        if _is_sheet(view):
-            continue
+    for parent, view in _model_views(doc):
         for line in _section_lines(view):
             section = _read(line, "GetSectionView")   # None for a line whose view is gone
             if section is not None and str(_read(section, "GetName2") or "") == view_name:
-                return str(_read(view, "GetName2") or ""), str(_read(line, "GetName") or "")
+                return parent, str(_read(line, "GetName") or "")
     return None
 
 
@@ -788,7 +795,7 @@ def _delete_view_and_line(doc: Any, name: str) -> tuple[bool, bool | None, str |
         _delete_selected(doc, line[1], "SECTIONLINE")
     rebuild(doc)
     line_gone = None if line is None else line[1] not in _section_line_names(doc)
-    return _find_view(doc, name) is None, line_gone, None if line is None else line[0]
+    return name not in {n for n, _ in _model_views(doc)}, line_gone, None if line is None else line[0]
 
 
 def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, Any]:
@@ -1099,15 +1106,16 @@ def _late_bound(obj: Any) -> Any:
 
 def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
     """(sheet name, model view) for every sheet: IDrawingDoc.GetViews gives one array per sheet, the sheet first. A
-    drawing always has a sheet, so an empty answer is an error, not an empty drawing."""
+    drawing always has a sheet, so an empty answer is an error, not an empty drawing; a sheet name or a view type that
+    cannot be read is a ToolFailure, so no view drops out of a list that proves something is gone."""
     sheets = as_list(safe(doc, "GetViews"))
     if not sheets:
         raise RuntimeError("SOLIDWORKS did not list the views of the drawing's sheets (GetViews).")
     found: list[tuple[str, Any]] = []
     for sheet_views in sheets:
         views = [_late_bound(v) for v in as_list(sheet_views)]
-        sheet_name = str(safe(views[0], "GetName2", "") or "") if views else ""
-        found.extend((sheet_name, v) for v in views[1:] if not _is_sheet(v))
+        sheet_name = str(_read(views[0], "GetName2") or "") if views else ""
+        found.extend((sheet_name, v) for v in views[1:] if int(_read(v, "Type") or 0) != 1)
     return found
 
 
@@ -1130,7 +1138,7 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
 
     entries: list[dict[str, Any]] = []
     for sheet_name, view in _views_of_every_sheet(doc):
-        name = str(safe(view, "GetName2", "") or "")
+        name = str(_read(view, "GetName2") or "")
         if view_names is not None and name not in view_names:
             continue
         if sheet_name not in sizes:
@@ -1345,18 +1353,21 @@ def arrange_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     "delete_drawing_view",
     "Delete a drawing view on the active sheet. For a section view, also delete its cutting line from the parent "
     "view, which SOLIDWORKS otherwise leaves behind. Both are read back afterwards: succeeds only when the view is "
-    "gone and its cutting line, if it had one, too (removed, line_removed; line_removed null: no cutting line found, "
-    "parent: the view that held it).",
+    "gone and, for a section view, its cutting line too (removed, line_removed; line_removed null: no cutting line "
+    "found, which fails a section view; parent: the view that held it).",
     {"name": {"type": "string", "description": "View name from list_drawing_views."}},
     ["name"],
 )
 def delete_drawing_view(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_drawing(args)
     name = str(args["name"])
-    if _find_view(doc, name) is None:
+    view = _find_view(doc, name)
+    if view is None:
         return result(False, f"No view named '{name}'. Call list_drawing_views for the names.")
+    section = int(_read(view, "Type") or 0) == 2
     gone, line_removed, parent = _delete_view_and_line(doc, name)
-    ok = gone and line_removed is not False
+    # a section view always has a cutting line: one that cannot be found is not proven gone
+    ok = gone and (line_removed is True if section else line_removed is not False)
     return result(ok, f"Deleted view '{name}'" + (" and its cutting line." if line_removed else ".") if ok
                   else f"View '{name}' was not deleted completely (view gone: {gone}, cutting line removed: "
                        f"{line_removed}).", removed=gone, line_removed=line_removed, parent=parent)

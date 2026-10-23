@@ -236,8 +236,8 @@ as applied only when it reads back from the view; otherwise the tool returns
 applies it only to the views it places. A `scale` on `insert_model_view` or
 `set_drawing_view` counts the same way: it must read back from the view.
 
-Every tool that works on the active drawing takes an optional `document` (the
-drawing's title). When another document is active, the call is refused with
+Every drawing tool (`sw_drawing`, all but `create_drawing`) takes an optional
+`document` (the drawing's title). When another document is active, the call is refused with
 `ok: false` and `active_document`, and nothing is changed; the check runs in the
 same call. A read SOLIDWORKS refuses where the answer proves something (the view
 chain, cutting lines, the dimension walk) fails the call instead of counting as

@@ -419,6 +419,42 @@ class SectionViewTests(Base):
                 self.assertFalse(answer["ok"])
                 self.assertEqual((answer["data"]["removed"], answer["data"]["line_removed"]), (removed, line_removed))
 
+    def test_a_view_that_stays_with_an_unreadable_name_is_not_gone(self) -> None:
+        # the deletion takes nothing away, and afterwards the name of the view that stayed cannot be read
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        section = self.doc.views[-1]
+        self.doc.extension.no_effect = {View, SectionLine}
+        echt = self.doc.extension.DeleteSelection2
+
+        def loeschen(options):
+            def refused():
+                raise OSError("COM")
+            section.GetName2 = refused
+            return echt(options)
+        self.doc.extension.DeleteSelection2 = loeschen
+        answer = sw_drawing.delete_drawing_view({"name": "Section View A-A"})
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["readable"], False)
+
+    def test_a_section_view_whose_line_is_not_found_is_not_deleted_completely(self) -> None:
+        self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
+        sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
+                                        "place_y_mm": 150, "parent_view": "Drawing View1"})
+        self.parent.section_lines[0].view = None   # the line no longer names its section view
+        answer = sw_drawing.delete_drawing_view({"name": "Section View A-A"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual((answer["data"]["removed"], answer["data"]["line_removed"]), (True, None))
+        self.assertEqual(len(self.parent.section_lines), 1)
+
+    def test_sheet_point_without_a_transform_fails(self) -> None:
+        self.parent.transform = Transform([1, 0, 0])
+        answer = sw_drawing.insert_section_view({"through_model_mm": [20, 0, 0], "place_x_mm": 80, "place_y_mm": 150})
+        self.assertFalse(answer["ok"])
+        self.assertIn("does not report its model transform", answer["message"])
+        self.assertEqual((self.doc.sketch.lines, self.doc.section_calls), ([], []))
+
     def test_unreadable_cutting_lines_fail_instead_of_counting_as_none(self) -> None:
         self.doc.next_section = View("Section View A-A", kind=2, hatches=2)
         sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210, "place_x_mm": 80,
@@ -714,6 +750,24 @@ class DimensionTests(Base):
         self.assertFalse(answer["ok"])
         self.assertIn("Could not activate sheet 'Sheet1' again", answer["message"])
 
+    def test_an_error_on_the_other_sheet_is_raised_even_if_going_back_fails(self) -> None:
+        self.second_sheet()
+        aufrufe = []
+
+        def aktivieren(name):
+            aufrufe.append(name)
+            self.doc.current = name
+            return len(aufrufe) == 1   # hin gelingt, zurück nicht
+
+        def kaputt():
+            raise OSError("HideDimension")
+        self.doc.ActivateSheet, self.doc.HideDimension = aktivieren, kaputt
+        with self.assertRaisesRegex(OSError, "HideDimension"):
+            sw_drawing.hide_drawing_dimensions({"dimensions": [{"view": "Drawing View5",
+                                                                "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertEqual(aufrufe, ["Sheet2", "Sheet1"])
+        self.assertEqual(self.doc.selection, [])
+
     def test_arrange_reports_what_moved(self) -> None:
         answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
         self.assertEqual(answer["data"]["moved"], 2)
@@ -770,6 +824,21 @@ class BindingTests(Base):
         with first, second:
             self.assertTrue(sw_drawing.list_drawing_views({"document": "Teil - Blatt1"})["ok"])
             self.assertTrue(sw_drawing.list_drawing_views({})["ok"])
+
+    def test_every_drawing_tool_refuses_another_document_before_acting(self) -> None:
+        first, second = self.bound("Fremd - Blatt1")
+        handlers = {name: fn for name, fn in sw_core.HANDLERS.items()
+                    if fn.__module__ == sw_drawing.__name__ and name != "create_drawing"}
+        with first, second:
+            for name, fn in sorted(handlers.items()):
+                with self.subTest(tool=name):
+                    answer = fn({"document": "Teil - Blatt1", "name": "Drawing View1", "view_name": "Drawing View1",
+                                 "x_mm": 1, "y_mm": 1, "text": "x", "place_x_mm": 1, "place_y_mm": 1,
+                                 "dimensions": [{"view": "Drawing View1", "full_name": "D"}]})
+                    self.assertFalse(answer["ok"])
+                    self.assertEqual(answer["data"]["active_document"], "Fremd - Blatt1")
+        self.assertEqual((self.doc.sketch.lines, self.doc.section_calls, self.doc.aligned), ([], [], []))
+        self.assertEqual([v.name for v in self.doc.views], ["Sheet1", "Drawing View1"])
 
     def test_every_drawing_tool_takes_document(self) -> None:
         names = {t.name for t in sw_core.TOOLS if "document" in t.inputSchema["properties"]}
