@@ -266,11 +266,12 @@ def to_deg(value: float) -> float:
 
 
 def dimension_value(kind: int, system_value: float) -> dict[str, Any]:
-    """A model dimension's value under the key its kind asks for. `kind` is IDimension.GetType, swDimensionParamType_e:
-    2 an angle (value_deg), 3 an integer such as a pattern count (value), anything else a length (value_mm)."""
-    if kind == 2:
+    """A model dimension's value under the key its kind asks for. `kind` is IDimension.GetType, swDimensionParamType_e
+    (checked 2026-10-23 in SolidWorks.Interop.swconst of 2016 SP3: linear 0, angular 1, integer 2, unknown -1):
+    1 an angle (value_deg), 2 an integer such as a pattern count (value), anything else a length (value_mm)."""
+    if kind == 1:
         return {"value_deg": round(to_deg(system_value), 6)}
-    if kind == 3:
+    if kind == 2:
         return {"value": int(round(float(system_value)))}
     return {"value_mm": round(to_mm(system_value), 6)}
 

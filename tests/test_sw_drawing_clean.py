@@ -41,7 +41,7 @@ class Transform:
 
 
 class Dimension:
-    def __init__(self, full_name: str, value_m: float, kind: int = 1) -> None:   # swDimensionParamType_e
+    def __init__(self, full_name: str, value_m: float, kind: int = 0) -> None:   # swDimensionParamType_e, 0 linear
         self.FullName = full_name
         self.SystemValue = value_m
         self.kind = kind
@@ -783,8 +783,8 @@ class DimensionTests(Base):
 
     def test_dimension_kinds_follow_the_parameter_type(self) -> None:
         import math
-        self.section.displays[0].dimension = Dimension("A1@Skizze1@Teil.Part", math.radians(30), kind=2)
-        self.section.displays[1].dimension = Dimension("D1@LPattern1@Teil.Part", 4, kind=3)
+        self.section.displays[0].dimension = Dimension("A1@Skizze1@Teil.Part", math.radians(30), kind=1)
+        self.section.displays[1].dimension = Dimension("D1@LPattern1@Teil.Part", 4, kind=2)
         listed = sw_drawing.list_drawing_dimensions({"view_name": "Section View A-A"})["data"]["dimensions"]
         self.assertAlmostEqual(listed[0]["value_deg"], 30.0)
         self.assertEqual((listed[1]["value"], "value_mm" in listed[1]), (4, False))
