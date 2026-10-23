@@ -252,8 +252,8 @@ from model to sheet millimetres.
 `insert_model_annotations` puts the same model dimension into several views,
 also with `duplicate_dimensions: false` and also when called view by view
 (measured on 2016 SP3: 3 to 41 duplicates per part). `list_drawing_dimensions`
-lists every visible dimension of every sheet with its sheet, view, model
-dimension and text position and names the duplicates within a sheet; `hide_drawing_dimensions` hides or deletes a list of
+lists every visible dimension of every sheet (not those hidden or on a hidden
+layer) with its sheet, view, layer, model dimension and text position and names the duplicates within a sheet; `hide_drawing_dimensions` hides or deletes a list of
 them in one selection and one call (the part stays unchanged), and
 `arrange_drawing_dimensions` auto-arranges one view's dimensions, all or none.
 Both activate the view's sheet for that and the previous sheet again afterwards.

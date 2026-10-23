@@ -493,6 +493,24 @@ class DimensionTests(Base):
         self.assertIn("Maße", [d["layer"] for d in listed])
         self.assertTrue(sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})["ok"])
 
+    def test_an_unreadable_layer_hides_nothing(self) -> None:
+        class Layer:
+            Visible = None
+
+        class Layers:
+            def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+                pass
+
+            def GetLayer(self, name):  # noqa: N802 - COM member name
+                if name == "Kaputt":
+                    raise OSError("no such layer")
+                return None if name == "-Per Standard-" else Layer()
+        self.doc.GetLayerManager = lambda: Layers()
+        for display, layer in zip(self.parent.displays, ("Kaputt", "-Per Standard-")):
+            display.annotation.Layer = layer
+        self.section.displays[0].annotation.Layer = "Ohne Sichtbarkeit"
+        self.assertEqual(len(sw_drawing.list_drawing_dimensions({})["data"]["dimensions"]), 4)
+
     def test_a_hidden_dimension_in_the_walk_is_left_out(self) -> None:
         # documented behaviour: the walk also returns suppressed dimensions
         self.parent.displays[1].annotation.Visible = 3
