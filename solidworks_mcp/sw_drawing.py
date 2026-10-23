@@ -754,7 +754,8 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
     "millimetres on the sheet (read the parent's position from list_drawing_views first) or as a model "
     "point it passes through plus a direction, which draws it across the whole parent view. Succeeds only "
     "when SOLIDWORKS actually cut: the new view must be a section view with hatched faces. A view that cut "
-    "nothing is deleted again and the call fails.",
+    "nothing is deleted again and the call fails; when SOLIDWORKS returns no view at all, the cutting line or sketch "
+    "line this call made is deleted (line_removed, sketch_line_removed report it).",
     {
         "x1_mm": {"type": "number", "description": "Cutting line start, on the sheet."},
         "y1_mm": {"type": "number"},

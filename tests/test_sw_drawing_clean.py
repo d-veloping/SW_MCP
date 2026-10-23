@@ -250,6 +250,8 @@ class Drawing:
 
     def CreateSectionViewAt5(self, x, y, z, label, options, excluded, depth):  # noqa: N802 - COM member name
         self.section_calls.append((x, y, label, options, depth))
+        if self.next_section is None and not getattr(self, "null_makes_line", True):
+            return None   # no view and the drawn line stays a sketch line
         # SOLIDWORKS turns the selected line into a section line of the active view, cut or not
         line = SectionLine(f"Section Line{len(self.section_calls)}", label)
         self.active.section_lines.append(line)
@@ -377,6 +379,28 @@ class SectionViewTests(Base):
         self.assertTrue(sw_drawing.insert_section_view({"x1_mm": 200, "y1_mm": 90, "x2_mm": 200, "y2_mm": 210,
                                                         "place_x_mm": 80, "place_y_mm": 150,
                                                         "parent_view": "Drawing View1"})["ok"])
+
+    def test_no_view_and_no_cutting_line_deletes_the_drawn_line(self) -> None:
+        self.doc.next_section, self.doc.null_makes_line = None, False
+        args = {"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20, "place_x_mm": 80, "place_y_mm": 50,
+                "parent_view": "Drawing View1"}
+        answer = sw_drawing.insert_section_view(args)
+        self.assertFalse(answer["ok"])
+        self.assertEqual((answer["data"]["line_removed"], answer["data"]["sketch_line_removed"]), (None, True))
+        # drawing the line still selects it, only selecting it again for the deletion fails
+        with unittest.mock.patch.object(sw_core, "select_object", side_effect=[True, False]):
+            answer = sw_drawing.insert_section_view(dict(args, label="B"))
+        self.assertIs(answer["data"]["sketch_line_removed"], False)
+        self.assertIn("drawn line could not be deleted", answer["message"])
+
+    def test_no_view_and_a_cutting_line_that_stays_is_reported(self) -> None:
+        self.doc.next_section = None
+        with unittest.mock.patch.object(sw_drawing, "_delete_section_line", return_value=False):
+            answer = sw_drawing.insert_section_view({"x1_mm": 400, "y1_mm": 10, "x2_mm": 400, "y2_mm": 20,
+                                                     "place_x_mm": 80, "place_y_mm": 50, "parent_view": "Drawing View1"})
+        self.assertIs(answer["data"]["line_removed"], False)
+        self.assertIsNone(answer["data"]["sketch_line_removed"])
+        self.assertIn("cutting line could not be deleted", answer["message"])
 
     def test_deleting_a_section_view_takes_its_cutting_line(self) -> None:
         self.doc.next_section = View("Section View A-A", kind=2, hatches=2)

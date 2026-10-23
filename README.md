@@ -242,7 +242,8 @@ view scale`, not sheet millimetres. Drawn at sheet coordinates the line lies
 beside the part and SOLIDWORKS still creates a "section view" that cuts nothing
 (issue #2). The tool succeeds only when the new view is a section with hatched
 faces; otherwise it deletes the view and its cutting line again and returns
-`ok: false`. `delete_drawing_view` removes a section view together with its
+`ok: false`. When SOLIDWORKS returns no view at all, it deletes the cutting
+line or sketch line the call made (`line_removed`, `sketch_line_removed`). `delete_drawing_view` removes a section view together with its
 cutting line, which SOLIDWORKS otherwise leaves in the parent.
 `insert_detail_view` converts its circle the same way. `list_drawing_views`
 reports each view's outline, hatched faces, section lines and the transform
