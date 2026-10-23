@@ -585,7 +585,7 @@ class DimensionTests(Base):
         self.assertIn("Maße", [d["layer"] for d in listed])
         self.assertTrue(sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})["ok"])
 
-    def test_an_unreadable_layer_or_visibility_is_listed_as_unreadable(self) -> None:
+    def test_an_unreadable_layer_or_visibility_is_listed_as_unknown(self) -> None:
         class Layer:
             Visible = None
 
@@ -605,20 +605,39 @@ class DimensionTests(Base):
         unittest.mock.patch.object(View, "shown", lambda view: list(view.displays)).start()
         self.addCleanup(unittest.mock.patch.stopall)
         listed = sw_drawing.list_drawing_dimensions({})["data"]
-        # nothing drops out, nothing unreadable passes for visible: only the default layer is plainly readable
-        self.assertEqual([(d["view"], d["layer"], d["readable"]) for d in listed["dimensions"]],
-                         [("Drawing View1", "Kaputt", False), ("Drawing View1", "-Per Standard-", True),
-                          ("Section View A-A", "Ohne Sichtbarkeit", False), ("Section View A-A", None, False)])
-        self.assertEqual(listed["duplicates"], {})   # an unreadable entry proves no duplicate
+        # nothing drops out, nothing unknown passes for visible: only the default layer shows for sure; the model
+        # dimensions behind all four stay readable
+        self.assertEqual([(d["view"], d["layer"], d["visible"], d["readable"]) for d in listed["dimensions"]],
+                         [("Drawing View1", "Kaputt", None, True), ("Drawing View1", "-Per Standard-", True, True),
+                          ("Section View A-A", "Ohne Sichtbarkeit", None, True), ("Section View A-A", None, None, True)])
+        self.assertEqual(listed["duplicates"], {})   # D1 and D2 each show for sure in one view only
         # an arrangement could select a hidden one: refused, nothing selected
         answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Section View A-A"})
         self.assertFalse(answer["ok"])
-        self.assertEqual((answer["data"]["unreadable"], self.doc.aligned), (2, []))
+        self.assertEqual((answer["data"]["visibility_unknown"], self.doc.aligned), (2, []))
+        # one unknown among others is enough, and nothing is selected
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual((answer["data"]["visibility_unknown"], answer["data"]["selected"], self.doc.aligned,
+                          self.doc.selection), (1, 0, [], []))
         # hiding cannot prove its targets gone while the view is unreadable
         answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
             {"view": "Drawing View1", "full_name": "D2@Skizze1@Teil.Part"}]})
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["data"]["unreadable_views"], ["Drawing View1"])
+
+    def test_a_layer_that_cannot_be_read_leaves_visibility_unknown(self) -> None:
+        class NoLayer(Annotation):
+            @property
+            def Layer(self):  # noqa: N802 - COM member name
+                raise OSError("Layer not readable")
+
+            @Layer.setter
+            def Layer(self, name) -> None:  # noqa: N802 - COM member name
+                pass
+        self.parent.displays[0].annotation = NoLayer(0.23, 0.15)
+        listed = sw_drawing.list_drawing_dimensions({"view_name": "Drawing View1"})["data"]["dimensions"]
+        self.assertEqual([(d["layer"], d["visible"]) for d in listed], [(None, None), (None, True)])
 
     def test_a_hidden_dimension_in_the_walk_is_left_out(self) -> None:
         # documented behaviour: the walk also returns suppressed dimensions
@@ -750,6 +769,10 @@ class DimensionTests(Base):
             {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["data"]["unreadable_views"], ["Drawing View1"])
+        # it still shows for sure: the view is arranged with it (the only one left there), by its selection name
+        answer = sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual((answer["data"]["selected"], self.doc.aligned[-1][2]), (1, 1))
 
     def test_dimension_kinds_follow_the_parameter_type(self) -> None:
         import math

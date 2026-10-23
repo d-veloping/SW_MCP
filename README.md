@@ -241,8 +241,10 @@ Every drawing tool (`sw_drawing`, all but `create_drawing`) takes an optional
 `ok: false` and `active_document`, and nothing is changed; the check runs in the
 same call. A read SOLIDWORKS refuses where the answer proves something (the view
 chain, cutting lines, the dimension walk) fails the call instead of counting as
-"none there"; a dimension whose model dimension cannot be read is listed with
-`readable: false`.
+"none there". A dimension whose model dimension cannot be read is listed with
+`readable: false`; one whose visibility or drawing layer cannot be read with
+`visible: null`: it may be hidden, counts for no duplicate, and
+`arrange_drawing_dimensions` arranges no view that has one.
 
 `insert_section_view` takes the cutting line as two sheet points or as a model
 point it passes through (`through_model_mm`) plus `direction`, and draws it in
