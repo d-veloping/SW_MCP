@@ -620,7 +620,14 @@ class DimensionTests(Base):
         self.assertFalse(answer["ok"])
         self.assertEqual((answer["data"]["visibility_unknown"], answer["data"]["selected"], self.doc.aligned,
                           self.doc.selection), (1, 0, [], []))
-        # hiding cannot prove its targets gone while the view is unreadable
+        # hiding cannot prove its targets gone while the view is unreadable; one of unknown visibility that stays is
+        # not reported as still visible
+        self.parent.displays[0].unselectable = True
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
+            {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertFalse(answer["ok"])
+        self.assertEqual((answer["data"]["remaining"], answer["data"]["unreadable_views"]), ([], ["Drawing View1"]))
+        self.parent.displays[0].unselectable = False
         answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
             {"view": "Drawing View1", "full_name": "D2@Skizze1@Teil.Part"}]})
         self.assertFalse(answer["ok"])
