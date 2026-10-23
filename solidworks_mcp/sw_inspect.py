@@ -91,7 +91,9 @@ def _strip_internal(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @tool(
     "list_faces",
     "Read-only: list the faces of the active part with surface type, area, a point on the face, and "
-    "the index that selection.faces takes. Re-list after any geometry change, because indices move.",
+    "the index that selection.faces takes; a cylinder also with axis, axis_point_mm, radius_mm and concave (true when "
+    "the material lies outside it, as for a bore or an inner fillet; null when unreadable). Re-list after any geometry "
+    "change, because indices move.",
     {
         "surface_type": {
             "type": "string",

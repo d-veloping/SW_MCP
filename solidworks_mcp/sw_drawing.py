@@ -957,8 +957,9 @@ DIMENSION_WALK_LIMIT = 20000
 
 
 def _display_dimensions(view: Any) -> list[Any]:
-    """The display dimensions SOLIDWORKS walks for a view; hidden ones are no longer part of the walk. A walk that
-    does not end within DIMENSION_WALK_LIMIT steps is an error, never a silently shortened list."""
+    """The display dimensions SOLIDWORKS walks for a view. On 2016 SP3 hidden ones are no longer part of the walk; the
+    API documentation says suppressed ones are, so _all_dimensions filters them. A walk that does not end within
+    DIMENSION_WALK_LIMIT steps is an error, never a silently shortened list."""
     found, display = [], safe(view, "GetFirstDisplayDimension5")
     while display is not None:
         if len(found) >= DIMENSION_WALK_LIMIT:
@@ -1106,7 +1107,8 @@ def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     "reports. Per sheet, every display of that model dimension in that view is selected by name, then one "
     "HideDimension (mode hide) or DeleteSelection2 (mode delete) acts on all of them; a view on another sheet has its "
     "sheet activated for that and the previous sheet activated again. The part is not changed either way. Succeeds "
-    "only when none of them is still listed afterwards.",
+    "only when none of them is still listed afterwards; a dimension that is already hidden is not listed and counts as "
+    "not on the drawing.",
     {
         "dimensions": {
             "type": "array",
@@ -1156,7 +1158,7 @@ def hide_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     rebuild(doc)
     after = _all_dimensions(doc, views)
     remaining = sorted({f"{e['view']}: {e.get('full_name')}" for e in after
-                        if (e["view"], e.get("full_name", "")) in targets and e.get("visible") is not False})
+                        if (e["view"], e.get("full_name", "")) in targets})
     ok = selected > 0 and not remaining and not missing and not unselected
     if ok:
         message = f"{'Hid' if mode == 'hide' else 'Deleted'} {selected} dimensions."

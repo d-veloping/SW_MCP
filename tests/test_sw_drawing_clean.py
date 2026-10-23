@@ -447,6 +447,14 @@ class DimensionTests(Base):
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["data"]["selected"], 1)
 
+    def test_hiding_an_already_hidden_dimension_is_not_on_the_drawing(self) -> None:
+        self.parent.displays[0].annotation.Visible = 3
+        answer = sw_drawing.hide_drawing_dimensions({"dimensions": [
+            {"view": "Drawing View1", "full_name": "D1@Skizze1@Teil.Part"}]})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["missing"], ["Drawing View1: D1@Skizze1@Teil.Part"])
+        self.assertEqual(self.doc.hidden_calls, 0)
+
     def second_sheet(self, size=(0.42, 0.297)) -> View:
         second = View("Drawing View5")
         second.displays = [DisplayDimension(second, Dimension("D1@Skizze1@Teil.Part", 0.0304), 350, 100)]

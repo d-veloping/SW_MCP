@@ -209,7 +209,7 @@ metal parts only.
 | Tool | Purpose |
 | --- | --- |
 | `capture_screenshot` | Returns the view as an **image**, so the model can look at its own work. |
-| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices; cylinders with axis, a point on it, radius and `concave` (true for a bore). Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
+| `list_faces` / `list_edges` / `list_vertices` / `list_bodies` | Topology with types, sizes, and selection indices; cylinders with axis, a point on it, radius and `concave` (true when the material lies outside, as for a bore; null when unreadable). Filterable by surface type, area, normal direction, curve type, length. Bodies come with their own volume and the sum. |
 | `get_mass_properties` / `get_bounding_box` / `measure` | Numbers to check the geometry against. |
 | `check_errors` | What SOLIDWORKS thinks is wrong — see below. With `sketches: true` also every sketch the solver cannot solve, which SOLIDWORKS never flags itself. |
 | `set_view` | Named view plus zoom-to-fit. |
