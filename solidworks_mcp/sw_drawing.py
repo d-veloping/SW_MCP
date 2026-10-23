@@ -1018,6 +1018,8 @@ def _dimension_entry(view_name: str, display: Any) -> dict[str, Any]:
         entry["text_mm"] = [round(to_mm(position[0]), 3), round(to_mm(position[1]), 3)]
     visible = safe(annotation, "Visible") if annotation is not None else None
     entry["visible"] = None if visible is None else int(visible) == 1   # swAnnotationVisibilityState_e
+    layer = safe(annotation, "Layer") if annotation is not None else None
+    entry["layer"] = str(layer) if layer else None
     entry["selection_name"] = str(safe(display, "GetNameForSelection", "") or "")
     return entry
 
@@ -1047,8 +1049,21 @@ def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
 
 def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
     """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size. A
-    display the walk returns although it is hidden (documented for suppressed dimensions) is left out."""
+    display the walk returns although it is hidden (documented for suppressed dimensions) is left out, and so is one
+    on a hidden drawing layer: IAnnotation.Visible does not see the layer."""
     sizes: dict[str, tuple[float, float] | None] = {}
+    layers: dict[str, bool] = {}
+
+    def layer_shown(name: str) -> bool:
+        if name not in layers:
+            try:
+                found = flag_methods(safe(doc, "GetLayerManager"), "GetLayer").GetLayer(name)
+                shown = safe(found, "Visible")
+                layers[name] = shown is None or bool(shown)
+            except Exception:
+                layers[name] = True   # an unreadable layer hides nothing it could be shown to hide
+        return layers[name]
+
     entries: list[dict[str, Any]] = []
     for sheet_name, view in _views_of_every_sheet(doc):
         name = str(safe(view, "GetName2", "") or "")
@@ -1061,7 +1076,7 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
                 sizes[sheet_name] = None
         for display in _display_dimensions(view):
             entry = _dimension_entry(name, display)
-            if entry.get("visible") is False:
+            if entry.get("visible") is False or (entry.get("layer") and not layer_shown(entry["layer"])):
                 continue
             entry["sheet"] = sheet_name
             size = sizes[sheet_name]
@@ -1114,7 +1129,7 @@ def _on_sheet(doc: Any, sheet: str, act: Any) -> Any:
     "swDimensionType_e of the display (type2), where its text sits on its sheet and whether that is outside the sheet, "
     "whether it shows in parentheses, and the name to select it by. `duplicates` lists every model dimension visible in "
     "more than one view of the same sheet; insert_model_annotations produces those even with duplicate_dimensions "
-    "false. Hidden dimensions are not listed.",
+    "false. Hidden dimensions, also those on a hidden drawing layer, are not listed; each entry names its layer.",
     {"view_name": {"type": "string", "description": "Only this view, on whichever sheet it is."}},
 )
 def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:

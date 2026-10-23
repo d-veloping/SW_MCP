@@ -53,6 +53,7 @@ class Dimension:
 class Annotation:
     def __init__(self, x: float, y: float) -> None:
         self.Visible = 1
+        self.Layer = ""
         self.position = (x, y, 0.0)
 
     def GetPosition(self):  # noqa: N802 - COM member name
@@ -472,6 +473,25 @@ class DimensionTests(Base):
         self.assertEqual(first["value_mm"], 30.4)
         self.assertIs(first["parentheses"], False)
         self.assertTrue(first["visible"])
+
+    def test_a_dimension_on_a_hidden_layer_is_left_out(self) -> None:
+        class Layer:
+            def __init__(self, visible: bool) -> None:
+                self.Visible = visible
+
+        class Layers:
+            def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+                pass
+
+            def GetLayer(self, name):  # noqa: N802 - COM member name
+                return Layer(name != "Versteckt")
+        self.doc.GetLayerManager = lambda: Layers()
+        self.parent.displays[1].annotation.Layer = "Versteckt"
+        self.parent.displays[0].annotation.Layer = "Maße"
+        listed = sw_drawing.list_drawing_dimensions({})["data"]["dimensions"]
+        self.assertEqual(len(listed), 3)
+        self.assertIn("Maße", [d["layer"] for d in listed])
+        self.assertTrue(sw_drawing.arrange_drawing_dimensions({"view_name": "Drawing View1"})["ok"])
 
     def test_a_hidden_dimension_in_the_walk_is_left_out(self) -> None:
         # documented behaviour: the walk also returns suppressed dimensions
