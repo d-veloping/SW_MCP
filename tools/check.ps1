@@ -177,29 +177,49 @@ function Invoke-SelfTest {
         $green = Join-Path $dir "green.cmd"
         Set-Content -Path $red -Value "@exit /b 1" -Encoding ASCII
         Set-Content -Path $green -Value "@exit /b 0" -Encoding ASCII
-        foreach ($c in @(@{ Fake = $red; Expected = 1; Line = "^CHECK FAILED server import Head " },
-                         @{ Fake = $green; Expected = 0; Line = "^CHECK OK offline Head " })) {
+
+        # A throwaway repo whose tests\ holds only an unlisted live script: the whole run has to stop with exit 1.
+        $repo = Join-Path $dir "repo"
+        New-Item -ItemType Directory -Force (Join-Path $repo "tools"), (Join-Path $repo "tests") | Out-Null
+        Copy-Item $PSCommandPath (Join-Path $repo "tools\check.ps1")
+        Set-Content -Path (Join-Path $repo "tests\live_new.py") -Value "" -Encoding ASCII
+        $git = @("-C", $repo, "-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid")
+        git @git init -q | Out-Null
+        git @git add -A | Out-Null
+        git @git commit -q -m selftest | Out-Null
+
+        foreach ($c in @(@{ Name = "red.cmd"; Script = $PSCommandPath; Fake = $red; Expected = 1; Line = "^CHECK FAILED server import Head " },
+                         @{ Name = "green.cmd"; Script = $PSCommandPath; Fake = $green; Expected = 0; Line = "^CHECK OK offline Head " },
+                         @{ Name = "an unlisted live_new.py"; Script = (Join-Path $repo "tools\check.ps1"); Fake = $green;
+                            Expected = 1; Line = "^CHECK FAILED unclassified live scripts Head " })) {
             $global:LASTEXITCODE = 0
-            $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Offline -Python $c.Fake |
+            $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $c.Script -Offline -Python $c.Fake |
                 ForEach-Object { "$_" })
             $code = $LASTEXITCODE
             $last = $output | Where-Object { $_ -match "^CHECK " } | Select-Object -Last 1
             if ($code -eq $c.Expected -and $last -match $c.Line) {
-                Write-Host ("ok: from outside, {0} gives exit {1}: {2}" -f (Split-Path -Leaf $c.Fake), $code, $last)
+                Write-Host ("ok: from outside, {0} gives exit {1}: {2}" -f $c.Name, $code, $last)
             } else {
                 $failed++
-                Write-Host ("FAILED: from outside, {0} gave exit {1} and {2}" -f (Split-Path -Leaf $c.Fake), $code, $last)
+                Write-Host ("FAILED: from outside, {0} gave exit {1} and {2}" -f $c.Name, $code, $last)
                 $output | ForEach-Object { Write-Host ("    " + $_) }
             }
         }
 
+        # The chain from the issue: the red check has to run, fail, and stop the command after &&.
         $chain = Join-Path $dir "chain.cmd"
-        Set-Content -Path $chain -Encoding ASCII -Value (
-            '@powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -Offline -Python "{1}" && echo CHAIN CONTINUED' -f $PSCommandPath, $red)
-        $global:LASTEXITCODE = 0
+        Set-Content -Path $chain -Encoding ASCII -Value @(
+            ('@powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -Offline -Python "{1}" && echo CHAIN CONTINUED' -f $PSCommandPath, $red),
+            '@echo CHAIN EXIT %errorlevel%')
         $output = @(& cmd.exe /d /c $chain | ForEach-Object { "$_" })
-        if ($output -contains "CHAIN CONTINUED") { $failed++; Write-Host "FAILED: the && chain went on after a red check" }
-        else { Write-Host ("ok: the && chain stops after a red check (exit {0})" -f $LASTEXITCODE) }
+        $ran = @($output | Where-Object { $_ -match "^CHECK FAILED server import Head " }).Count -eq 1
+        if ($ran -and $output -notcontains "CHAIN CONTINUED" -and $output -contains "CHAIN EXIT 1") {
+            Write-Host "ok: the && chain stops after a red check (exit 1)"
+        } else {
+            $failed++
+            Write-Host "FAILED: the && chain after a red check"
+            $output | ForEach-Object { Write-Host ("    " + $_) }
+        }
     } finally {
         Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
     }
