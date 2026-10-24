@@ -500,6 +500,16 @@ class AddDimensionTests(unittest.TestCase):
         self.assertFalse(answer["ok"])
         self.assertFalse(answer["data"]["applied"])
         self.assertIsNone(answer["data"]["actual_value_mm"])
+        self.assertIn("could not be read back", answer["message"])
+        self.assertNotIn("None", answer["message"])
+
+    def test_value_not_taken_names_a_nonzero_set_status(self) -> None:
+        dimension = FakeNewDimension(0.080, rejects=True)
+        dimension.SetSystemValue3 = lambda target, scope, config: 7
+        answer = self.call(self.doc(UNDER, UNDER, dimension), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["set_value_status"], 7)
+        self.assertIn("status 7", answer["message"])
 
     def test_dimension_not_handed_back_with_a_value_fails(self) -> None:
         answer = self.call(self.doc(UNDER, UNDER, None), value_mm=70)
@@ -552,6 +562,58 @@ class AddDimensionTests(unittest.TestCase):
                 self.assertIs(answer["data"]["verified"], False)
                 self.assertTrue(answer["data"]["applied"])
                 self.assertIn("not confirmed", answer["message"])
+
+
+class FakeLine:
+    """A sketch line for _anchor_sketch: GetType 0 (swSketchLINE) and its ends in metres."""
+
+    def __init__(self, start: tuple[float, float], end: tuple[float, float]) -> None:
+        self._start, self._end = start, end
+
+    def GetType(self) -> int:  # noqa: N802 - COM member name
+        return 0
+
+    def GetStartPoint2(self):  # noqa: N802 - COM member name
+        return unittest.mock.Mock(X=self._start[0], Y=self._start[1])
+
+    def GetEndPoint2(self):  # noqa: N802 - COM member name
+        return unittest.mock.Mock(X=self._end[0], Y=self._end[1])
+
+
+class FakeRelationManager:
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def AddRelation(self, entities, code: int) -> bool:  # noqa: N802 - COM member name
+        return True
+
+
+class AnchorSketchTests(unittest.TestCase):
+    """fully_define_sketch lists the location dimensions add_dimension created, also those it judged a failure."""
+
+    def test_location_dimensions_count_what_add_dimension_created(self) -> None:
+        sketch = unittest.mock.Mock(RelationManager=FakeRelationManager())
+        doc = unittest.mock.Mock(SketchManager=FakeSketchManager(sketch))
+        lines = [FakeLine((0.01, 0.02), (0.05, 0.02)), FakeLine((0.03, 0.0), (0.03, 0.04))]
+        answers = [
+            # Left in the sketch, judged a failure (#15): still a location dimension of this sketch.
+            {"ok": False, "message": "left over_defined", "data": {"full_name": "D1@S", "sketch_status": "over_defined"}},
+            {"ok": True, "message": "Added a dimension.", "data": {"full_name": "D2@S", "sketch_status": "fully_defined"}},
+        ]
+        with unittest.mock.patch.object(sw_sketch, "origin_sketch_point", return_value=object()), \
+                unittest.mock.patch.object(sw_sketch, "sketch_point_objects", return_value=[]), \
+                unittest.mock.patch.object(sw_sketch, "sketch_segment_objects", return_value=lines), \
+                unittest.mock.patch.object(sw_sketch, "dispatch_array", side_effect=lambda items: items), \
+                unittest.mock.patch.object(sw_sketch, "add_dimension", side_effect=answers) as add:
+            anchored = sw_sketch._anchor_sketch(doc)
+        self.assertEqual(add.call_count, 2)
+        self.assertEqual(anchored["location_dimensions"], ["D1@S", "D2@S"])
+
+    def test_note_created_skips_a_dimension_that_was_never_created(self) -> None:
+        dimensions: list[str] = []
+        sw_sketch._note_created(dimensions, {"ok": False, "message": "did not create", "data": {"entities": 1}}, "vertical")
+        sw_sketch._note_created(dimensions, {"ok": True, "message": "Added a dimension.", "data": {}}, "vertical")
+        self.assertEqual(dimensions, ["vertical"])
 
 
 class SketchStatusTests(unittest.TestCase):

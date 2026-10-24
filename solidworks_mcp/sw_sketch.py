@@ -1054,11 +1054,15 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
         requested = applied[f"value_{unit}"]
         if dimension is None:
             message = (f"SOLIDWORKS created a dimension but did not hand it back, so {requested} {unit} was not "
-                       "set. The new dimension stays in the sketch.")
+                       "set.")
+        elif data[f"actual_value_{unit}"] is None:
+            message = f"{name} could not be read back after setting {requested} {unit}, so the value is unverified."
         else:
             message = (f"SOLIDWORKS did not take {requested} {unit} for {name}; it reads "
-                       f"{data[f'actual_value_{unit}']} {unit}. The new dimension stays in the sketch.")
-        return result(False, message, **data)
+                       f"{data[f'actual_value_{unit}']} {unit}.")
+        if applied.get("set_value_status"):
+            message += f" SetSystemValue3 returned status {applied['set_value_status']}."
+        return result(False, message + " The new dimension stays in the sketch.", **data)
     return result(True, "Added a dimension.", **data)
 
 
@@ -1400,6 +1404,13 @@ def _line_ends(segment: Any) -> tuple[tuple[float, float], tuple[float, float]] 
         return None
 
 
+def _note_created(dimensions: list[str], outcome: dict[str, Any], fallback: str) -> None:
+    """Record a location dimension add_dimension created, also one it judged a failure: it stays in the sketch."""
+    full_name = (outcome.get("data") or {}).get("full_name")
+    if outcome.get("ok") or full_name:
+        dimensions.append(str(full_name or fallback))
+
+
 def _anchor_sketch(doc: Any) -> dict[str, Any]:
     """Tie the open sketch to the origin before SOLIDWORKS dimensions it.
 
@@ -1496,15 +1507,13 @@ def _anchor_sketch(doc: Any) -> dict[str, Any]:
             relations += 1
         else:
             outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "horizontal", "place_x_mm": 0, "place_y_mm": 0})
-            if outcome.get("ok"):
-                dimensions.append(str((outcome.get("data") or {}).get("full_name", "horizontal")))
+            _note_created(dimensions, outcome, "horizontal")
         if abs(y) < _ANCHOR_TOL_M:
             manager.AddRelation(dispatch_array([point, origin]), RELATIONS["horizontal_points"])
             relations += 1
         else:
             outcome = add_dimension({"selection": {"sketch_points": [index], "origin": True}, "kind": "vertical", "place_x_mm": 0, "place_y_mm": 0})
-            if outcome.get("ok"):
-                dimensions.append(str((outcome.get("data") or {}).get("full_name", "vertical")))
+            _note_created(dimensions, outcome, "vertical")
 
     has_lines = any(_line_ends(segment) is not None for segment in segments)
     if not has_lines and points:
@@ -1521,8 +1530,7 @@ def _anchor_sketch(doc: Any) -> dict[str, Any]:
         line = nearest_line(want_vertical)
         if line is not None:
             outcome = add_dimension({"selection": {"sketch_segments": [line], "origin": True}, "kind": kind, "place_x_mm": 0, "place_y_mm": 0})
-            if outcome.get("ok"):
-                dimensions.append(str((outcome.get("data") or {}).get("full_name", kind)))
+            _note_created(dimensions, outcome, kind)
             continue
         point = nearest_point()
         if point is not None:

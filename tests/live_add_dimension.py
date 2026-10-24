@@ -14,14 +14,17 @@
 
 """Live check: add_dimension fails when the new dimension leaves the open sketch unsolved (#15).
 
-Every part gets a sketch on the front plane with a rectangle 80 × 50 from (0, 0); the rectangle's own relations
-make the bottom line as long as the top line.  Checks:
+Every part gets a sketch on the front plane with a rectangle 80 × 50 from (0, 0).  A second horizontal dimension
+on the same top line is what over-defines it: draw_rectangle does not tie the bottom line's length to the top
+line's (measured 2026-10-24 on 2016 SP3, a dimension of 70 on the bottom line was simply applied).  Checks:
 
 (a) control: a horizontal dimension on the top line to 90 answers ok true and applied true; after close_sketch and
     an extrude of 10 mm the volume is 45 000 mm³;
-(b) conflict: top line dimensioned to 80, then a horizontal dimension on the bottom line to 70 answers ok false,
-    and the bottom line still measures 80;
-(c) redundant but consistent: as (b) with 80 on the bottom line; ok is false whenever the sketch reads unsolved;
+(b) conflict: top line dimensioned to 80, then a second horizontal dimension on the top line to 70 answers ok
+    false with its full_name and verified not false, by one of the two rules (the sketch reads unsolved and the
+    message says the geometry did not move, or applied false), and the top line still measures 80;
+(c) redundant but consistent: as (b) with 80; the new dimension is named, and ok is false whenever the sketch reads
+    unsolved;
 (d) already unsolved: when (b) left the sketch unsolved, a vertical dimension on the free left line answers ok false
     and says "already" (not asserted when SOLIDWORKS kept the sketch solving in (b));
 (s) the open sketch's state is current: the state add_dimension reports in (b) and (c) is unsolved exactly when
@@ -83,9 +86,13 @@ class Run:
             raise RuntimeError(f"{name} failed: {answer.get('message')}")
         return answer
 
-    def new_part(self) -> str | None:
-        created = self.call("create_new_document", {"kind": "part"})
-        return ((created.get("data") or {}).get("document") or {}).get("title")
+    def new_part(self) -> str:
+        """A new part, or stop: without one the sketch would land in whatever document is active."""
+        created = self.require("create_new_document", {"kind": "part"})
+        title = ((created.get("data") or {}).get("document") or {}).get("title")
+        if not title:
+            raise RuntimeError(f"create_new_document named no document: {created}")
+        return str(title)
 
     def close_part(self, label: str, title: str | None) -> None:
         if title:
@@ -155,13 +162,17 @@ def conflict(run: Run) -> None:
     try:
         run.rectangle("B_Skizze")
         recorded["b_top"] = run.add("top", "horizontal", 80, (40, 60))
-        answer = run.add("bottom", "horizontal", 70, (40, -10))
+        answer = run.add("top", "horizontal", 70, (40, 70))
         recorded["b_answer"] = answer
         recorded["b_driven"] = run.driven("B_Skizze", answer)
-        bottom = length(run.line("bottom"))
-        recorded["b_bottom_length_mm"] = bottom
-        checks["b_conflict_fails"] = answer.get("ok") is False and close_to(bottom, 80)
+        top = length(run.line("top"))
+        recorded["b_top_length_mm"] = top
         status = data(answer, "sketch_status")
+        by_status = status in UNSOLVED_SKETCH_STATUS and "did not move" in str(answer.get("message"))
+        by_value = data(answer, "applied") is False
+        checks["b_conflict_fails"] = (answer.get("ok") is False and bool(data(answer, "full_name"))
+                                      and data(answer, "verified") is not False and (by_status or by_value)
+                                      and close_to(top, 80))
         if status in UNSOLVED_SKETCH_STATUS:
             third = run.add("left", "vertical", 50, (-10, 25))
             recorded["d_answer"] = third
@@ -182,11 +193,12 @@ def redundant(run: Run) -> None:
     try:
         run.rectangle("C_Skizze")
         recorded["c_top"] = run.add("top", "horizontal", 80, (40, 60))
-        answer = run.add("bottom", "horizontal", 80, (40, -10))
+        answer = run.add("top", "horizontal", 80, (40, 70))
         recorded["c_answer"] = answer
         recorded["c_driven"] = run.driven("C_Skizze", answer)
         status = data(answer, "sketch_status")
-        checks["c_unsolved_fails"] = status not in UNSOLVED_SKETCH_STATUS or answer.get("ok") is False
+        checks["c_unsolved_fails"] = (bool(data(answer, "full_name")) and data(answer, "verified") is not False
+                                      and (status not in UNSOLVED_SKETCH_STATUS or answer.get("ok") is False))
         closed = run.unsolved_after_close("C_Skizze")
         recorded["c_unsolved_after_close"] = closed
         checks["s_state_current_c"] = (status in UNSOLVED_SKETCH_STATUS) == closed
