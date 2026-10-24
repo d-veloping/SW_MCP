@@ -345,7 +345,11 @@ stores a dimension value the solver then rejects: the sketch is left
 `no_solution`, nothing moves, the rebuild returns true and `GetWhatsWrong` is
 empty. So `set_dimension` reads the value back *after* the rebuild (it reverts
 to the old one) and reads the owning sketch's `GetConstrainedStatus`, which
-works on a closed sketch, and fails on either signal. `check_errors` reads the
+works on a closed sketch, and fails on either signal. `add_dimension` does the
+same for a new dimension in the open sketch: it fails when a requested value
+does not read back, when the sketch is left (or already was) unsolved, and when
+the sketch's state cannot be read (`verified: false`); the new dimension stays
+in the sketch, named by `full_name`. `check_errors` reads the
 same state for every sketch when asked with `sketches: true`; that is one pass
 over the feature tree, so it is off by default. Measured on 2016 SP3.
 

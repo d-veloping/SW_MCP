@@ -43,6 +43,7 @@ $LiveTests = @(
     "live_p0_regression.py",
     "live_list_dimensions.py",
     "live_set_dimension.py",
+    "live_add_dimension.py",
     "live_sheet_metal.py",
     "live_weldment.py"
 )

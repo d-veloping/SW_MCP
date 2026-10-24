@@ -52,6 +52,7 @@ from .sw_core import (
     SKETCH_FEATURE_TYPES,
     sketch_status,
     UNSOLVED_SKETCH_STATUS,
+    unreadable_sketch_state,
     require_part,
     require_selection,
     resolve_plane_name,
@@ -928,7 +929,10 @@ _DIMENSION_METHODS = {
     "(length/radius) or two (distance/angle) via selection. value_mm drives linear dimensions; "
     "value_deg drives angular ones. place_*_mm is where the dimension text sits (millimetres). "
     "Use kind to force a horizontal, vertical, radius, or diameter dimension instead of letting "
-    "SOLIDWORKS infer one.",
+    "SOLIDWORKS infer one. ok is false when a requested value does not read back (applied false), when "
+    "the open sketch is left over_defined, no_solution or invalid_solution, also when it already was, "
+    "because the geometry then did not move, or when its solve state cannot be read (verified false). "
+    "The new dimension stays in the sketch in every case; full_name names it.",
     {
         "selection": SELECTION_SCHEMA,
         "value_mm": {"type": "number", "description": "Target value for a linear dimension, in millimetres."},
@@ -952,6 +956,7 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     count = require_selection(doc, args["selection"])
     member = _DIMENSION_METHODS[str(args.get("kind", "auto"))]
     flag_methods(doc, member)
+    status_before = _sketch_status(doc)
 
     # ModelDoc2.AddDimension2 rather than ModelDocExtension.AddDimension: the
     # latter reproducibly crashes SOLIDWORKS 2026 on a sketch selection.
@@ -989,20 +994,23 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         dimension = safe(display, "GetDimension")
 
+    target, unit, convert = None, "", to_mm
+    if args.get("value_mm") is not None:
+        target, unit, convert = to_m(args["value_mm"]), "mm", to_mm
+        applied["value_mm"] = float(args["value_mm"])
+    elif args.get("value_deg") is not None:
+        target, unit, convert = to_rad(args["value_deg"]), "deg", to_deg
+        applied["value_deg"] = float(args["value_deg"])
+
     if dimension is not None:
-        target = None
-        if args.get("value_mm") is not None:
-            target = to_m(args["value_mm"])
-            applied["value_mm"] = float(args["value_mm"])
-        elif args.get("value_deg") is not None:
-            target = to_rad(args["value_deg"])
-            applied["value_deg"] = float(args["value_deg"])
         if target is not None:
             # swSetValueInConfiguration_e.swSetValue_InAllConfigurations = 2
             flag_methods(dimension, "SetSystemValue3")
             code = int(dimension.SetSystemValue3(target, 2, empty_variant()))
-            actual = float(safe(dimension, "SystemValue", target) or 0.0)
-            applied["applied"] = abs(actual - target) < 1e-9
+            # A value that cannot be read back is not taken (as in set_dimension).
+            actual = _system_value(dimension)
+            applied["applied"] = actual is not None and abs(actual - target) <= 1e-9
+            applied[f"actual_value_{unit}"] = _rounded(convert, actual)
             if code:
                 applied["set_value_status"] = code
         if args.get("name"):
@@ -1011,6 +1019,9 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 logger.info("Could not rename the new dimension.")
         applied["full_name"] = str(safe(dimension, "FullName", ""))
+    elif target is not None:
+        # The display dimension exists, but without its IDimension the value was never set.
+        applied["applied"] = False
 
     clear_selection(doc)
     # EditRebuild3 exits sketch mode, which would strand the caller mid-sketch;
@@ -1018,7 +1029,37 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     if doc.SketchManager.ActiveSketch is None:
         rebuild(doc)
     status = _sketch_status(doc)
-    return result(True, "Added a dimension.", sketch_status=status, **applied)
+    data: dict[str, Any] = {"sketch_status": status, "sketch_status_before": status_before, **applied}
+    name = applied.get("full_name") or "the new dimension"
+
+    if status in UNSOLVED_SKETCH_STATUS:
+        if status_before in UNSOLVED_SKETCH_STATUS:
+            message = (f"Added {name}, but the sketch was already {status_before} before it and is {status} now, so "
+                       "the geometry did not move. Resolve the conflict first.")
+        else:
+            message = (f"Adding {name} left the sketch {status}, so the geometry did not move. "
+                       "It conflicts with a relation or dimension already there.")
+        return result(False, message + " The new dimension stays in the sketch.", **data)
+    if unreadable_sketch_state(status):
+        # A value that reads back can still sit in a sketch that does not solve: without a readable
+        # solve state the call is not a success (SW_MCP#15).
+        return result(
+            False,
+            f"Added {name}, but the sketch reads {status}, so whether it still solves is not confirmed. "
+            "The new dimension stays in the sketch.",
+            verified=False,
+            **data,
+        )
+    if target is not None and not applied.get("applied"):
+        requested = applied[f"value_{unit}"]
+        if dimension is None:
+            message = (f"SOLIDWORKS created a dimension but did not hand it back, so {requested} {unit} was not "
+                       "set. The new dimension stays in the sketch.")
+        else:
+            message = (f"SOLIDWORKS did not take {requested} {unit} for {name}; it reads "
+                       f"{data[f'actual_value_{unit}']} {unit}. The new dimension stays in the sketch.")
+        return result(False, message, **data)
+    return result(True, "Added a dimension.", **data)
 
 
 def _display_dimension(doc: Any, full_name: str) -> Any | None:
