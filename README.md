@@ -436,13 +436,37 @@ every line into "unknown".
 ## Testing
 
 The useful tests are live SOLIDWORKS tests: the COM behaviour that matters here
-cannot be mocked faithfully. With SOLIDWORKS already running, run:
+cannot be mocked faithfully. `tools\check.ps1` is the one way to run the check:
+the server import and the offline tests as in CI, then the live checks one after
+another, with SOLIDWORKS already running. It stops at the first red step and
+exits non-zero, so chain the commit on it:
 
 ```powershell
-.\.venv\Scripts\python.exe tests\live_p0_regression.py
+# Windows PowerShell 5.1 (no &&)
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\check.ps1; if ($LASTEXITCODE -eq 0) { git commit }
 ```
 
-It verifies the P0 geometry/constraint regressions, including the full-volume
+Start it as its own `powershell` process, as above, rather than as
+`.\tools\check.ps1`: a script the execution policy blocks leaves `$LASTEXITCODE`
+at its previous value, which may well be 0.
+
+```bash
+# cmd, Bash, PowerShell 7
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\check.ps1 && git commit
+```
+
+Never pipe the check into another command (`... | tail`): the exit code that
+counts is then the last command's, and a red live test no longer stops the
+commit (in Bash only `set -o pipefail` changes that). `-Offline` skips the live
+checks on a machine without SOLIDWORKS, `-Python` names another interpreter
+(for a worktree without its own `.venv`), `-SelfTest` checks the exit codes of
+the check itself without SOLIDWORKS. Every `tests\live_*.py` is either run by the
+check or listed in it with the reason it is not (measurements that always exit 0,
+checks that need a saved part as argument); an unlisted one fails the check. If
+other processes drive the same SOLIDWORKS, run the live part only while you hold
+their lock.
+
+`tests\live_p0_regression.py` verifies the P0 geometry/constraint regressions, including the full-volume
 `through_all_both` cut. `tests\live_sheet_metal.py` builds an L profile and a
 plate with every sheet metal tool and checks the flanges, the flat pattern and
 the break corner against a closed-form number: flange volumes, the developed
@@ -498,6 +522,7 @@ newest-name-first fallback.
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
 | `tests/live_sheet_metal.py` | Live sheet metal checks against closed-form geometry |
 | `tests/live_weldment.py` | Live weldment checks against closed-form geometry |
+| `tools/check.ps1` | The one check: server import, offline tests, live checks; exits non-zero on the first red step |
 | `tools/tlb_probe.py` | Reads signatures and enums straight off your installed type library |
 | `server.py` | Registry assembly and stdio dispatch |
 
