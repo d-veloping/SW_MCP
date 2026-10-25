@@ -348,8 +348,13 @@ to the old one) and reads the owning sketch's `GetConstrainedStatus`, which
 works on a closed sketch, and fails on either signal. `add_dimension` does the
 same for a new dimension in the open sketch: it fails when a requested value
 does not read back, when the sketch is left (or already was) unsolved, and when
-the sketch's state cannot be read (`verified: false`); the new dimension stays
-in the sketch, named by `full_name`. `check_errors` reads the
+the sketch's state cannot be read (`verified: false`). A new dimension that
+would over-define the sketch, a duplicate say, is not refused either: SOLIDWORKS
+creates it driven, a reference dimension, and the sketch still solves. So
+`add_dimension` also reads the new dimension's `DrivenState` and fails on
+`driven: true`, and on a state it cannot read (`driven: null`,
+`verified: false`). The new dimension stays in the sketch in every case, named
+by `full_name`. `check_errors` reads the
 same state for every sketch when asked with `sketches: true`; that is one pass
 over the feature tree, so it is off by default. Measured on 2016 SP3.
 

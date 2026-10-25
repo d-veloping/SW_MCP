@@ -367,18 +367,27 @@ class FakeNewDimension:
     """The IDimension behind a new display dimension; SystemValue starts at the measured geometry.
 
     `rejects` models a value the solver does not take (or a driven dimension): SetSystemValue3 stores nothing.
-    `unreadable` makes every read of SystemValue raise.
+    `unreadable` makes every read of SystemValue raise. `driven_state` is DrivenState (2 driving, 1 driven,
+    0 unknown); an exception instance makes it unreadable.
     """
 
-    def __init__(self, system_value: float, rejects: bool = False, unreadable: bool = False) -> None:
+    def __init__(self, system_value: float, rejects: bool = False, unreadable: bool = False,
+                 driven_state: object = 2) -> None:
         self._value = system_value
         self._rejects = rejects
         self._unreadable = unreadable
+        self._driven_state = driven_state
         self.FullName = "D3@Skizze1@Part1.Part"
         self.set_calls: list[float] = []
 
     def _FlagAsMethod(self, *names: str) -> None:
         pass
+
+    @property
+    def DrivenState(self) -> object:  # noqa: N802 - COM member name
+        if isinstance(self._driven_state, Exception):
+            raise self._driven_state
+        return self._driven_state
 
     @property
     def SystemValue(self) -> float:  # noqa: N802 - COM member name
@@ -468,6 +477,8 @@ class AddDimensionTests(unittest.TestCase):
                 self.assertTrue(answer["data"]["applied"])
                 self.assertAlmostEqual(answer["data"]["actual_value_mm"], 90.0)
                 self.assertEqual(answer["data"]["full_name"], "D3@Skizze1@Part1.Part")
+                self.assertIs(answer["data"]["driven"], False)
+                self.assertEqual(answer["data"]["driven_state"], 2)
                 self.assertEqual(dimension.set_calls, [0.090])
 
     def test_new_dimension_leaving_the_sketch_unsolved_fails(self) -> None:
@@ -522,10 +533,99 @@ class AddDimensionTests(unittest.TestCase):
         self.assertFalse(answer["data"]["applied"])
         self.assertIn("did not hand it back", answer["message"])
 
-    def test_dimension_not_handed_back_without_a_value_is_ok_in_a_solving_sketch(self) -> None:
+    def test_dimension_not_handed_back_without_a_value_is_not_confirmed_driving(self) -> None:
+        # This answered ok true before SW_MCP#22: without the IDimension nothing says the dimension drives.
         answer = self.call(self.doc(UNDER, FULLY, None))
-        self.assertTrue(answer["ok"], answer)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["verified"], False)
+        self.assertIsNone(answer["data"]["driven"])
+        self.assertNotIn("driven_state", answer["data"])
         self.assertNotIn("applied", answer["data"])
+        self.assertIn("did not hand the dimension back", answer["message"])
+
+    def test_redundant_dimension_created_driven_fails_although_the_value_reads_back(self) -> None:
+        # Case (c) of SW_MCP#22: 80 on a line already dimensioned 80, SetSystemValue3 status 3.
+        dimension = FakeNewDimension(0.080, driven_state=1)
+        dimension.SetSystemValue3 = lambda target, scope, config: (setattr(dimension, "_value", target), 3)[1]
+        answer = self.call(self.doc(UNDER, UNDER, dimension), value_mm=80)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["driven"], True)
+        self.assertEqual(answer["data"]["driven_state"], 1)
+        self.assertTrue(answer["data"]["applied"])
+        self.assertNotIn("verified", answer["data"])
+        for part in ("D3@Skizze1@Part1.Part", "driven (reference) dimension", "may duplicate",
+                     "reads the requested 80.0 mm", "status 3", "stays in the sketch as a reference dimension"):
+            self.assertIn(part, answer["message"])
+
+    def test_conflicting_dimension_created_driven_names_the_driven_state_before_the_value(self) -> None:
+        # Case (b) of SW_MCP#22: 70 on a line already dimensioned 80, the value stays 80.
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, rejects=True, driven_state=1)), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["driven"], True)
+        self.assertFalse(answer["data"]["applied"])
+        self.assertIn("reference dimension", answer["message"])
+        self.assertIn("reads 80.0 mm, not the requested 70.0 mm", answer["message"])
+
+    def test_driven_dimension_with_an_unreadable_value_says_so(self) -> None:
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, unreadable=True, driven_state=1)),
+                           value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["driven"], True)
+        self.assertIn("could not be read back after setting 70.0 mm", answer["message"])
+        self.assertNotIn("None", answer["message"])
+
+    def test_driven_dimension_without_a_requested_value_fails(self) -> None:
+        # As _anchor_sketch calls it: a driven location dimension is not the driving one asked for (decision 1).
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, driven_state=1)))
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["driven"], True)
+        self.assertNotIn("applied", answer["data"])
+        self.assertIn("reference dimension", answer["message"])
+        self.assertNotIn("requested", answer["message"])
+
+    def test_driven_dimension_with_no_sketch_open_fails_after_the_rebuild(self) -> None:
+        doc = FakeDimensionDoc(FakeDisplayDimension(FakeNewDimension(0.080, driven_state=1)), None)
+        answer = self.call(doc, value_mm=80)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 1)
+        self.assertIs(answer["data"]["driven"], True)
+
+    def test_driven_state_is_read_after_the_rebuild(self) -> None:
+        dimension = FakeNewDimension(0.080)
+        doc = FakeDimensionDoc(FakeDisplayDimension(dimension), None,
+                               on_rebuild=lambda: setattr(dimension, "_driven_state", 1))
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["driven"], True)
+
+    def test_unknown_driven_state_is_not_confirmed(self) -> None:
+        for state in (0, 5):
+            with self.subTest(state=state):
+                answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, driven_state=state)), value_mm=70)
+                self.assertFalse(answer["ok"])
+                self.assertIs(answer["data"]["verified"], False)
+                self.assertIsNone(answer["data"]["driven"])
+                self.assertEqual(answer["data"]["driven_state"], state)
+                self.assertTrue(answer["data"]["applied"])
+                self.assertIn(f"DrivenState reads {state}", answer["message"])
+                self.assertIn("not confirmed", answer["message"])
+
+    def test_unreadable_driven_state_is_not_confirmed(self) -> None:
+        for raw in (RuntimeError("DrivenState cannot be read"), None, True, "x"):
+            with self.subTest(raw=repr(raw)):
+                answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, driven_state=raw)), value_mm=70)
+                self.assertFalse(answer["ok"])
+                self.assertIs(answer["data"]["verified"], False)
+                self.assertIsNone(answer["data"]["driven"])
+                self.assertIsNone(answer["data"]["driven_state"])
+                self.assertIn("DrivenState cannot be read", answer["message"])
+
+    def test_unsolved_sketch_message_wins_over_a_driven_dimension(self) -> None:
+        answer = self.call(self.doc(UNDER, OVER, FakeNewDimension(0.080, driven_state=1)), value_mm=80)
+        self.assertFalse(answer["ok"])
+        self.assertIs(answer["data"]["driven"], True)
+        self.assertIn("did not move", answer["message"])
+        self.assertNotIn("reference dimension", answer["message"])
 
     def test_no_value_requested_and_sketch_over_defined_fails(self) -> None:
         answer = self.call(self.doc(UNDER, OVER, FakeNewDimension(0.080)))
