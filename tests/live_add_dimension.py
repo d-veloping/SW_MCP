@@ -14,9 +14,11 @@
 
 """Live check: add_dimension fails when the new dimension leaves the open sketch unsolved (#15).
 
-Every part gets a sketch on the front plane with a rectangle 80 × 50 from (0, 0).  A second horizontal dimension
-on the same top line is what over-defines it: draw_rectangle does not tie the bottom line's length to the top
-line's (measured 2026-10-24 on 2016 SP3, a dimension of 70 on the bottom line was simply applied).  Checks:
+Parts A to C get a sketch on the front plane with a rectangle 80 × 50 from (0, 0).  A second horizontal dimension
+on the same top line is the conflict: draw_rectangle does not tie the bottom line's length to the top line's
+(measured 2026-10-24 on 2016 SP3, a dimension of 70 on the bottom line was simply applied).  SOLIDWORKS 2016 then
+makes the new dimension driven and keeps the sketch solving (measured the same day: SetSystemValue3 status 3, the
+value stays 80), so the unsolved-sketch rule is reached through part D, the unsolvable sketch of SW_MCP#14.  Checks:
 
 (a) control: a horizontal dimension on the top line to 90 answers ok true and applied true; after close_sketch and
     an extrude of 10 mm the volume is 45 000 mm³;
@@ -25,8 +27,10 @@ line's (measured 2026-10-24 on 2016 SP3, a dimension of 70 on the bottom line wa
     message says the geometry did not move, or applied false), and the top line still measures 80;
 (c) redundant but consistent: as (b) with 80; the new dimension is named, and ok is false whenever the sketch reads
     unsolved;
-(d) already unsolved: when (b) left the sketch unsolved, a vertical dimension on the free left line answers ok false
-    and says "already" (not asserted when SOLIDWORKS kept the sketch solving in (b));
+(d) unsolved sketch: part D is the #14 reproduction (quadrilateral (0,0) (90,0) (70,50) (10,40), sketch_fillet
+    R5/R8/R5/R8, fully_define_sketch, extrude 10); set_dimension of a R5 radius to 6 leaves P_Skizze no_solution;
+    in the reopened sketch a horizontal dimension on the bottom line answers ok false with its full_name, an
+    unsolved sketch_status and sketch_status_before, and a message that says "already" and "did not move";
 (s) the open sketch's state is current: the state add_dimension reports in (b) and (c) is unsolved exactly when
     check_errors with sketches true lists the sketch after close_sketch (SW_MCP#15, step 4 of the brief);
 (e) recorded, not asserted: every answer, `driven` of each new dimension from list_dimensions, the time of every
@@ -117,7 +121,7 @@ class Run:
             raise RuntimeError(f"no single {side} line in {lines}")
         return found[0]
 
-    def add(self, side: str, kind: str, value_mm: float, place: tuple[float, float]) -> dict[str, Any]:
+    def add(self, side: str, kind: str, value_mm: float | None, place: tuple[float, float]) -> dict[str, Any]:
         return self.call("add_dimension", {"selection": {"sketch_segments": [self.line(side)["index"]]}, "kind": kind,
                                            "value_mm": value_mm, "place_x_mm": place[0], "place_y_mm": place[1]})
 
@@ -173,12 +177,6 @@ def conflict(run: Run) -> None:
         checks["b_conflict_fails"] = (answer.get("ok") is False and bool(data(answer, "full_name"))
                                       and data(answer, "verified") is not False and (by_status or by_value)
                                       and close_to(top, 80))
-        if status in UNSOLVED_SKETCH_STATUS:
-            third = run.add("left", "vertical", 50, (-10, 25))
-            recorded["d_answer"] = third
-            checks["d_already_unsolved_fails"] = third.get("ok") is False and "already" in str(third.get("message"))
-        else:
-            recorded["d_answer"] = f"not applicable: the sketch read {status} after (b)"
         closed = run.unsolved_after_close("B_Skizze")
         recorded["b_unsolved_after_close"] = closed
         checks["s_state_current_b"] = (status in UNSOLVED_SKETCH_STATUS) == closed
@@ -206,12 +204,51 @@ def redundant(run: Run) -> None:
         run.close_part("c", title)
 
 
+CORNERS = [(0, 0, 5), (90, 0, 8), (70, 50, 5), (10, 40, 8)]
+
+
+def unsolvable(run: Run) -> None:
+    """(d)"""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
+    try:
+        run.require("create_sketch", {"plane": "front", "name": "P_Skizze"})
+        for index, (x1, y1, _) in enumerate(CORNERS):
+            x2, y2, _ = CORNERS[(index + 1) % len(CORNERS)]
+            run.require("draw_line", {"x1_mm": x1, "y1_mm": y1, "x2_mm": x2, "y2_mm": y2})
+        for x, y, radius in CORNERS:
+            segments = data(run.call("list_sketch_segments"), "segments", []) or []
+            lines = [s["index"] for s in segments if s["type"] == "line" and not s["construction"]
+                     and any(abs(p[0] - x) < EPS and abs(p[1] - y) < EPS for p in (s["start_mm"], s["end_mm"]))]
+            run.require("sketch_fillet", {"radius_mm": radius, "selection": {"sketch_segments": lines}})
+        run.require("fully_define_sketch", {})
+        run.require("close_sketch")
+        run.require("boss_extrude", {"depth_mm": 10, "sketch_name": "P_Skizze"})
+        rows = data(run.call("list_dimensions", {"feature_name": "P_Skizze"}), "dimensions", []) or []
+        radius = next(r["full_name"] for r in rows if r.get("driven") is False and abs(float(r["value_mm"]) - 5) < 1e-6)
+        recorded["d_set_dimension"] = run.call("set_dimension", {"full_name": radius, "value_mm": 6})
+        run.require("edit_sketch", {"sketch_name": "P_Skizze"})
+        answer = run.add("bottom", "horizontal", None, (45, -10))
+        recorded["d_answer"] = answer
+        run.call("close_sketch")
+        message = str(answer.get("message"))
+        checks["d_unsolved_sketch_fails"] = (
+            data(recorded["d_set_dimension"], "sketch_status") == "no_solution"
+            and answer.get("ok") is False and bool(data(answer, "full_name"))
+            and data(answer, "sketch_status") in UNSOLVED_SKETCH_STATUS
+            and data(answer, "sketch_status_before") in UNSOLVED_SKETCH_STATUS
+            and "already" in message and "did not move" in message)
+    finally:
+        run.close_part("d", title)
+
+
 def main() -> int:
     run = Run()
     try:
         control(run)
         conflict(run)
         redundant(run)
+        unsolvable(run)
     finally:
         print(json.dumps(run.report, indent=2, default=str))
     checks = run.report["checks"]
