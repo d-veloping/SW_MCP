@@ -12,21 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Live check: add_dimension fails when the new dimension leaves the open sketch unsolved (#15).
+"""Live check: add_dimension fails when the new dimension leaves the sketch unsolved (#15) or comes out driven (#22).
 
 Parts A to C get a sketch on the front plane with a rectangle 80 × 50 from (0, 0).  A second horizontal dimension
 on the same top line is the conflict: draw_rectangle does not tie the bottom line's length to the top line's
 (measured 2026-10-24 on 2016 SP3, a dimension of 70 on the bottom line was simply applied).  SOLIDWORKS 2016 then
 makes the new dimension driven and keeps the sketch solving (measured the same day: SetSystemValue3 status 3, the
-value stays 80), so the unsolved-sketch rule is reached through part D, the unsolvable sketch of SW_MCP#14.  Checks:
+value stays 80), so the unsolved-sketch rule is reached through part D, the unsolvable sketch of SW_MCP#14, and
+(b) and (c) are the driven rule of SW_MCP#22.  Checks:
 
-(a) control: a horizontal dimension on the top line to 90 answers ok true and applied true; after close_sketch and
-    an extrude of 10 mm the volume is 45 000 mm³;
+(a) control: a horizontal dimension on the top line to 90 answers ok true, applied true and driven false; after
+    close_sketch and an extrude of 10 mm the volume is 45 000 mm³;
 (b) conflict: top line dimensioned to 80, then a second horizontal dimension on the top line to 70 answers ok
-    false with its full_name and verified not false, by one of the two rules (the sketch reads unsolved and the
-    message says the geometry did not move, or applied false), and the top line still measures 80;
-(c) redundant but consistent: as (b) with 80; the new dimension is named, and ok is false whenever the sketch reads
-    unsolved;
+    false with its full_name, verified not false and driven true, also in list_dimensions; the message says the
+    geometry did not move when the sketch reads unsolved, otherwise applied is false and the message says
+    "reference dimension"; the top line still measures 80;
+(c) redundant but consistent: as (b) with 80; ok false, driven true, applied true, verified not false, a full_name
+    and a message that says "reference dimension"; the answer's driven equals list_dimensions' driven for it;
 (d) unsolved sketch: part D is the #14 reproduction (quadrilateral (0,0) (90,0) (70,50) (10,40), sketch_fillet
     R5/R8/R5/R8, fully_define_sketch, extrude 10); set_dimension of a R5 radius to 6 leaves P_Skizze no_solution;
     in the reopened sketch a horizontal dimension on the bottom line answers ok false with its full_name, an
@@ -154,7 +156,7 @@ def control(run: Run) -> None:
         volume = data(run.call("get_mass_properties"), "volume_mm3")
         recorded["a_volume_mm3"] = volume
         checks["a_control_applies"] = (answer.get("ok") is True and data(answer, "applied") is True
-                                       and close_to(volume, 45000))
+                                       and data(answer, "driven") is False and close_to(volume, 45000))
     finally:
         run.close_part("a", title)
 
@@ -172,10 +174,12 @@ def conflict(run: Run) -> None:
         top = length(run.line("top"))
         recorded["b_top_length_mm"] = top
         status = data(answer, "sketch_status")
-        by_status = status in UNSOLVED_SKETCH_STATUS and "did not move" in str(answer.get("message"))
-        by_value = data(answer, "applied") is False
+        message = str(answer.get("message"))
+        by_status = status in UNSOLVED_SKETCH_STATUS and "did not move" in message
+        by_driven = data(answer, "applied") is False and "reference dimension" in message
         checks["b_conflict_fails"] = (answer.get("ok") is False and bool(data(answer, "full_name"))
-                                      and data(answer, "verified") is not False and (by_status or by_value)
+                                      and data(answer, "verified") is not False and data(answer, "driven") is True
+                                      and recorded["b_driven"] is True and (by_status or by_driven)
                                       and close_to(top, 80))
         closed = run.unsolved_after_close("B_Skizze")
         recorded["b_unsolved_after_close"] = closed
@@ -195,8 +199,11 @@ def redundant(run: Run) -> None:
         recorded["c_answer"] = answer
         recorded["c_driven"] = run.driven("C_Skizze", answer)
         status = data(answer, "sketch_status")
-        checks["c_unsolved_fails"] = (bool(data(answer, "full_name")) and data(answer, "verified") is not False
-                                      and (status not in UNSOLVED_SKETCH_STATUS or answer.get("ok") is False))
+        checks["c_driven_fails"] = (answer.get("ok") is False and data(answer, "driven") is True
+                                    and data(answer, "applied") is True and bool(data(answer, "full_name"))
+                                    and data(answer, "verified") is not False
+                                    and "reference dimension" in str(answer.get("message"))
+                                    and recorded["c_driven"] is True)
         closed = run.unsolved_after_close("C_Skizze")
         recorded["c_unsolved_after_close"] = closed
         checks["s_state_current_c"] = (status in UNSOLVED_SKETCH_STATUS) == closed

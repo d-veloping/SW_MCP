@@ -932,6 +932,9 @@ _DIMENSION_METHODS = {
     "SOLIDWORKS infer one. ok is false when a requested value does not read back (applied false), when "
     "the open sketch is left over_defined, no_solution or invalid_solution, also when it already was, "
     "because the geometry then did not move, or when its solve state cannot be read (verified false). "
+    "ok is also false when SOLIDWORKS creates the new dimension driven (driven true, a reference dimension, "
+    "as it does for one that duplicates a dimension already there), and when its driven state cannot be read "
+    "(driven null, verified false). "
     "With no sketch open the change is rebuilt and read back after the rebuild; a failed rebuild is ok false too. "
     "The new dimension stays in the sketch in every case; full_name names it.",
     {
@@ -1038,6 +1041,15 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
             applied[f"actual_value_{unit}"] = _rounded(convert, actual)
     status = _sketch_status(doc)
     data: dict[str, Any] = {"sketch_status": status, "sketch_status_before": status_before, **applied}
+    # SOLIDWORKS makes a new dimension driven instead of refusing it when it would over-define the
+    # sketch, a duplicate of one already there say (measured 2026-10-24/25 on 2016 SP3, SW_MCP#22).
+    state = _driven_state(dimension) if dimension is not None else None
+    data["driven"] = _driven(state)
+    if dimension is not None:
+        data["driven_state"] = state
+    if data["driven"] is None:
+        # Whichever rule answers below, the dimension is not confirmed to drive anything.
+        data["verified"] = False
     name = applied.get("full_name") or "the new dimension"
 
     if status in UNSOLVED_SKETCH_STATUS:
@@ -1055,9 +1067,22 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
             False,
             f"Added {name}, but the sketch reads {status}, so whether it still solves is not confirmed. "
             "The new dimension stays in the sketch.",
-            verified=False,
-            **data,
+            **{**data, "verified": False},
         )
+    if data["driven"] is True:
+        message = (f"SOLIDWORKS created {name} as a driven (reference) dimension instead of a driving one, so it "
+                   "does not drive the geometry; it may duplicate a dimension or relation already there.")
+        if target is not None:
+            requested, actual_value = applied[f"value_{unit}"], data.get(f"actual_value_{unit}")
+            if actual_value is None:
+                message += f" Its value could not be read back after setting {requested} {unit}."
+            elif applied.get("applied"):
+                message += f" It reads the requested {requested} {unit}."
+            else:
+                message += f" It reads {actual_value} {unit}, not the requested {requested} {unit}."
+            if applied.get("set_value_status"):
+                message += f" SetSystemValue3 returned status {applied['set_value_status']}."
+        return result(False, message + " It stays in the sketch as a reference dimension.", **data)
     if target is not None and not applied.get("applied"):
         requested = applied[f"value_{unit}"]
         if dimension is None:
@@ -1071,6 +1096,21 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
         if applied.get("set_value_status"):
             message += f" SetSystemValue3 returned status {applied['set_value_status']}."
         return result(False, message + " The new dimension stays in the sketch.", **data)
+    if data["driven"] is None:
+        # Without a readable DrivenState the dimension is not confirmed to drive anything (SW_MCP#22);
+        # data already carries verified false.
+        if dimension is None:
+            why = "SOLIDWORKS did not hand the dimension back"
+        elif state is None:
+            why = "its DrivenState cannot be read"
+        else:
+            why = f"its DrivenState reads {state}, neither driven (1) nor driving (2)"
+        return result(
+            False,
+            f"Added {name}, but {why}, so whether it drives the geometry is not confirmed. "
+            "The new dimension stays in the sketch.",
+            **data,
+        )
     if rebuilt is False:
         return result(False, f"Added {name}, but the rebuild reported a problem.", rebuilt=False, **data)
     return result(True, "Added a dimension.", **data)
@@ -1298,6 +1338,11 @@ def _driven_state(dimension: Any) -> int | None:
         return None
 
 
+def _driven(state: int | None) -> bool | None:
+    """True for a driven (reference) dimension, False for a driving one, None for an unknown or unreadable state."""
+    return {_DIMENSION_DRIVEN: True, _DIMENSION_DRIVING: False}.get(state)
+
+
 @tool(
     "list_dimensions",
     "Read-only: list every dimension in the document, or only those of one feature/sketch, with the full names "
@@ -1331,7 +1376,7 @@ def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
                     "owner": owner,
                     "full_name": full_name,
                     "name": str(safe(dimension, "Name", "")),
-                    "driven": {_DIMENSION_DRIVEN: True, _DIMENSION_DRIVING: False}.get(state),
+                    "driven": _driven(state),
                     "driven_state": state,
                 }
                 entry.update(dimension_value(int(safe(dimension, "GetType", 0) or 0), system_value))
