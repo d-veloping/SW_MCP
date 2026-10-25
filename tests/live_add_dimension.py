@@ -24,9 +24,9 @@ value stays 80), so the unsolved-sketch rule is reached through part D, the unso
 (a) control: a horizontal dimension on the top line to 90 answers ok true, applied true and driven false; after
     close_sketch and an extrude of 10 mm the volume is 45 000 mm³;
 (b) conflict: top line dimensioned to 80, then a second horizontal dimension on the top line to 70 answers ok
-    false with its full_name and verified not false, either because the sketch reads unsolved and the message says
-    the geometry did not move, or because the new dimension is driven (driven true, applied false, the message says
-    "reference dimension"); the top line still measures 80;
+    false with its full_name, verified not false and driven true, also in list_dimensions; the message says the
+    geometry did not move when the sketch reads unsolved, otherwise applied is false and the message says
+    "reference dimension"; the top line still measures 80;
 (c) redundant but consistent: as (b) with 80; ok false, driven true, applied true, verified not false, a full_name
     and a message that says "reference dimension"; the answer's driven equals list_dimensions' driven for it;
 (d) unsolved sketch: part D is the #14 reproduction (quadrilateral (0,0) (90,0) (70,50) (10,40), sketch_fillet
@@ -176,10 +176,10 @@ def conflict(run: Run) -> None:
         status = data(answer, "sketch_status")
         message = str(answer.get("message"))
         by_status = status in UNSOLVED_SKETCH_STATUS and "did not move" in message
-        by_driven = (data(answer, "driven") is True and data(answer, "applied") is False
-                     and "reference dimension" in message)
+        by_driven = data(answer, "applied") is False and "reference dimension" in message
         checks["b_conflict_fails"] = (answer.get("ok") is False and bool(data(answer, "full_name"))
-                                      and data(answer, "verified") is not False and (by_status or by_driven)
+                                      and data(answer, "verified") is not False and data(answer, "driven") is True
+                                      and recorded["b_driven"] is True and (by_status or by_driven)
                                       and close_to(top, 80))
         closed = run.unsolved_after_close("B_Skizze")
         recorded["b_unsolved_after_close"] = closed

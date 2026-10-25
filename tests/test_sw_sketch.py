@@ -620,6 +620,28 @@ class AddDimensionTests(unittest.TestCase):
                 self.assertIsNone(answer["data"]["driven_state"])
                 self.assertIn("DrivenState cannot be read", answer["message"])
 
+    def test_unconfirmed_driven_state_marks_every_failing_rule_unverified(self) -> None:
+        # Each earlier rule keeps its message, but driven null always carries verified false (decision 2A).
+        cases = {
+            "value rejected, state 0": (self.doc(UNDER, UNDER, FakeNewDimension(0.080, rejects=True, driven_state=0)),
+                                        "did not take 70.0 mm"),
+            "value rejected, read error": (
+                self.doc(UNDER, UNDER, FakeNewDimension(0.080, rejects=True,
+                                                        driven_state=RuntimeError("DrivenState cannot be read"))),
+                "did not take 70.0 mm"),
+            "no IDimension, value": (self.doc(UNDER, UNDER, None), "did not hand it back"),
+            "unsolved sketch, state 0": (self.doc(UNDER, OVER, FakeNewDimension(0.080, driven_state=0)), "did not move"),
+            "unreadable sketch, state 0": (self.doc(UNDER, 1, FakeNewDimension(0.080, driven_state=0)),
+                                           "not confirmed"),
+        }
+        for label, (doc, phrase) in cases.items():
+            with self.subTest(case=label):
+                answer = self.call(doc, value_mm=70)
+                self.assertFalse(answer["ok"])
+                self.assertIs(answer["data"]["verified"], False)
+                self.assertIsNone(answer["data"]["driven"])
+                self.assertIn(phrase, answer["message"])
+
     def test_unsolved_sketch_message_wins_over_a_driven_dimension(self) -> None:
         answer = self.call(self.doc(UNDER, OVER, FakeNewDimension(0.080, driven_state=1)), value_mm=80)
         self.assertFalse(answer["ok"])
