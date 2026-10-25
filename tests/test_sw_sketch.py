@@ -360,6 +360,301 @@ class SetDimensionTests(unittest.TestCase):
         self.assertIn("Pass value_mm", answer["message"])
 
 
+UNDER, INVALID = 2, 6   # swConstrainedStatus_e
+
+
+class FakeNewDimension:
+    """The IDimension behind a new display dimension; SystemValue starts at the measured geometry.
+
+    `rejects` models a value the solver does not take (or a driven dimension): SetSystemValue3 stores nothing.
+    `unreadable` makes every read of SystemValue raise.
+    """
+
+    def __init__(self, system_value: float, rejects: bool = False, unreadable: bool = False) -> None:
+        self._value = system_value
+        self._rejects = rejects
+        self._unreadable = unreadable
+        self.FullName = "D3@Skizze1@Part1.Part"
+        self.set_calls: list[float] = []
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    @property
+    def SystemValue(self) -> float:  # noqa: N802 - COM member name
+        if self._unreadable:
+            raise RuntimeError("SystemValue cannot be read")
+        return self._value
+
+    def SetSystemValue3(self, target: float, scope: int, config) -> int:  # noqa: N802 - COM member name
+        self.set_calls.append(target)
+        if not self._rejects:
+            self._value = target
+        return 0
+
+
+class FakeDisplayDimension:
+    """IDisplayDimension: GetDimension2 hands back `dimension`, or raises when it is None (GetDimension then too)."""
+
+    def __init__(self, dimension: FakeNewDimension | None) -> None:
+        self._dimension = dimension
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def GetDimension2(self, index: int):  # noqa: N802 - COM member name
+        if self._dimension is None:
+            raise RuntimeError("no dimension")
+        return self._dimension
+
+    def GetDimension(self):  # noqa: N802 - COM member name
+        return self._dimension
+
+
+class FakeDimensionDoc:
+    """IModelDoc2 for add_dimension: AddDimension2 and its kin return `display` and set the open sketch's state."""
+
+    def __init__(self, display, sketch: FakeSketch | None, code_after: int | None = None, rebuilt: bool = True,
+                 on_rebuild=None) -> None:
+        self._display = display
+        self._sketch = sketch
+        self._code_after = code_after
+        self._rebuilt = rebuilt
+        self._on_rebuild = on_rebuild
+        self.SketchManager = FakeSketchManager(sketch)
+        self.rebuilds = 0
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def _add(self, x: float, y: float, z: float):
+        if self._sketch is not None and self._code_after is not None:
+            self._sketch.code = self._code_after
+        return self._display
+
+    AddDimension2 = AddHorizontalDimension2 = AddVerticalDimension2 = _add  # noqa: N815 - COM member names
+    AddRadialDimension2 = AddDiameterDimension2 = _add  # noqa: N815 - COM member names
+
+    def ClearSelection2(self, all_: bool) -> bool:  # noqa: N802 - COM member name
+        return True
+
+    def EditRebuild3(self) -> bool:  # noqa: N802 - COM member name
+        self.rebuilds += 1
+        if self._on_rebuild:
+            self._on_rebuild()
+        return self._rebuilt
+
+
+class AddDimensionTests(unittest.TestCase):
+    """add_dimension judges the new dimension by readback and the open sketch's solve state (SW_MCP#15)."""
+
+    def call(self, doc: FakeDimensionDoc, **args) -> dict:
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_sketch, "require_selection", return_value=1), \
+                unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None):
+            return sw_sketch.add_dimension({"selection": {"sketch_segments": [0]}, "kind": "horizontal", **args})
+
+    def doc(self, before: int, after: int | None, dimension: FakeNewDimension | None = None) -> FakeDimensionDoc:
+        return FakeDimensionDoc(FakeDisplayDimension(dimension), FakeSketch(before), after)
+
+    def test_value_applied_in_a_solving_sketch(self) -> None:
+        for after, name in ((UNDER, "under_defined"), (FULLY, "fully_defined")):
+            with self.subTest(after=name):
+                dimension = FakeNewDimension(0.080)
+                answer = self.call(self.doc(UNDER, after, dimension), value_mm=90)
+                self.assertTrue(answer["ok"], answer)
+                self.assertEqual(answer["data"]["sketch_status"], name)
+                self.assertEqual(answer["data"]["sketch_status_before"], "under_defined")
+                self.assertTrue(answer["data"]["applied"])
+                self.assertAlmostEqual(answer["data"]["actual_value_mm"], 90.0)
+                self.assertEqual(answer["data"]["full_name"], "D3@Skizze1@Part1.Part")
+                self.assertEqual(dimension.set_calls, [0.090])
+
+    def test_new_dimension_leaving_the_sketch_unsolved_fails(self) -> None:
+        for after, name in ((OVER, "over_defined"), (NO_SOLUTION, "no_solution"), (INVALID, "invalid_solution")):
+            with self.subTest(after=name):
+                answer = self.call(self.doc(UNDER, after, FakeNewDimension(0.080)), value_mm=80)
+                self.assertFalse(answer["ok"])
+                self.assertEqual(answer["data"]["sketch_status"], name)
+                self.assertIn(name, answer["message"])
+                self.assertIn("D3@Skizze1@Part1.Part", answer["message"])
+                self.assertIn("did not move", answer["message"])
+                self.assertIn("stays in the sketch", answer["message"])
+
+    def test_unsolved_sketch_fails_even_when_the_value_reads_back(self) -> None:
+        answer = self.call(self.doc(UNDER, OVER, FakeNewDimension(0.080)), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["data"]["applied"])
+
+    def test_sketch_already_unsolved_before_the_call(self) -> None:
+        answer = self.call(self.doc(OVER, OVER, FakeNewDimension(0.050)), value_mm=50)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["sketch_status_before"], "over_defined")
+        self.assertIn("already over_defined", answer["message"])
+
+    def test_value_not_taken_fails(self) -> None:
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, rejects=True)), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertFalse(answer["data"]["applied"])
+        self.assertAlmostEqual(answer["data"]["actual_value_mm"], 80.0)
+        self.assertIn("did not take 70.0 mm", answer["message"])
+
+    def test_unreadable_value_is_not_taken(self) -> None:
+        # The readback used to fall back to the requested value, so this answered ok with applied true.
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(0.080, unreadable=True)), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertFalse(answer["data"]["applied"])
+        self.assertIsNone(answer["data"]["actual_value_mm"])
+        self.assertIn("could not be read back", answer["message"])
+        self.assertNotIn("None", answer["message"])
+
+    def test_value_not_taken_names_a_nonzero_set_status(self) -> None:
+        dimension = FakeNewDimension(0.080, rejects=True)
+        dimension.SetSystemValue3 = lambda target, scope, config: 7
+        answer = self.call(self.doc(UNDER, UNDER, dimension), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["data"]["set_value_status"], 7)
+        self.assertIn("status 7", answer["message"])
+
+    def test_dimension_not_handed_back_with_a_value_fails(self) -> None:
+        answer = self.call(self.doc(UNDER, UNDER, None), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertFalse(answer["data"]["applied"])
+        self.assertIn("did not hand it back", answer["message"])
+
+    def test_dimension_not_handed_back_without_a_value_is_ok_in_a_solving_sketch(self) -> None:
+        answer = self.call(self.doc(UNDER, FULLY, None))
+        self.assertTrue(answer["ok"], answer)
+        self.assertNotIn("applied", answer["data"])
+
+    def test_no_value_requested_and_sketch_over_defined_fails(self) -> None:
+        answer = self.call(self.doc(UNDER, OVER, FakeNewDimension(0.080)))
+        self.assertFalse(answer["ok"])
+        self.assertNotIn("applied", answer["data"])
+
+    def test_no_display_dimension_fails_as_before(self) -> None:
+        answer = self.call(FakeDimensionDoc(None, FakeSketch(UNDER)), value_mm=70)
+        self.assertFalse(answer["ok"])
+        self.assertIn("did not create a dimension", answer["message"])
+
+    def test_no_sketch_open_rebuilds_and_the_readback_decides(self) -> None:
+        for rejects, ok in ((False, True), (True, False)):
+            with self.subTest(rejects=rejects):
+                doc = FakeDimensionDoc(FakeDisplayDimension(FakeNewDimension(0.080, rejects=rejects)), None)
+                answer = self.call(doc, value_mm=70)
+                self.assertEqual(answer["ok"], ok, answer)
+                self.assertEqual(doc.rebuilds, 1)
+                self.assertEqual(answer["data"]["sketch_status"], "closed")
+                self.assertNotIn("verified", answer["data"])
+
+    def test_no_sketch_open_value_reverting_at_the_rebuild_fails(self) -> None:
+        # The measured #14 fault: SystemValue reads the new value until the rebuild, then the old one.
+        dimension = FakeNewDimension(0.080)
+        doc = FakeDimensionDoc(FakeDisplayDimension(dimension), None,
+                               on_rebuild=lambda: setattr(dimension, "_value", 0.080))
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 1)
+        self.assertFalse(answer["data"]["applied"])
+        self.assertAlmostEqual(answer["data"]["actual_value_mm"], 80.0)
+        self.assertIn("did not take 70.0 mm", answer["message"])
+
+    def test_no_sketch_open_unreadable_value_after_the_rebuild_fails(self) -> None:
+        dimension = FakeNewDimension(0.080)
+        doc = FakeDimensionDoc(FakeDisplayDimension(dimension), None,
+                               on_rebuild=lambda: setattr(dimension, "_unreadable", True))
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIsNone(answer["data"]["actual_value_mm"])
+
+    def test_no_sketch_open_failed_rebuild_fails(self) -> None:
+        doc = FakeDimensionDoc(FakeDisplayDimension(FakeNewDimension(0.080)), None, rebuilt=False)
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["rebuilt"], False)
+        self.assertIn("rebuild reported a problem", answer["message"])
+
+    def test_open_sketch_is_not_rebuilt(self) -> None:
+        doc = self.doc(UNDER, UNDER, FakeNewDimension(0.080))
+        answer = self.call(doc, value_mm=70)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 0)
+        self.assertNotIn("rebuilt", answer["data"])
+
+    def test_nonzero_set_status_with_a_matching_readback_is_ok(self) -> None:
+        dimension = FakeNewDimension(0.080)
+        dimension.SetSystemValue3 = lambda target, scope, config: (setattr(dimension, "_value", target), 3)[1]
+        answer = self.call(self.doc(UNDER, UNDER, dimension), value_mm=70)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["data"]["set_value_status"], 3)
+
+    def test_angular_dimension_reports_degrees(self) -> None:
+        answer = self.call(self.doc(UNDER, UNDER, FakeNewDimension(math.radians(30))), value_deg=45)
+        self.assertTrue(answer["ok"], answer)
+        self.assertAlmostEqual(answer["data"]["actual_value_deg"], 45.0)
+
+    def test_unreadable_sketch_state_is_not_a_success(self) -> None:
+        for after in (1, 99):   # 1 reads "unknown", 99 is outside the table
+            with self.subTest(code=after):
+                answer = self.call(self.doc(UNDER, after, FakeNewDimension(0.080)), value_mm=70)
+                self.assertFalse(answer["ok"])
+                self.assertIs(answer["data"]["verified"], False)
+                self.assertTrue(answer["data"]["applied"])
+                self.assertIn("not confirmed", answer["message"])
+
+
+class FakeLine:
+    """A sketch line for _anchor_sketch: GetType 0 (swSketchLINE) and its ends in metres."""
+
+    def __init__(self, start: tuple[float, float], end: tuple[float, float]) -> None:
+        self._start, self._end = start, end
+
+    def GetType(self) -> int:  # noqa: N802 - COM member name
+        return 0
+
+    def GetStartPoint2(self):  # noqa: N802 - COM member name
+        return unittest.mock.Mock(X=self._start[0], Y=self._start[1])
+
+    def GetEndPoint2(self):  # noqa: N802 - COM member name
+        return unittest.mock.Mock(X=self._end[0], Y=self._end[1])
+
+
+class FakeRelationManager:
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def AddRelation(self, entities, code: int) -> bool:  # noqa: N802 - COM member name
+        return True
+
+
+class AnchorSketchTests(unittest.TestCase):
+    """fully_define_sketch lists the location dimensions add_dimension created, also those it judged a failure."""
+
+    def test_location_dimensions_count_what_add_dimension_created(self) -> None:
+        sketch = unittest.mock.Mock(RelationManager=FakeRelationManager())
+        doc = unittest.mock.Mock(SketchManager=FakeSketchManager(sketch))
+        lines = [FakeLine((0.01, 0.02), (0.05, 0.02)), FakeLine((0.03, 0.0), (0.03, 0.04))]
+        answers = [
+            # Left in the sketch, judged a failure (#15): still a location dimension of this sketch.
+            {"ok": False, "message": "left over_defined", "data": {"full_name": "D1@S", "sketch_status": "over_defined"}},
+            {"ok": True, "message": "Added a dimension.", "data": {"full_name": "D2@S", "sketch_status": "fully_defined"}},
+        ]
+        with unittest.mock.patch.object(sw_sketch, "origin_sketch_point", return_value=object()), \
+                unittest.mock.patch.object(sw_sketch, "sketch_point_objects", return_value=[]), \
+                unittest.mock.patch.object(sw_sketch, "sketch_segment_objects", return_value=lines), \
+                unittest.mock.patch.object(sw_sketch, "dispatch_array", side_effect=lambda items: items), \
+                unittest.mock.patch.object(sw_sketch, "add_dimension", side_effect=answers) as add:
+            anchored = sw_sketch._anchor_sketch(doc)
+        self.assertEqual(add.call_count, 2)
+        self.assertEqual(anchored["location_dimensions"], ["D1@S", "D2@S"])
+
+    def test_note_created_skips_a_dimension_that_was_never_created(self) -> None:
+        dimensions: list[str] = []
+        sw_sketch._note_created(dimensions, {"ok": False, "message": "did not create", "data": {"entities": 1}}, "vertical")
+        sw_sketch._note_created(dimensions, {"ok": True, "message": "Added a dimension.", "data": {}}, "vertical")
+        self.assertEqual(dimensions, ["vertical"])
+
+
 class SketchStatusTests(unittest.TestCase):
     def test_codes_map_to_names_and_errors_read_unknown(self) -> None:
         self.assertEqual(sw_core.sketch_status(FakeSketch(NO_SOLUTION)), "no_solution")
