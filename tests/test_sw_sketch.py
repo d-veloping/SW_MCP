@@ -414,10 +414,13 @@ class FakeDisplayDimension:
 class FakeDimensionDoc:
     """IModelDoc2 for add_dimension: AddDimension2 and its kin return `display` and set the open sketch's state."""
 
-    def __init__(self, display, sketch: FakeSketch | None, code_after: int | None = None) -> None:
+    def __init__(self, display, sketch: FakeSketch | None, code_after: int | None = None, rebuilt: bool = True,
+                 on_rebuild=None) -> None:
         self._display = display
         self._sketch = sketch
         self._code_after = code_after
+        self._rebuilt = rebuilt
+        self._on_rebuild = on_rebuild
         self.SketchManager = FakeSketchManager(sketch)
         self.rebuilds = 0
 
@@ -437,7 +440,9 @@ class FakeDimensionDoc:
 
     def EditRebuild3(self) -> bool:  # noqa: N802 - COM member name
         self.rebuilds += 1
-        return True
+        if self._on_rebuild:
+            self._on_rebuild()
+        return self._rebuilt
 
 
 class AddDimensionTests(unittest.TestCase):
@@ -541,6 +546,40 @@ class AddDimensionTests(unittest.TestCase):
                 self.assertEqual(doc.rebuilds, 1)
                 self.assertEqual(answer["data"]["sketch_status"], "closed")
                 self.assertNotIn("verified", answer["data"])
+
+    def test_no_sketch_open_value_reverting_at_the_rebuild_fails(self) -> None:
+        # The measured #14 fault: SystemValue reads the new value until the rebuild, then the old one.
+        dimension = FakeNewDimension(0.080)
+        doc = FakeDimensionDoc(FakeDisplayDimension(dimension), None,
+                               on_rebuild=lambda: setattr(dimension, "_value", 0.080))
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 1)
+        self.assertFalse(answer["data"]["applied"])
+        self.assertAlmostEqual(answer["data"]["actual_value_mm"], 80.0)
+        self.assertIn("did not take 70.0 mm", answer["message"])
+
+    def test_no_sketch_open_unreadable_value_after_the_rebuild_fails(self) -> None:
+        dimension = FakeNewDimension(0.080)
+        doc = FakeDimensionDoc(FakeDisplayDimension(dimension), None,
+                               on_rebuild=lambda: setattr(dimension, "_unreadable", True))
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIsNone(answer["data"]["actual_value_mm"])
+
+    def test_no_sketch_open_failed_rebuild_fails(self) -> None:
+        doc = FakeDimensionDoc(FakeDisplayDimension(FakeNewDimension(0.080)), None, rebuilt=False)
+        answer = self.call(doc, value_mm=70)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["rebuilt"], False)
+        self.assertIn("rebuild reported a problem", answer["message"])
+
+    def test_open_sketch_is_not_rebuilt(self) -> None:
+        doc = self.doc(UNDER, UNDER, FakeNewDimension(0.080))
+        answer = self.call(doc, value_mm=70)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 0)
+        self.assertNotIn("rebuilt", answer["data"])
 
     def test_nonzero_set_status_with_a_matching_readback_is_ok(self) -> None:
         dimension = FakeNewDimension(0.080)

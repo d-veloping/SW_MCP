@@ -932,6 +932,7 @@ _DIMENSION_METHODS = {
     "SOLIDWORKS infer one. ok is false when a requested value does not read back (applied false), when "
     "the open sketch is left over_defined, no_solution or invalid_solution, also when it already was, "
     "because the geometry then did not move, or when its solve state cannot be read (verified false). "
+    "With no sketch open the change is rebuilt and read back after the rebuild; a failed rebuild is ok false too. "
     "The new dimension stays in the sketch in every case; full_name names it.",
     {
         "selection": SELECTION_SCHEMA,
@@ -1026,8 +1027,15 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     clear_selection(doc)
     # EditRebuild3 exits sketch mode, which would strand the caller mid-sketch;
     # the sketch solver already applied the value, so only rebuild outside one.
+    rebuilt = None
     if doc.SketchManager.ActiveSketch is None:
-        rebuild(doc)
+        rebuilt = rebuild(doc)
+        if dimension is not None and target is not None:
+            # After the rebuild SystemValue reads the stored value again: the old one when
+            # the change was rejected (measured 2026-10-09 on 2016 SP3, SW_MCP#14).
+            actual = _system_value(dimension)
+            applied["applied"] = actual is not None and abs(actual - target) <= 1e-9
+            applied[f"actual_value_{unit}"] = _rounded(convert, actual)
     status = _sketch_status(doc)
     data: dict[str, Any] = {"sketch_status": status, "sketch_status_before": status_before, **applied}
     name = applied.get("full_name") or "the new dimension"
@@ -1063,6 +1071,8 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
         if applied.get("set_value_status"):
             message += f" SetSystemValue3 returned status {applied['set_value_status']}."
         return result(False, message + " The new dimension stays in the sketch.", **data)
+    if rebuilt is False:
+        return result(False, f"Added {name}, but the rebuild reported a problem.", rebuilt=False, **data)
     return result(True, "Added a dimension.", **data)
 
 
