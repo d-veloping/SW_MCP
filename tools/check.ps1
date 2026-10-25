@@ -1,7 +1,7 @@
 # The one check before a commit (#8): the server import and the offline tests as in CI, then the live SOLIDWORKS
 # checks one after another.  The first red step stops the run, and the script exits non-zero, so
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\check.ps1 && git commit ...
-# commits nothing after a red run, from cmd, Bash or PowerShell 7 alike.  In Windows PowerShell 5.1, which has no
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/check.ps1 && git commit ...
+# commits nothing after a red run, from cmd, Bash or PowerShell 7 alike (forward slash: Bash eats the backslash).  In Windows PowerShell 5.1, which has no
 # `&&`, use the same `powershell ... -File tools\check.ps1` followed by `; if ($LASTEXITCODE -eq 0) { git commit ... }`;
 # not `.\tools\check.ps1`, because a script the execution policy blocks leaves $LASTEXITCODE at its old value.
 # Never pipe the check into another command (`| tail`): the exit code that counts is then the last command's.

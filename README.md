@@ -452,8 +452,11 @@ at its previous value, which may well be 0.
 
 ```bash
 # cmd, Bash, PowerShell 7
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\check.ps1 && git commit
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/check.ps1 && git commit
 ```
+
+The forward slash is deliberate: Bash would swallow the backslash of
+`tools\check.ps1`.
 
 Never pipe the check into another command (`... | tail`): the exit code that
 counts is then the last command's, and a red live test no longer stops the
