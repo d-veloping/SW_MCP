@@ -8,11 +8,19 @@ maths. CI runs it on Windows across Python 3.10–3.13.
 
 It cannot tell you that SOLIDWORKS accepts a call. The COM behaviour that
 matters here does not mock faithfully, so anything touching geometry has to be
-checked against a live session:
+checked against a live session. `tools\check.ps1` runs the whole check, the
+offline tests and the live checks, and exits non-zero on the first red step:
 
 ```powershell
-.\.venv\Scripts\python.exe tests\live_p0_regression.py
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\check.ps1; if ($LASTEXITCODE -eq 0) { git commit }
 ```
+
+No commit to tool code without a green run of `tools\check.ps1`. Chain the
+commit on its exit code as above (or with `&&` from cmd, Bash or PowerShell 7,
+see the README), never behind a pipe: `check | tail && git commit` commits on
+`tail`'s exit code. A new `tests\live_*.py` goes into `$LiveTests` in
+`tools\check.ps1`, or into `$NotRun` with the reason; the check fails until it is
+in one of them.
 
 A change to a feature or sketch tool is not done until it has run against a real
 SOLIDWORKS with the result checked numerically — read the geometry back and
