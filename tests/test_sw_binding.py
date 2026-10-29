@@ -133,6 +133,40 @@ MODULE = types.SimpleNamespace(
 )
 
 
+class FakeFuncDesc:
+    def __init__(self, memid: int, invkind: int, typedescs) -> None:
+        self.memid = memid
+        self.invkind = invkind
+        self.args = tuple((typedesc, 1, None) for typedesc in typedescs)
+
+
+class FakeTypeInfo:
+    """The ITypeInfo calls the signature reader makes: GetTypeAttr().cFuncs, GetFuncDesc, GetNames."""
+
+    def __init__(self, methods) -> None:
+        self.names = {memid: name for name, (memid, _) in methods.items()}
+        self.funcs = [FakeFuncDesc(memid, pythoncom.INVOKE_FUNC, typedescs) for memid, typedescs in methods.values()]
+
+    def GetTypeAttr(self):  # noqa: N802 - COM member name
+        return types.SimpleNamespace(cFuncs=len(self.funcs))
+
+    def GetFuncDesc(self, index):  # noqa: N802
+        return self.funcs[index]
+
+    def GetNames(self, memid):  # noqa: N802
+        return (self.names[memid],)
+
+
+class FakeTypeLib:
+    def __init__(self, interfaces) -> None:
+        self.infos = {clsid: FakeTypeInfo(methods) for clsid, methods in interfaces.items()}
+        self.lookups: list[str] = []
+
+    def GetTypeInfoOfGuid(self, clsid):  # noqa: N802
+        self.lookups.append(clsid)
+        return self.infos[clsid]
+
+
 class ProxyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.library = Library(MODULE)
@@ -232,10 +266,61 @@ class ProxyTests(unittest.TestCase):
         self.assertIs(self.app.ActivateDoc3("x", errors, 0, warnings), True)
         self.assertEqual((errors.value, warnings.value), (3, 5))
 
-    def test_a_variant_that_is_not_by_reference_passes_unchanged(self) -> None:
+    def test_without_a_signature_a_variant_passes_unchanged_with_one_warning(self) -> None:
         values = sw_core.double_array([1.0, 2.0])
-        self.app.ActivateDoc3(values, True, 0, None)
+        sw_binding._warned.discard("signatures")
+        with self.assertLogs("solidworks-mcp", level="WARNING") as logs:
+            self.app.ActivateDoc3(values, True, 0, None)
+            self.app.ActivateDoc3(values, True, 0, None)
+        self.assertEqual(len(logs.output), 1)
         self.assertIs(self.app_ole.calls[-1][2][0], values)
+
+    def with_signature(self, *typedescs) -> FakeTypeLib:
+        typelib = FakeTypeLib({"{APP}": {"ActivateDoc3": (11, typedescs)}})
+        self.library._typelib = typelib
+        return typelib
+
+    def test_null_arguments_for_a_declared_interface_parameter_become_none(self) -> None:
+        """#26 on R2026x: SelectByID2's Callout is an interface pointer; InvokeTypes refuses nothing() and
+        pythoncom.Nothing there and takes None."""
+        self.with_signature(pythoncom.VT_BSTR, pythoncom.VT_BOOL, pythoncom.VT_I4,
+                            (pythoncom.VT_PTR, (pythoncom.VT_USERDEFINED, 50334720)))
+        for null in (sw_core.nothing(), pythoncom.Nothing):
+            self.app.ActivateDoc3("Plane", True, 0, null)
+            self.assertIsNone(self.app_ole.calls[-1][2][3])
+        self.with_signature(pythoncom.VT_DISPATCH, pythoncom.VT_BOOL, pythoncom.VT_I4, pythoncom.VT_DISPATCH)
+        self.app.ActivateDoc3(sw_core.nothing(), True, 0, pythoncom.Nothing)
+        self.assertEqual(self.app_ole.calls[-1][2], (None, True, 0, None))
+
+    def test_a_declared_variant_parameter_keeps_the_callers_variant(self) -> None:
+        self.with_signature(pythoncom.VT_VARIANT, (pythoncom.VT_PTR, pythoncom.VT_VARIANT), pythoncom.VT_I4,
+                            pythoncom.VT_VARIANT)
+        null, empty, values = sw_core.nothing(), sw_core.empty_variant(), sw_core.double_array([1.0])
+        self.app.ActivateDoc3(null, empty, 0, values)
+        sent = self.app_ole.calls[-1][2]
+        self.assertIs(sent[0], null, "a typed null dispatch stays typed")
+        self.assertIs(sent[1], empty)
+        self.assertIs(sent[3], values)
+
+    def test_other_declared_types_take_the_variants_value(self) -> None:
+        self.with_signature(pythoncom.VT_ARRAY | pythoncom.VT_R8, pythoncom.VT_BOOL, pythoncom.VT_I4,
+                            pythoncom.VT_BSTR)
+        self.app.ActivateDoc3(sw_core.double_array([1.0, 2.0]), True, 0, "x")
+        self.assertEqual(self.app_ole.calls[-1][2], ((1.0, 2.0), True, 0, "x"))
+
+    def test_the_signature_is_read_once_and_only_when_needed(self) -> None:
+        typelib = self.with_signature(pythoncom.VT_BSTR, pythoncom.VT_BOOL, pythoncom.VT_I4, pythoncom.VT_DISPATCH)
+        self.app.ActivateDoc3("x", True, 0, None)
+        self.assertEqual(typelib.lookups, [], "no VARIANT or Nothing argument, no lookup")
+        self.app.ActivateDoc3("x", True, 0, pythoncom.Nothing)
+        self.app.ActivateDoc3("x", True, 0, sw_core.nothing())
+        self.assertEqual(typelib.lookups, ["{APP}"])
+
+    def test_a_property_and_a_method_of_the_same_name_are_told_apart(self) -> None:
+        typelib = FakeTypeLib({"{APP}": {"ActivateDoc3": (11, (pythoncom.VT_DISPATCH,))}})
+        typelib.infos["{APP}"].funcs.insert(0, FakeFuncDesc(11, pythoncom.INVOKE_PROPERTYGET, (pythoncom.VT_VARIANT,)))
+        self.library._typelib = typelib
+        self.assertEqual(self.library.variant_parameters(ISldWorks, "ActivateDoc3"), (False,))
 
     def test_an_array_result_without_out_parameters_is_left_whole(self) -> None:
         self.app_ole.answers[11] = (1.0, 2.0)

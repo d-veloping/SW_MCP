@@ -112,6 +112,38 @@ class Library:
                 by_name.setdefault(name, []).append(cls)
         self._by_name = {name: tuple(found) for name, found in by_name.items()}
         self._hints: dict[str, type] = {}
+        self._typelib: Any = _UNLOADED
+        self._signatures: dict[tuple[type, str], tuple[bool, ...] | None] = {}
+
+    def variant_parameters(self, cls: type, name: str) -> tuple[bool, ...] | None:
+        """For method ``name`` of interface ``cls``: per parameter, whether the type library declares it a
+        VARIANT (by value or by reference).  None when the signature cannot be read."""
+        key = (cls, name)
+        if key not in self._signatures:
+            self._signatures[key] = self._read_signature(cls, name)
+        return self._signatures[key]
+
+    def _read_signature(self, cls: type, name: str) -> tuple[bool, ...] | None:
+        if self._typelib is _UNLOADED:
+            try:
+                module = self.module
+                self._typelib = pythoncom.LoadRegTypeLib(module.CLSID, module.MajorVersion, module.MinorVersion,
+                                                         module.LCID)
+            except Exception as exc:
+                _warn_once("signatures", "Early binding could not read parameter types from the SOLIDWORKS type "
+                           "library (%s); null and VARIANT arguments are passed unchanged.", exc)
+                self._typelib = None
+        if self._typelib is None:
+            return None
+        try:
+            info = self._typelib.GetTypeInfoOfGuid(cls.CLSID)
+            for index in range(info.GetTypeAttr().cFuncs):
+                desc = info.GetFuncDesc(index)
+                if desc.invkind == pythoncom.INVOKE_FUNC and info.GetNames(desc.memid)[0] == name:
+                    return tuple(_is_variant_type(arg[0]) for arg in desc.args)
+        except pythoncom.com_error:
+            return None
+        return None
 
     def declaring(self, name: str, put: bool = False) -> tuple[type, ...]:
         found = self._by_name.get(name, ())
@@ -149,17 +181,51 @@ def _is_byref(value: Any) -> bool:
     return isinstance(value, win32com.client.VARIANT) and bool(value.varianttype & pythoncom.VT_BYREF)
 
 
-def _call_early(member: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+def _is_variant_type(typedesc: Any) -> bool:
+    """Whether a type library TYPEDESC is VARIANT or a pointer to VARIANT (``(VT_PTR, VT_VARIANT)``)."""
+    return typedesc == pythoncom.VT_VARIANT or typedesc == (pythoncom.VT_PTR, pythoncom.VT_VARIANT)
+
+
+_UNLOADED = object()
+_NothingType = type(pythoncom.Nothing)
+
+
+def _plain(arg: Any, variant_declared: bool | None) -> Any:
+    """One argument as a generated method takes it.
+
+    A by-reference VARIANT goes in as its value (see :func:`_call_early`).  A parameter the type
+    library declares VARIANT takes the caller's VARIANT objects as they are, so ``nothing()`` stays a
+    typed null dispatch.  Every other declared type refuses a VARIANT object and ``pythoncom.Nothing``
+    (``TypeError: The Python instance can not be converted to a COM object`` for an interface
+    parameter such as SelectByID2's Callout, #26); there the VARIANT's value goes in, and Nothing
+    becomes None, which marshals to a null interface pointer.  Measured offline against InvokeTypes
+    2026-10-29.  With no signature (``None``) the argument is passed unchanged.
+    """
+    if _is_byref(arg):
+        return arg.value
+    if variant_declared is False:
+        if isinstance(arg, win32com.client.VARIANT):
+            return arg.value
+        if isinstance(arg, _NothingType):
+            return None
+    return _unwrap(arg)
+
+
+def _call_early(member: Callable[..., Any], args: tuple[Any, ...],
+                variant_parameters: tuple[bool, ...] | None = None) -> Any:
     """Call a generated method with arguments made the way late binding takes them.
 
     Late-bound callers pass out-parameters as ``VARIANT(VT_BYREF | ...)`` (``byref_long``) and read
     ``.value`` afterwards.  A generated method declares those parameters itself, refuses a VARIANT
     object for them (``TypeError: int() argument ... not 'VARIANT'``, #27) and returns
     ``(result, out1, out2, ...)`` instead.  So each by-reference VARIANT goes in as its value, and
-    the outputs are written back into it in order, which keeps the caller's contract.
+    the outputs are written back into it in order, which keeps the caller's contract.  Null and
+    VARIANT arguments follow the declared parameter types, see :func:`_plain`.
     """
     byref = [arg for arg in args if _is_byref(arg)]
-    plain = tuple(arg.value if _is_byref(arg) else _unwrap(arg) for arg in args)
+    declared = variant_parameters or ()
+    plain = tuple(_plain(arg, declared[index] if index < len(declared) else None)
+                  for index, arg in enumerate(args))
     result = member(*plain)
     if byref and isinstance(result, tuple) and len(result) == len(byref) + 1:
         for variant, out in zip(byref, result[1:]):
@@ -244,13 +310,17 @@ class EarlyBound:
         member = getattr(bound, name)
         if name in type(bound)._prop_map_get_:
             return self._library.wrap(member)
-        return self._method(member)
+        return self._method(member, type(bound), name)
 
-    def _method(self, member: Callable[..., Any]) -> Callable[..., Any]:
+    def _method(self, member: Callable[..., Any], cls: type, name: str) -> Callable[..., Any]:
         library = self._library
 
         def call(*args: Any) -> Any:
-            return library.wrap(_call_early(member, args))
+            # The signature is read only when an argument depends on it: a non-by-reference VARIANT or Nothing.
+            needs = any(isinstance(arg, (win32com.client.VARIANT, _NothingType)) and not _is_byref(arg)
+                        for arg in args)
+            declared = library.variant_parameters(cls, name) if needs else None
+            return library.wrap(_call_early(member, args, declared))
 
         call.__name__ = getattr(member, "__name__", "call")
         return call
