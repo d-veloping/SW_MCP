@@ -39,6 +39,9 @@ import pythoncom
 import win32com.client
 from mcp.types import Tool
 
+from . import sw_binding
+from .sw_binding import EarlyBound
+
 
 LOG_PATH = Path(__file__).with_name("server.log")
 # Rotating rather than plain: this server runs for as long as the SOLIDWORKS
@@ -348,7 +351,12 @@ def flag_methods(obj: Any, *names: str) -> Any:
     unflagged, producing exactly the silent-None and crash-SOLIDWORKS failures
     this function exists to prevent.  Flagging one at a time costs the same
     round trips as the batched call, since the batch looped anyway.
+
+    An early-bound object (``sw_binding``) has nothing to flag: its wrappers
+    call every member by dispid with the invoke kind the type library declares.
     """
+    if isinstance(obj, EarlyBound):
+        return obj
     for name in names:
         try:
             obj._FlagAsMethod(name)
@@ -538,7 +546,11 @@ def as_list(com_array: Any) -> list[Any]:
 
 
 def running_app() -> Any:
-    """Attach only to an already-running SOLIDWORKS session; never start one."""
+    """Attach only to an already-running SOLIDWORKS session; never start one.
+
+    The session is bound late or early as ``sw_binding`` decides (``SW_MCP_BINDING``); every object
+    reached from the returned application is bound the same way.
+    """
     pythoncom.CoInitialize()
     try:
         app = win32com.client.GetActiveObject("SldWorks.Application")
@@ -546,7 +558,7 @@ def running_app() -> Any:
         raise RuntimeError(
             "No running SOLIDWORKS session is available. Open SOLIDWORKS and finish any modal dialogs first."
         ) from exc
-    return flag_methods(app, *_APP_METHODS)
+    return flag_methods(sw_binding.bind_application(app), *_APP_METHODS)
 
 
 # swUserPreferenceToggle_e.swInputDimValOnCreate.  When this is on — and it is
