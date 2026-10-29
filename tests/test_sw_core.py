@@ -581,5 +581,93 @@ class ListDimensionsDrivenTests(unittest.TestCase):
         self.assertEqual((count["value"], "value_mm" in count, "value_deg" in count), (6, False, False))
 
 
+class Switches:
+    """A view or manager whose display switches start on."""
+
+    def __init__(self, *names: str, broken: str = "") -> None:
+        self.__dict__["values"] = {name: True for name in names}
+        self.__dict__["broken"] = broken
+        self.__dict__["log"] = []
+
+    def __getattr__(self, name: str):
+        if name == self.broken or name not in self.values:
+            raise AttributeError(name)
+        return self.values[name]
+
+    def __setattr__(self, name: str, value) -> None:
+        self.log.append((name, value))
+        self.values[name] = value
+
+
+class QuietDoc:
+    def __init__(self, broken: str = "") -> None:
+        self.ActiveView = Switches("EnableGraphicsUpdate")
+        self.FeatureManager = Switches("EnableFeatureTree", "EnableFeatureTreeWindow", broken=broken)
+        self.SketchManager = Switches("DisplayWhenAdded")
+        self.redraws = 0
+
+    def GraphicsRedraw2(self) -> None:
+        self.redraws += 1
+
+
+class QuietUiTests(unittest.TestCase):
+    def run_quiet(self, doc, env: str, body=None):
+        app = unittest.mock.Mock(ActiveDoc=doc)
+        seen = {}
+        with unittest.mock.patch.dict("os.environ", {"SW_MCP_QUIET_UI": env}),                 unittest.mock.patch.object(sw_core, "running_app", return_value=app) as attach:
+            with sw_core.quiet_ui():
+                if doc is not None:
+                    seen = {
+                        "view": dict(doc.ActiveView.values),
+                        "tree": dict(doc.FeatureManager.values),
+                        "sketch": dict(doc.SketchManager.values),
+                    }
+                if body:
+                    body()
+        return attach, seen
+
+    def test_off_by_default_touches_nothing(self) -> None:
+        doc = QuietDoc()
+        attach, seen = self.run_quiet(doc, "")
+        attach.assert_not_called()
+        self.assertTrue(all(seen["view"].values()) and all(seen["tree"].values()) and all(seen["sketch"].values()))
+        self.assertEqual((doc.ActiveView.log, doc.redraws), ([], 0))
+
+    def test_switches_off_during_the_call_and_restores_after(self) -> None:
+        doc = QuietDoc()
+        _, seen = self.run_quiet(doc, "1")
+        self.assertEqual(seen["view"], {"EnableGraphicsUpdate": False})
+        self.assertEqual(seen["tree"], {"EnableFeatureTree": False, "EnableFeatureTreeWindow": False})
+        self.assertEqual(seen["sketch"], {"DisplayWhenAdded": False})
+        self.assertTrue(doc.ActiveView.values["EnableGraphicsUpdate"])
+        self.assertTrue(all(doc.FeatureManager.values.values()))
+        self.assertTrue(doc.SketchManager.values["DisplayWhenAdded"])
+        self.assertEqual(doc.redraws, 1)
+
+    def test_restores_when_the_tool_raises(self) -> None:
+        doc = QuietDoc()
+
+        def fail() -> None:
+            raise RuntimeError("tool failed")
+
+        with self.assertRaises(RuntimeError):
+            self.run_quiet(doc, "1", fail)
+        self.assertTrue(doc.ActiveView.values["EnableGraphicsUpdate"])
+        self.assertEqual(doc.redraws, 1)
+
+    def test_missing_switch_is_skipped(self) -> None:
+        doc = QuietDoc(broken="EnableFeatureTreeWindow")
+        _, seen = self.run_quiet(doc, "1")
+        self.assertEqual(seen["tree"], {"EnableFeatureTree": False, "EnableFeatureTreeWindow": True})
+        self.assertNotIn(("EnableFeatureTreeWindow", False), doc.FeatureManager.log)
+        self.assertTrue(doc.FeatureManager.values["EnableFeatureTree"])
+
+    def test_no_active_document_or_session_is_harmless(self) -> None:
+        self.run_quiet(None, "1")
+        with unittest.mock.patch.dict("os.environ", {"SW_MCP_QUIET_UI": "1"}),                 unittest.mock.patch.object(sw_core, "running_app", side_effect=RuntimeError("no session")):
+            with sw_core.quiet_ui():
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

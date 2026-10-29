@@ -587,6 +587,64 @@ def dimension_dialog_suppressed(app: Any) -> Iterator[None]:
                 logger.info("Could not restore the SOLIDWORKS dimension-input dialog setting.")
 
 
+# The display switches quiet_ui turns off for one tool call, as (member of the
+# active document, property on it).
+_QUIET_UI_SWITCHES = (
+    ("ActiveView", "EnableGraphicsUpdate"),
+    ("FeatureManager", "EnableFeatureTree"),
+    ("FeatureManager", "EnableFeatureTreeWindow"),
+    ("SketchManager", "DisplayWhenAdded"),
+)
+
+
+def quiet_ui_enabled() -> bool:
+    return os.environ.get("SW_MCP_QUIET_UI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def quiet_ui() -> Iterator[None]:
+    """Leave the view, the feature tree and new sketch entities undrawn while a tool runs.
+
+    Opt-in through ``SW_MCP_QUIET_UI``; off, this does nothing and touches no
+    COM object.  On SOLIDWORKS Design R2026x the API crashed in slduiu.dll
+    while sketching with the display live (#26).  Only the document active
+    when the call starts is quieted; a switch that cannot be read or set is
+    skipped, and every switch that was changed is put back, followed by one
+    ``GraphicsRedraw2``.
+    """
+    if not quiet_ui_enabled():
+        yield
+        return
+    doc: Any = None
+    changed: list[tuple[Any, str, bool]] = []
+    try:
+        doc = running_app().ActiveDoc
+    except Exception:
+        doc = None
+    if doc is not None:
+        for owner_name, switch in _QUIET_UI_SWITCHES:
+            try:
+                owner = getattr(doc, owner_name)
+                previous = bool(getattr(owner, switch))
+                setattr(owner, switch, False)
+                changed.append((owner, switch, previous))
+            except Exception:
+                logger.info("Quiet UI: could not switch off %s.%s.", owner_name, switch)
+    try:
+        yield
+    finally:
+        for owner, switch, previous in reversed(changed):
+            try:
+                setattr(owner, switch, previous)
+            except Exception:
+                logger.info("Quiet UI: could not restore %s.", switch)
+        if changed:
+            try:
+                invoke_no_arg(doc, "GraphicsRedraw2")
+            except Exception:
+                logger.info("Quiet UI: GraphicsRedraw2 failed.")
+
+
 def active_document() -> tuple[Any, Any]:
     app = running_app()
     doc = app.ActiveDoc
