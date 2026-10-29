@@ -208,6 +208,31 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.app_ole.calls[-1][0], 11)
         self.assertIs(self.app_ole.calls[-1][2][0], self.doc_ole)
 
+    def test_by_reference_variants_go_in_as_values_and_come_back_filled(self) -> None:
+        """#27: a generated method refuses VARIANT(VT_BYREF|VT_I4) and returns (result, out...) instead."""
+        self.app_ole.answers[11] = (Dynamic(self.doc_ole), 7)
+        errors = sw_core.byref_long(0)
+        activated = self.app.ActivateDoc3("Part1", True, 0, errors)
+        self.assertIsInstance(activated, EarlyBound)
+        self.assertEqual(activated, Dynamic(self.doc_ole)._oleobj_)
+        self.assertEqual(errors.value, 7)
+        self.assertEqual(self.app_ole.calls[-1], (11, 1, ("Part1", True, 0, 0)), "the value, not the VARIANT")
+
+    def test_two_outputs_are_written_back_in_order(self) -> None:
+        self.app_ole.answers[11] = (True, 3, 5)
+        errors, warnings = sw_core.byref_long(0), sw_core.byref_long(0)
+        self.assertIs(self.app.ActivateDoc3("x", errors, 0, warnings), True)
+        self.assertEqual((errors.value, warnings.value), (3, 5))
+
+    def test_a_variant_that_is_not_by_reference_passes_unchanged(self) -> None:
+        values = sw_core.double_array([1.0, 2.0])
+        self.app.ActivateDoc3(values, True, 0, None)
+        self.assertIs(self.app_ole.calls[-1][2][0], values)
+
+    def test_an_array_result_without_out_parameters_is_left_whole(self) -> None:
+        self.app_ole.answers[11] = (1.0, 2.0)
+        self.assertEqual(self.app.ActivateDoc3("x", True, 0, None), (1.0, 2.0))
+
     def test_arrays_and_nested_arrays_are_wrapped(self) -> None:
         faces = (Dynamic(FakeOle("f1")), (Dynamic(FakeOle("f2")), None), 3.5)
         wrapped = self.library.wrap(faces)
@@ -282,6 +307,32 @@ class BindApplicationTests(unittest.TestCase):
         self.assertIsNone(sw_binding._active)
         with unittest.mock.patch("win32com.client.Dispatch", side_effect=lambda o: ("late", o)):
             self.assertEqual(sw_binding.bind("pointer"), ("late", "pointer"))
+
+    def test_late_rewraps_a_generated_class_that_a_shared_cache_produced(self) -> None:
+        """#27: with sldworks.tlb wrappers in gen_py, GetActiveObject returns a generated class; late
+        binding must not change because of it."""
+        ole = FakeOle("app", {"{APP}"}, type_info=False)
+        generated = ISldWorks(ole)
+        seen = []
+        with unittest.mock.patch("win32com.client.dynamic.Dispatch",
+                                 side_effect=lambda o, name: seen.append((o, name)) or "dynamic"):
+            self.assertEqual(sw_binding.bind_application(generated), "dynamic")
+        self.assertEqual(seen, [(ole, "SldWorks.Application")])
+        self.assertEqual(self.requested, [])
+
+    def test_late_flag_methods_does_not_warn_for_a_cache_produced_class(self) -> None:
+        generated = ISldWorks(FakeOle("app", {"{APP}"}, type_info=False))
+        flagged = []
+
+        class FakeCDispatch:
+            def _FlagAsMethod(self, name):  # noqa: N802 - pywin32 member name
+                flagged.append(name)
+
+        with unittest.mock.patch.object(sw_core.win32com.client, "GetActiveObject", return_value=generated), \
+                unittest.mock.patch("win32com.client.dynamic.Dispatch", return_value=FakeCDispatch()):
+            with self.assertNoLogs("solidworks-mcp", level="WARNING"):
+                sw_core.running_app()
+        self.assertEqual(flagged, list(sw_core._APP_METHODS))
 
     def test_late_can_be_set_explicitly(self) -> None:
         os.environ[sw_binding.ENV_VAR] = "late"

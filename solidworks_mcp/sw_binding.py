@@ -145,6 +145,29 @@ def _unwrap(value: Any) -> Any:
     return value._oleobj_ if isinstance(value, EarlyBound) else value
 
 
+def _is_byref(value: Any) -> bool:
+    return isinstance(value, win32com.client.VARIANT) and bool(value.varianttype & pythoncom.VT_BYREF)
+
+
+def _call_early(member: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+    """Call a generated method with arguments made the way late binding takes them.
+
+    Late-bound callers pass out-parameters as ``VARIANT(VT_BYREF | ...)`` (``byref_long``) and read
+    ``.value`` afterwards.  A generated method declares those parameters itself, refuses a VARIANT
+    object for them (``TypeError: int() argument ... not 'VARIANT'``, #27) and returns
+    ``(result, out1, out2, ...)`` instead.  So each by-reference VARIANT goes in as its value, and
+    the outputs are written back into it in order, which keeps the caller's contract.
+    """
+    byref = [arg for arg in args if _is_byref(arg)]
+    plain = tuple(arg.value if _is_byref(arg) else _unwrap(arg) for arg in args)
+    result = member(*plain)
+    if byref and isinstance(result, tuple) and len(result) == len(byref) + 1:
+        for variant, out in zip(byref, result[1:]):
+            variant.value = out
+        return result[0]
+    return result
+
+
 class EarlyBound:
     """One SOLIDWORKS object, every member called by dispid through a generated interface class.
 
@@ -227,7 +250,7 @@ class EarlyBound:
         library = self._library
 
         def call(*args: Any) -> Any:
-            return library.wrap(member(*(_unwrap(arg) for arg in args)))
+            return library.wrap(_call_early(member, args))
 
         call.__name__ = getattr(member, "__name__", "call")
         return call
@@ -290,12 +313,19 @@ def _load_library(raw: Any) -> Library | None:
 def bind_application(raw: Any) -> Any:
     """``raw`` as ``win32com.client.GetActiveObject`` returned it, bound the configured way.
 
-    Late binding returns it unchanged.  Early binding returns it behind an :class:`EarlyBound` whose
-    home is ISldWorks, and keeps the library for :func:`bind`.
+    Late binding returns a pywin32 dynamic dispatch.  ``GetActiveObject`` hands back a generated
+    class instead as soon as any process of the same user has generated wrappers for sldworks.tlb
+    into the shared ``gen_py`` cache (makepy, ``EnsureDispatch``, or this module's early mode), and
+    the late-bound tools break on it (#27); such an object is wrapped dynamically again.  Results
+    of a dynamic dispatch stay dynamic, so the whole session is late-bound.  Early binding returns
+    the application behind an :class:`EarlyBound` whose home is ISldWorks, and keeps the library
+    for :func:`bind`.
     """
     global _active
     _active = None
     if mode() != "early":
+        if isinstance(raw, DispatchBaseClass):
+            return win32com.client.dynamic.Dispatch(raw._oleobj_, "SldWorks.Application")
         return raw
     library = _load_library(raw)
     if library is None:
