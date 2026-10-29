@@ -525,7 +525,7 @@ newest-name-first fallback.
 
 | Release | Binding | State |
 | --- | --- | --- |
-| SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured; the live checks also pass with `early` |
+| SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured |
 | SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments and `activate_document` measured |
 | SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | set `early` | under test (#26): late binding fails on the first sketch member there and SOLIDWORKS crashes |
 
@@ -543,6 +543,14 @@ with one warning in `server.log`, so the connection never depends on it.
 The mode is set, not detected: a dispatch without type information is not a
 usable signal, since `GetTypeInfo` fails on the 2016 SP3 application dispatch
 too, where late binding works.
+
+Late binding stays late when a `gen_py` cache of `sldworks.tlb` exists (#27).
+Such a cache is shared by every pywin32 process of the same Windows user;
+`makepy`, `EnsureDispatch` and `SW_MCP_BINDING=early` all write to it. Once it
+exists, `GetActiveObject` returns the generated `SldWorks` class, and the
+server wraps it dynamically again. Other pywin32 tools of the same user that
+drive SOLIDWORKS without binding explicitly are not protected: do not generate
+the cache on a machine where such a tool runs, or move it aside afterwards.
 
 ## Layout
 

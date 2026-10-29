@@ -32,7 +32,8 @@ from pathlib import Path
 
 import pythoncom
 import winerror
-from win32com.client import DispatchBaseClass
+import win32com.client
+from win32com.client import CoClassBaseClass, DispatchBaseClass
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -115,6 +116,13 @@ ISketchSegment = interface("ISketchSegment", "{SEG}", methods=[("GetType", 500),
 IEntity = interface("IEntity", "{ENT}", methods=[("GetType", 600), ("Select4", 601)])
 IFeature = interface("IFeature", "{FEAT}", methods=[("GetSpecificFeature2", 700), ("GetNextFeature", 701)],
                      props_get=[("Name", 710)], props_put=[("Name", 710)])
+
+class SldWorksCoClass(CoClassBaseClass):
+    """The generated coclass GetActiveObject returns once gen_py holds sldworks.tlb wrappers."""
+
+    CLSID = "{COCLASS}"
+    default_interface = ISldWorks
+
 
 # Like a generated module, this one also carries DispatchBaseClass itself (makepy imports it at module level),
 # which declares no members and must not be indexed.
@@ -270,12 +278,14 @@ class LibraryIndexTests(unittest.TestCase):
                          ["IModelDoc2", "ISketchSegment", "IEntity"])
 
 
-class RawApp:
-    """What GetActiveObject returns, as far as the binding looks at it."""
+class RawApp(win32com.client.dynamic.CDispatch):
+    """What GetActiveObject returns without a gen_py cache (a dynamic dispatch), as far as the binding looks at it."""
 
     def __init__(self, revision="34.4.0", revision_as_method=False) -> None:
-        self._oleobj_ = FakeOle("app", {"{APP}"}, type_info=False)
-        self.RevisionNumber = (lambda: revision) if revision_as_method else revision
+        self.__dict__.update(
+            _oleobj_=FakeOle("app", {"{APP}"}, type_info=False),
+            RevisionNumber=(lambda: revision) if revision_as_method else revision,
+        )
 
 
 class BindApplicationTests(unittest.TestCase):
@@ -309,19 +319,26 @@ class BindApplicationTests(unittest.TestCase):
             self.assertEqual(sw_binding.bind("pointer"), ("late", "pointer"))
 
     def test_late_rewraps_a_generated_class_that_a_shared_cache_produced(self) -> None:
-        """#27: with sldworks.tlb wrappers in gen_py, GetActiveObject returns a generated class; late
-        binding must not change because of it."""
-        ole = FakeOle("app", {"{APP}"}, type_info=False)
-        generated = ISldWorks(ole)
-        seen = []
-        with unittest.mock.patch("win32com.client.dynamic.Dispatch",
-                                 side_effect=lambda o, name: seen.append((o, name)) or "dynamic"):
-            self.assertEqual(sw_binding.bind_application(generated), "dynamic")
-        self.assertEqual(seen, [(ole, "SldWorks.Application")])
+        """#27: with sldworks.tlb wrappers in gen_py, GetActiveObject returns the generated coclass
+        SldWorks (a CoClassBaseClass, measured live on 2016 SP3), or an interface class; late binding
+        must not change because of either."""
+        for make in (lambda ole: SldWorksCoClass(ole), lambda ole: ISldWorks(ole)):
+            ole = FakeOle("app", {"{APP}"}, type_info=False)
+            seen = []
+            with unittest.mock.patch("win32com.client.dynamic.Dispatch",
+                                     side_effect=lambda o, name: seen.append((o, name)) or "dynamic"):
+                self.assertEqual(sw_binding.bind_application(make(ole)), "dynamic")
+            self.assertEqual(seen, [(ole, "SldWorks.Application")])
         self.assertEqual(self.requested, [])
 
+    def test_late_keeps_a_dynamic_dispatch_as_it_is(self) -> None:
+        raw = win32com.client.dynamic.CDispatch(FakeOle("app"), None)
+        with unittest.mock.patch("win32com.client.dynamic.Dispatch") as rewrap:
+            self.assertIs(sw_binding.bind_application(raw), raw)
+        rewrap.assert_not_called()
+
     def test_late_flag_methods_does_not_warn_for_a_cache_produced_class(self) -> None:
-        generated = ISldWorks(FakeOle("app", {"{APP}"}, type_info=False))
+        generated = SldWorksCoClass(FakeOle("app", {"{APP}"}, type_info=False))
         flagged = []
 
         class FakeCDispatch:

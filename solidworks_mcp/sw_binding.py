@@ -313,20 +313,20 @@ def _load_library(raw: Any) -> Library | None:
 def bind_application(raw: Any) -> Any:
     """``raw`` as ``win32com.client.GetActiveObject`` returned it, bound the configured way.
 
-    Late binding returns a pywin32 dynamic dispatch.  ``GetActiveObject`` hands back a generated
-    class instead as soon as any process of the same user has generated wrappers for sldworks.tlb
-    into the shared ``gen_py`` cache (makepy, ``EnsureDispatch``, or this module's early mode), and
-    the late-bound tools break on it (#27); such an object is wrapped dynamically again.  Results
-    of a dynamic dispatch stay dynamic, so the whole session is late-bound.  Early binding returns
-    the application behind an :class:`EarlyBound` whose home is ISldWorks, and keeps the library
-    for :func:`bind`.
+    Late binding returns a pywin32 dynamic dispatch.  ``GetActiveObject`` hands back the generated
+    coclass ``SldWorks`` instead as soon as any process of the same user has generated wrappers for
+    sldworks.tlb into the shared ``gen_py`` cache (makepy, ``EnsureDispatch``, or this module's
+    early mode), and the late-bound tools break on it (#27).  Anything that is not a dynamic
+    dispatch is therefore wrapped dynamically again; results of a dynamic dispatch stay dynamic, so
+    the whole session is late-bound.  Early binding returns the application behind an
+    :class:`EarlyBound` whose home is ISldWorks, and keeps the library for :func:`bind`.
     """
     global _active
     _active = None
     if mode() != "early":
-        if isinstance(raw, DispatchBaseClass):
-            return win32com.client.dynamic.Dispatch(raw._oleobj_, "SldWorks.Application")
-        return raw
+        if isinstance(raw, win32com.client.dynamic.CDispatch):
+            return raw
+        return win32com.client.dynamic.Dispatch(getattr(raw, "_oleobj_", raw), "SldWorks.Application")
     library = _load_library(raw)
     if library is None:
         return raw
