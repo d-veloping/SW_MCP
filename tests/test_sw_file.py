@@ -179,5 +179,109 @@ class PdfExportTests(unittest.TestCase):
         self.assertEqual(ext.calls, [])
 
 
+class FakeSketch:
+    """A sketch feature whose Select2 answers as told and records itself in the shared selection."""
+
+    def __init__(self, name: str, selection: list, answer: bool = True) -> None:
+        self.Name = name
+        self.selection = selection
+        self.answer = answer
+
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def Select2(self, append: bool, mark: int) -> bool:  # noqa: N802 - COM member name
+        if self.answer:
+            if not append:
+                self.selection.clear()
+            self.selection.append(self.Name)
+        return self.answer
+
+
+class LoggingExtension(FakeExtension):
+    """SaveAs also notes which sketches were selected at the moment of saving."""
+
+    def __init__(self, selection: list) -> None:
+        super().__init__()
+        self.selection = selection
+        self.selected_at_save: list[list[str]] = []
+
+    def SaveAs(self, path, version, options, export_data, errors, warnings):  # noqa: N802 - COM member name
+        self.selected_at_save.append(list(self.selection))
+        return super().SaveAs(path, version, options, export_data, errors, warnings)
+
+
+class LibraryFeaturePartTests(unittest.TestCase):
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name).resolve()
+        self.profile = self.root / "item" / "profil 8" / "40 x 40.sldlfp"
+        self.selection: list[str] = []
+
+    def sketches(self, *names: str, refuse: str = "") -> list[FakeSketch]:
+        return [FakeSketch(name, self.selection, answer=name != refuse) for name in names]
+
+    def save(self, doc: FakeDocument, path: Path, sketches: list[FakeSketch], overwrite: bool = False,
+             selected: list | None = None) -> dict:
+        with unittest.mock.patch.object(sw_file, "OUTPUT_ROOT", self.root),                 unittest.mock.patch.object(sw_file, "active_document", return_value=(None, doc)),                 unittest.mock.patch.object(sw_file, "clear_selection", side_effect=lambda _: self.selection.clear()),                 unittest.mock.patch.object(sw_file, "exit_active_sketch"),                 unittest.mock.patch.object(sw_file, "sketch_features", return_value=sketches),                 unittest.mock.patch.object(sw_file, "selected_objects",
+                                           side_effect=lambda _: list(self.selection) if selected is None else selected):
+            return sw_file.save_document({"path": str(path), "overwrite": overwrite})
+
+    def test_a_part_saves_as_sldlfp_with_every_2d_sketch_selected(self) -> None:
+        self.selection.append("Fremd")   # a leftover selection must not end up in the profile
+        ext = LoggingExtension(self.selection)
+        answer = self.save(TypedDocument(ext, 1), self.profile, self.sketches("Skizze1", "Skizze2"))
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(Path(answer["data"]["path"]), self.profile)
+        self.assertEqual([(Path(path), options) for path, _, options in ext.calls], [(self.profile, sw_file.SW_SAVE_AS_SILENT)])
+        self.assertEqual(ext.selected_at_save, [["Skizze1", "Skizze2"]])
+
+    def test_a_plain_save_still_clears_the_selection(self) -> None:
+        self.selection.append("Fremd")
+        ext = LoggingExtension(self.selection)
+        answer = self.save(TypedDocument(ext, 1), self.profile.with_suffix(".sldprt"), self.sketches("Skizze1"))
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(ext.selected_at_save, [[]])
+
+    def test_refusals_before_the_path_is_touched(self) -> None:
+        cases = {
+            "assembly": (2, self.sketches("Skizze1"), None, "Only a part"),
+            "drawing": (3, self.sketches("Skizze1"), None, "Only a part"),
+            "part without a 2D sketch": (1, [], None, "has none"),
+            "sketch not selectable": (1, self.sketches("Skizze1", "Skizze2", refuse="Skizze2"), None, "Could not select sketch 'Skizze2'"),
+            "selection not read back": (1, self.sketches("Skizze1", "Skizze2"), ["Skizze1"], "could not all be selected"),
+        }
+        for label, (kind, sketches, selected, message) in cases.items():
+            with self.subTest(label):
+                ext = FakeExtension()
+                target = self.root / "neu" / "Profil.SLDLFP"
+                with unittest.mock.patch.object(sw_file, "validated_output_path") as validated:
+                    answer = self.save(TypedDocument(ext, kind), target, sketches, selected=selected)
+                self.assertFalse(answer["ok"])
+                self.assertIn(message, answer["message"])
+                self.assertEqual(ext.calls, [])
+                validated.assert_not_called()
+                self.assertFalse(target.parent.exists())
+
+    def test_a_failed_save_is_reported(self) -> None:
+        answer = self.save(TypedDocument(FakeExtension(answer=True, errors=1), 1), self.profile, self.sketches("Skizze1"))
+        self.assertFalse(answer["ok"])
+
+    def test_an_existing_profile_needs_overwrite(self) -> None:
+        self.profile.parent.mkdir(parents=True)
+        self.profile.write_bytes(b"old")
+        ext = FakeExtension()
+        with self.assertRaisesRegex(RuntimeError, "Refusing to overwrite"):
+            self.save(TypedDocument(ext, 1), self.profile, self.sketches("Skizze1"))
+        self.assertEqual(ext.calls, [])
+        self.assertTrue(self.save(TypedDocument(ext, 1), self.profile, self.sketches("Skizze1"), overwrite=True)["ok"])
+
+    def test_a_profile_outside_the_output_root_is_refused(self) -> None:
+        ext = FakeExtension()
+        with self.assertRaisesRegex(RuntimeError, "must be under"):
+            self.save(TypedDocument(ext, 1), self.root.parent / "weldment profiles" / "x" / "y" / "z.sldlfp", self.sketches("Skizze1"))
+        self.assertEqual(ext.calls, [])
+
 if __name__ == "__main__":
     unittest.main()

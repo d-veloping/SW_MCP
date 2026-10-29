@@ -28,6 +28,11 @@ wall), and after trimming the third member flush to the second its box ends
 a*b*t/2 (triangle) and (a*b - cut corner)*t (polygon); the first member cut at
 a reference plane falls into two pieces, the free one A * 150 (the other
 keeps its mitre).  The part is closed without saving.
+
+An own profile, a 40 x 40 square with a 10 mm hole around the origin, is
+saved with save_document as a .sldlfp under the output root; a 500 mm member
+with it as profile_path measures (1600 - 25 pi) * 500 and is centred on the
+line.  Both parts are closed without saving; the profile file stays.
 """
 
 from __future__ import annotations
@@ -42,10 +47,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from solidworks_mcp.sw_core import active_document, running_app, value
-from solidworks_mcp.sw_file import create_new_document
+from solidworks_mcp.sw_core import OUTPUT_ROOT, active_document, running_app, value
+from solidworks_mcp.sw_file import close_document, create_new_document, save_document
 from solidworks_mcp.sw_inspect import list_bodies, list_faces, list_features
 from solidworks_mcp.sw_refgeom import create_plane
+from solidworks_mcp.sw_sketch import close_sketch, create_sketch, draw_circle, draw_rectangle
 from solidworks_mcp.sw_weldment import (
     create_3d_sketch,
     list_weldment_profiles,
@@ -86,6 +92,37 @@ def body_index(fragment: str) -> int:
         if fragment in body["name"]:
             return int(body["index"])
     raise SystemExit(f"no body named like {fragment}")
+
+
+def own_profile() -> None:
+    profile = OUTPUT_ROOT / "live_weldment" / "own" / "square" / "40 x 40.sldlfp"
+    area = 40 * 40 - math.pi * 5 ** 2
+    require(create_new_document({"kind": "part"}), "create_new_document(profile)")
+    try:
+        require(create_sketch({"plane": "front"}), "create_sketch(profile)")
+        require(draw_rectangle({"x1_mm": -20, "y1_mm": -20, "x2_mm": 20, "y2_mm": 20}), "draw_rectangle(profile)")
+        require(draw_circle({"x_mm": 0, "y_mm": 0, "radius_mm": 5}), "draw_circle(profile)")
+        require(close_sketch({}), "close_sketch(profile)")
+        saved = require(save_document({"path": str(profile), "overwrite": True}), "save_document(.sldlfp)")
+        _, doc = active_document()
+        check("profile saved as .sldlfp", Path(str(value(doc, "GetPathName") or "")).resolve() == profile.resolve() and profile.is_file(), True)
+        check("save_document reports the .sldlfp path", Path(saved["data"]["path"]).resolve() == profile.resolve(), True)
+    finally:
+        require(close_document({}), "close_document(profile)")
+
+    require(create_new_document({"kind": "part"}), "create_new_document(own member)")
+    try:
+        sketch = require(create_3d_sketch({"lines": [
+            {"x1_mm": 0, "y1_mm": 0, "z1_mm": 0, "x2_mm": 500, "y2_mm": 0, "z2_mm": 0}]}), "create_3d_sketch(own member)")
+        member = require(weldment_structural_member({
+            "selection": {"sketch_segments": [0], "sketch_name": sketch["data"]["sketch"]}, "profile_path": str(profile),
+        }), "weldment_structural_member(own profile)")
+        check("own profile member volume = (1600 - 25 pi) * 500", member["data"]["volume_mm3"], area * 500, 0.3)
+        check("own profile member box", member["data"]["bodies"][0]["size_mm"], [500.0, 40.0, 40.0])
+        check("own profile centred on the line", member["data"]["bodies"][0]["min_mm"], [0.0, -20.0, -20.0])
+        check("own profile path read back", Path(member["data"]["member"]["profile_path"]).resolve() == profile.resolve(), True)
+    finally:
+        require(close_document({}), "close_document(own member)")
 
 
 def main() -> int:
@@ -227,6 +264,8 @@ def main() -> int:
             check("free piece volume = A * 150", left[0]["volume_mm3"], area * 150, 0.3)
     finally:
         running_app().CloseDoc(str(value(doc, "GetTitle") or title))
+
+    own_profile()
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")

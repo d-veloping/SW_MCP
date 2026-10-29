@@ -33,7 +33,9 @@ from .sw_core import (
     document_type,
     double_array,
     EXPORT_EXTENSIONS,
+    exit_active_sketch,
     extension,
+    feature_property,
     invoke_no_arg,
     logger,
     nothing,
@@ -44,6 +46,9 @@ from .sw_core import (
     running_app,
     safe,
     save_flag,
+    selectable,
+    selected_objects,
+    sketch_features,
     discover_template,
     tool,
     value,
@@ -451,20 +456,51 @@ def list_open_documents(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "save_document",
     "Save the active document as a new .sldprt, .sldasm, or .slddrw file under the designated "
-    "outputs folder. Existing files are never overwritten unless overwrite is true.",
+    "outputs folder. A part can also be saved as a .sldlfp library feature part holding all its 2D "
+    "sketches, for example a weldment profile for weldment_structural_member (profile_path); a part "
+    "without a 2D sketch is refused. Existing files are never overwritten unless overwrite is true.",
     {"path": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}},
     ["path"],
 )
 def save_document(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
+    library = Path(str(args["path"])).suffix.lower() == ".sldlfp"
+    # Checked before the path, like PDF export: nothing is created on disk.
+    if library:
+        if document_type(doc) != 1:
+            return result(False, "Only a part can be saved as a .sldlfp library feature part.")
+        refused = _select_library_sketches(doc)
+        if refused:
+            return result(False, refused)
     output = validated_output_path(
-        str(args["path"]), {".sldprt", ".sldasm", ".slddrw"}, bool(args.get("overwrite", False))
+        str(args["path"]), {".sldprt", ".sldasm", ".slddrw", ".sldlfp"}, bool(args.get("overwrite", False))
     )
-    clear_selection(doc)
+    if not library:
+        clear_selection(doc)
     saved = _save_as(doc, str(output))
     if saved:
         return result(True, f"Saved document to {output}.", path=str(output))
     return result(False, _save_failure_reason(doc, output), path=str(output))
+
+
+def _select_library_sketches(doc: Any) -> str:
+    """Leave exactly the part's 2D sketches selected; the reason it could not, or empty.
+
+    A .sldlfp holds only the features selected at save time: saved with
+    nothing selected, the file opens but carries no profile, and a structural
+    member with it fails (measured on 2024 SP3, 2026-10-29).
+    """
+    exit_active_sketch(doc)
+    sketches = sketch_features(doc)
+    clear_selection(doc)
+    if not sketches:
+        return "A .sldlfp needs the profile as a 2D sketch, and the part has none."
+    for index, sketch in enumerate(sketches):
+        if not bool(selectable(sketch).Select2(index > 0, 0)):
+            return f"Could not select sketch '{feature_property(sketch, 'Name', '')}' for the library feature part."
+    if len(selected_objects(doc)) != len(sketches):
+        return "The sketches of the part could not all be selected for the library feature part."
+    return ""
 
 
 def _save_failure_reason(doc: Any, output: Path) -> str:
