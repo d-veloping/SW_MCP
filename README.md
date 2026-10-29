@@ -134,7 +134,7 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw` and wait until it is the active document; reports the opened document and `already_open` (was the file open before the call). |
 | `list_open_documents` / `close_document` | Every open document with title and path; close one without saving, with `only_if_clean` only if it has no unsaved changes. |
 | `activate_document` | Activate the open document with exactly this title and wait until it is active; for a caller that created the document itself and lost the focus. Activates nothing for an unknown, duplicate or unreadable title. |
-| `save_document` / `save_active_document` | Save-as under the output root / save in place. |
+| `save_document` / `save_active_document` | Save-as under the output root (a part also as `.sldlfp` holding all its 2D sketches, e.g. a weldment profile) / save in place. |
 | `export_document` | STEP, IGES, STL, Parasolid, 3MF, an image of the current view, or PDF of a drawing (every sheet, vector, true sheet size; an image of a drawing is only a window-sized capture). |
 | `rebuild_document` | Rebuild and report failing features. |
 | `set_appearance` / `set_material` | Display colour; real material (so mass properties mean something). |
@@ -199,7 +199,7 @@ metal parts only.
 | Tool | Purpose |
 | --- | --- |
 | `create_3d_sketch` | Straight lines between model-space points, closed as one 3D sketch; the path for structural members. |
-| `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. |
+| `list_weldment_profiles` | Standard / type / size of every `.sldlfp` profile in the configured folders and the install. An own profile is a part with one sketch of closed contours (outline and holes) around the origin, which is the insertion point, saved with `save_document` as `<standard>/<type>/<size>.sldlfp`; pass its path as `profile_path`, or add its root folder under Tools > Options > File Locations > Weldment Profiles to list it. |
 | `weldment_structural_member` | A library profile swept along connected sketch segments, one body each, corners mitred or butted; adds the Weldment feature when needed. Reports each body's volume and box. |
 | `weldment_end_cap` | Plate over the open end of a member, inset by a wall-thickness ratio or a distance, optionally chamfered or inward (the member is cut back); one new body per selected face, every option held against the readback. |
 | `weldment_trim_extend` | Trim members flush against other bodies (butt / miter) or cut them at faces and reference planes (trim), with coped cut and weld gap; butt and miter take one member against one body, only trim takes several; reports the trimmed bodies' new boxes and volumes and refuses to call an unchanged model a success. |
@@ -408,6 +408,10 @@ every line into "unknown".
   pattern the body instead.
 - `save_document` cannot overwrite a file SOLIDWORKS currently has open, even
   with `overwrite: true`. The error says so when that is the cause.
+- A `.sldlfp` holds only the features selected when it is saved; saved with
+  nothing selected it carries no profile, and a structural member with it
+  fails (measured on 2024 SP3). `save_document` therefore selects every 2D
+  sketch of the part before it saves a `.sldlfp`.
 - Sheet metal (measured on 2016 SP3): the K-factor cannot be changed through
   the API — `ISheetMetalFeatureData` and `ICustomBendAllowance` accept the
   value and keep the document default — so `sheet_metal_info` reports what the
