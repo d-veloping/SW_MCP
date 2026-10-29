@@ -116,10 +116,12 @@ IEntity = interface("IEntity", "{ENT}", methods=[("GetType", 600), ("Select4", 6
 IFeature = interface("IFeature", "{FEAT}", methods=[("GetSpecificFeature2", 700), ("GetNextFeature", 701)],
                      props_get=[("Name", 710)], props_put=[("Name", 710)])
 
+# Like a generated module, this one also carries DispatchBaseClass itself (makepy imports it at module level),
+# which declares no members and must not be indexed.
 MODULE = types.SimpleNamespace(
     __name__="fake_sldworks", ISldWorks=ISldWorks, IModelDoc2=IModelDoc2, IPartDoc=IPartDoc,
     IAssemblyDoc=IAssemblyDoc, ISketchManager=ISketchManager, ISketchSegment=ISketchSegment, IEntity=IEntity,
-    IFeature=IFeature, not_a_class=42,
+    IFeature=IFeature, DispatchBaseClass=DispatchBaseClass, not_a_class=42,
 )
 
 
@@ -233,11 +235,21 @@ class ProxyTests(unittest.TestCase):
         self.assertNotEqual(first, self.app)
 
 
+class LibraryIndexTests(unittest.TestCase):
+    def test_the_base_class_a_generated_module_carries_is_not_indexed(self) -> None:
+        """Regression (live on 2016 SP3): indexing DispatchBaseClass itself raised AttributeError on
+        _prop_map_get_ at the first early-bound attach."""
+        library = Library(MODULE)
+        self.assertNotIn(DispatchBaseClass, library.declaring("GetType"))
+        self.assertEqual([cls.__name__ for cls in library.declaring("GetType")],
+                         ["IModelDoc2", "ISketchSegment", "IEntity"])
+
+
 class RawApp:
     """What GetActiveObject returns, as far as the binding looks at it."""
 
-    def __init__(self, revision="34.4.0", type_info=False, revision_as_method=False) -> None:
-        self._oleobj_ = FakeOle("app", {"{APP}"}, type_info=type_info)
+    def __init__(self, revision="34.4.0", revision_as_method=False) -> None:
+        self._oleobj_ = FakeOle("app", {"{APP}"}, type_info=False)
         self.RevisionNumber = (lambda: revision) if revision_as_method else revision
 
 
@@ -263,48 +275,58 @@ class BindApplicationTests(unittest.TestCase):
         self.addCleanup(sw_binding._libraries.clear)
         self.addCleanup(setattr, sw_binding, "_active", None)
 
-    def test_auto_binds_late_when_the_application_has_type_information(self) -> None:
-        raw = RawApp(type_info=True)
+    def test_the_default_is_late_and_loads_no_type_library(self) -> None:
+        raw = RawApp()
         self.assertIs(sw_binding.bind_application(raw), raw)
         self.assertEqual(self.requested, [])
+        self.assertIsNone(sw_binding._active)
         with unittest.mock.patch("win32com.client.Dispatch", side_effect=lambda o: ("late", o)):
             self.assertEqual(sw_binding.bind("pointer"), ("late", "pointer"))
 
-    def test_auto_binds_early_when_type_information_is_missing(self) -> None:
-        app = sw_binding.bind_application(RawApp("34.4.0", type_info=False))
-        self.assertIsInstance(app, EarlyBound)
-        self.assertEqual(repr(app), "<EarlyBound ISldWorks>")
-        self.assertEqual(self.requested, [(sw_binding.TYPELIB_GUID, 0, 34, 0)])
-        pointer = FakeOle("view", {"{FEAT}"})
-        self.assertIsInstance(sw_binding.bind(Dynamic(pointer)), EarlyBound)
-        # A second attach to the same release reuses the library.
-        sw_binding.bind_application(RawApp("34.4.0", type_info=False, revision_as_method=True))
-        self.assertEqual(len(self.requested), 1)
-
-    def test_late_can_be_forced(self) -> None:
+    def test_late_can_be_set_explicitly(self) -> None:
         os.environ[sw_binding.ENV_VAR] = "late"
-        raw = RawApp(type_info=False)
+        raw = RawApp()
         self.assertIs(sw_binding.bind_application(raw), raw)
         self.assertEqual(self.requested, [])
 
-    def test_early_can_be_forced(self) -> None:
+    def test_early_loads_the_type_library_of_the_running_release(self) -> None:
         os.environ[sw_binding.ENV_VAR] = "EARLY"
-        self.assertIsInstance(sw_binding.bind_application(RawApp("24.3.0", type_info=True)), EarlyBound)
-        self.assertEqual(self.requested, [(sw_binding.TYPELIB_GUID, 0, 24, 0)])
+        app = sw_binding.bind_application(RawApp("34.4.0"))
+        self.assertIsInstance(app, EarlyBound)
+        self.assertEqual(repr(app), "<EarlyBound ISldWorks>")
+        self.assertEqual(self.requested, [(sw_binding.TYPELIB_GUID, 0, 34, 0)])
+        self.assertIsInstance(sw_binding.bind(Dynamic(FakeOle("view", {"{FEAT}"}))), EarlyBound)
+        # A second attach to the same release reuses the library; a method-shaped RevisionNumber reads too.
+        sw_binding.bind_application(RawApp("34.4.0", revision_as_method=True))
+        self.assertEqual(len(self.requested), 1)
+        sw_binding.bind_application(RawApp("24.3.0"))
+        self.assertEqual(self.requested[-1], (sw_binding.TYPELIB_GUID, 0, 24, 0))
 
-    def test_an_unknown_mode_is_auto_with_a_warning(self) -> None:
-        os.environ[sw_binding.ENV_VAR] = "sometimes"
-        raw = RawApp(type_info=True)
+    def test_switching_back_to_late_drops_the_early_library(self) -> None:
+        os.environ[sw_binding.ENV_VAR] = "early"
+        sw_binding.bind_application(RawApp())
+        self.assertIsNotNone(sw_binding._active)
+        os.environ[sw_binding.ENV_VAR] = "late"
+        raw = RawApp()
+        self.assertIs(sw_binding.bind_application(raw), raw)
+        self.assertIsNone(sw_binding._active)
+
+    def test_an_unknown_mode_is_late_with_a_warning(self) -> None:
+        os.environ[sw_binding.ENV_VAR] = "auto"
+        raw = RawApp()
         with self.assertLogs("solidworks-mcp", level="WARNING") as logs:
             self.assertIs(sw_binding.bind_application(raw), raw)
-        self.assertIn("sometimes", logs.output[0])
+        self.assertIn("auto", logs.output[0])
+        self.assertEqual(self.requested, [])
 
     def test_a_missing_type_library_falls_back_to_late_binding_with_one_warning(self) -> None:
+        os.environ[sw_binding.ENV_VAR] = "early"
+
         def not_registered(*args):
             raise pythoncom.com_error(winerror.TYPE_E_LIBNOTREGISTERED, "Library not registered.", None, None)
 
         with unittest.mock.patch.object(sw_binding.gencache, "EnsureModule", not_registered):
-            raw = RawApp("34.4.0", type_info=False)
+            raw = RawApp("34.4.0")
             with self.assertLogs("solidworks-mcp", level="WARNING") as logs:
                 self.assertIs(sw_binding.bind_application(raw), raw)
                 self.assertIs(sw_binding.bind_application(raw), raw)
@@ -313,20 +335,23 @@ class BindApplicationTests(unittest.TestCase):
         self.assertIsNone(sw_binding._active)
 
     def test_a_module_without_the_application_interface_falls_back(self) -> None:
+        os.environ[sw_binding.ENV_VAR] = "early"
         with unittest.mock.patch.object(sw_binding.gencache, "EnsureModule", lambda *a: types.SimpleNamespace()):
-            raw = RawApp("34.4.0", type_info=False)
+            raw = RawApp("34.4.0")
             with self.assertLogs("solidworks-mcp", level="WARNING"):
                 self.assertIs(sw_binding.bind_application(raw), raw)
 
     def test_an_unreadable_revision_falls_back(self) -> None:
-        raw = RawApp("", type_info=False)
+        os.environ[sw_binding.ENV_VAR] = "early"
+        raw = RawApp("")
         with self.assertLogs("solidworks-mcp", level="WARNING") as logs:
             self.assertIs(sw_binding.bind_application(raw), raw)
         self.assertIn("revision", logs.output[0])
         self.assertEqual(self.requested, [])
 
     def test_running_app_binds_what_get_active_object_returns(self) -> None:
-        raw = RawApp("34.4.0", type_info=False)
+        os.environ[sw_binding.ENV_VAR] = "early"
+        raw = RawApp("34.4.0")
         with unittest.mock.patch.object(sw_core.win32com.client, "GetActiveObject", return_value=raw):
             app = sw_core.running_app()
         self.assertIsInstance(app, EarlyBound)

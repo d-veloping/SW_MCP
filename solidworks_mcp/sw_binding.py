@@ -16,8 +16,8 @@
 
 Late binding is pywin32's dynamic dispatch: every member is resolved by name
 through ``GetIDsOfNames`` on the object's default interface.  It is what every
-release this server was measured on works with (2016 SP3, 2026 SP3.2) and stays
-the default wherever the running SOLIDWORKS answers ``GetTypeInfo``.
+release this server was measured on works with (2016 SP3, 2026 SP3.2), and it
+is the default.
 
 SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x) hands ``GetActiveObject`` a
 dispatch without usable type information (#26).  Name lookups then fail
@@ -28,14 +28,23 @@ from the installed ``sldworks.tlb`` (one per interface, members called by
 dispid through ``InvokeTypes``), and :class:`EarlyBound` routes every member
 access through the interface that declares it.
 
-``SW_MCP_BINDING`` selects the mode.  ``auto`` (the default) binds late when the
-application dispatch answers ``GetTypeInfo`` and early when it does not;
-``late`` and ``early`` force one.  Early binding falls back to late binding,
-with one warning in the log, when the type library cannot be loaded, so a
+``SW_MCP_BINDING`` selects the mode.  ``late`` is the default and leaves every
+release this server was measured on exactly as it was; ``early`` turns the
+makepy path on, for R2026x.  Early binding falls back to late binding, with one
+warning in the log, when the type library cannot be loaded, so a
 misconfiguration never costs the connection.  The generated wrappers land in
 pywin32's ``gen_py`` cache (``%TEMP%\\gen_py\\<python version>``); the first
 early-bound attach generates them, which takes a few seconds, later attaches
 import them.
+
+The mode is explicit rather than auto-detected because the cheap signal for
+"late binding will break", a dispatch without type information, does not hold:
+``IDispatch.GetTypeInfo`` fails on the application dispatch of SOLIDWORKS 2016
+SP3 as well (measured 2026-10-29), where late binding has always worked.  What
+differs on R2026x is name resolution on the document's sub-objects, which
+cannot be probed at attach time without risking the very crash this guards
+against.  So the reporter of a broken release sets ``early`` rather than the
+server guessing.
 """
 
 from __future__ import annotations
@@ -56,19 +65,20 @@ logger = logging.getLogger("solidworks-mcp")
 TYPELIB_GUID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
 TYPELIB_LCID = 0
 
-MODES = ("auto", "late", "early")
+MODES = ("late", "early")
+DEFAULT_MODE = "late"
 ENV_VAR = "SW_MCP_BINDING"
 
 _PyIDispatchType = pythoncom.TypeIIDs[pythoncom.IID_IDispatch]
 
 
 def mode() -> str:
-    """The configured binding mode; an unknown value counts as ``auto`` and is logged."""
-    raw = (os.environ.get(ENV_VAR) or "auto").strip().lower()
+    """The configured binding mode; an unknown value counts as the default and is logged."""
+    raw = (os.environ.get(ENV_VAR) or DEFAULT_MODE).strip().lower()
     if raw in MODES:
         return raw
-    logger.warning("%s=%r is not one of %s; using 'auto'.", ENV_VAR, raw, ", ".join(MODES))
-    return "auto"
+    logger.warning("%s=%r is not one of %s; using %r.", ENV_VAR, raw, ", ".join(MODES), DEFAULT_MODE)
+    return DEFAULT_MODE
 
 
 def _members(cls: type) -> set[str]:
@@ -90,7 +100,9 @@ class Library:
 
     def __init__(self, module: Any) -> None:
         self.module = module
-        classes = [c for c in vars(module).values() if isinstance(c, type) and issubclass(c, DispatchBaseClass)]
+        # The generated module re-exports DispatchBaseClass itself, which declares nothing.
+        classes = [c for c in vars(module).values()
+                   if isinstance(c, type) and issubclass(c, DispatchBaseClass) and hasattr(c, "_prop_map_get_")]
         # Largest interface first: when several interfaces an object implements declare the same name,
         # the object's own interface is the richer one (ISketchSegment over IEntity for a sketch line).
         classes.sort(key=lambda cls: len(_members(cls)), reverse=True)
@@ -240,14 +252,6 @@ def _warn_once(key: str, message: str, *args: Any) -> None:
         logger.warning(message, *args)
 
 
-def _has_type_info(raw: Any) -> bool:
-    """Whether the application dispatch carries type information, which late binding resolves names from."""
-    try:
-        return raw._oleobj_.GetTypeInfo() is not None
-    except (pythoncom.com_error, AttributeError):
-        return False
-
-
 def _revision(raw: Any) -> str:
     member = raw.RevisionNumber
     if callable(member) and not hasattr(member, "_oleobj_"):
@@ -290,13 +294,11 @@ def bind_application(raw: Any) -> Any:
     home is ISldWorks, and keeps the library for :func:`bind`.
     """
     global _active
-    selected = mode()
-    if selected == "late" or (selected == "auto" and _has_type_info(raw)):
-        _active = None
+    _active = None
+    if mode() != "early":
         return raw
     library = _load_library(raw)
     if library is None:
-        _active = None
         return raw
     _active = library
     return EarlyBound(raw._oleobj_, library, (library.module.ISldWorks,))
