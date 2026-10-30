@@ -88,6 +88,8 @@ args = ['C:\path\to\solidworks-mcp\server.py']
 | `SW_MCP_OUTPUT_ROOT` | `~/Documents/solidworks-mcp` | Every file the server writes stays under here. Paths outside it are refused. |
 | `SW_MCP_TEMPLATE_DIR` | auto-discovered | Where to look for `.prtdot` / `.asmdot` / `.drwdot` templates if SOLIDWORKS has no default configured. |
 | `SW_MCP_DEMO_TOOLS` | unset | Set to `1` to register the basketball demo tools. Off by default: a `create_basketball` sitting next to `revolve` measurably degrades tool selection. |
+| `SW_MCP_BINDING` | `late` | How COM objects are bound: `late` (pywin32 dynamic dispatch, members resolved by name) or `early` (makepy wrappers generated from the installed `sldworks.tlb`, members called by dispid). Made for SOLIDWORKS Design 2026 / 3DEXPERIENCE R2026x (#26), which is still not supported. Early binding falls back to late with a warning in `server.log` when the type library cannot be loaded. See [Supported releases](#supported-releases). |
+| `SW_MCP_QUIET_UI` | unset | Set to `1` to leave the view, the feature tree and new sketch entities undrawn for the duration of each tool call, restored and redrawn afterwards. Made for SOLIDWORKS Design R2026x, where the API crashes in `slduiu.dll` while sketching (#26); there it moves the crash later but does not prevent it. |
 
 ---
 
@@ -519,6 +521,37 @@ were measured on 2016 SP3 only (`tests\live_sheet_metal.py`,
 names that build on 2016 (`InsertSheetMetalBaseFlange`, `InsertSheetMetalHem`,
 `InsertStructuralWeldment4`, `InsertEndCapFeature3`, ...) without a
 newest-name-first fallback.
+
+### Supported releases
+
+| Release | Binding | State |
+| --- | --- | --- |
+| SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured |
+| SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments and `activate_document` measured |
+| SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | not supported | late binding fails on the first sketch member; with `early` and `SW_MCP_QUIET_UI=1` (SP4.0) a sketch rectangle is drawn, then SOLIDWORKS crashes in `slduiu.dll` during `close_sketch` (#26) |
+
+Late binding is pywin32's dynamic dispatch: every member is resolved by name on
+the object's default interface. Early binding (`solidworks_mcp/sw_binding.py`)
+has makepy generate wrapper classes from the installed `sldworks.tlb` into
+pywin32's `gen_py` cache (`%TEMP%\gen_py\<python version>`, a few seconds on the
+first attach, imported afterwards) and calls every member by dispid through the
+interface that declares it; where the type library declares a bare `IDispatch`
+(`ActiveDoc`, `FirstFeature`, arrays of bodies, faces and segments), the object
+is asked which of the declaring interfaces it implements. A failed early attach
+(type library not registered, generation failed) falls back to late binding
+with one warning in `server.log`, so the connection never depends on it.
+
+The mode is set, not detected: a dispatch without type information is not a
+usable signal, since `GetTypeInfo` fails on the 2016 SP3 application dispatch
+too, where late binding works.
+
+Late binding stays late when a `gen_py` cache of `sldworks.tlb` exists (#27).
+Such a cache is shared by every pywin32 process of the same Windows user;
+`makepy`, `EnsureDispatch` and `SW_MCP_BINDING=early` all write to it. Once it
+exists, `GetActiveObject` returns the generated `SldWorks` class, and the
+server wraps it dynamically again. Other pywin32 tools of the same user that
+drive SOLIDWORKS without binding explicitly are not protected: do not generate
+the cache on a machine where such a tool runs, or move it aside afterwards.
 
 ## Layout
 

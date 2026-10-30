@@ -1102,11 +1102,12 @@ def _dimension_entry(view_name: str, display: Any) -> dict[str, Any]:
 
 
 def _late_bound(obj: Any) -> Any:
-    """IDrawingDoc.GetViews hands back bare PyIDispatch pointers (measured on 2016 SP3): no member reads until wrapped."""
+    """IDrawingDoc.GetViews hands back bare PyIDispatch pointers (measured on 2016 SP3): no member reads until wrapped,
+    the way the session is bound (late or early, see sw_binding)."""
     if type(obj).__name__ == "PyIDispatch":
-        import win32com.client
+        from . import sw_binding
 
-        return win32com.client.Dispatch(obj)
+        return sw_binding.bind(obj)
     return obj
 
 

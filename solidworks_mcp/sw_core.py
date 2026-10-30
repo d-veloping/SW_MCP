@@ -39,6 +39,9 @@ import pythoncom
 import win32com.client
 from mcp.types import Tool
 
+from . import sw_binding
+from .sw_binding import EarlyBound
+
 
 LOG_PATH = Path(__file__).with_name("server.log")
 # Rotating rather than plain: this server runs for as long as the SOLIDWORKS
@@ -348,7 +351,12 @@ def flag_methods(obj: Any, *names: str) -> Any:
     unflagged, producing exactly the silent-None and crash-SOLIDWORKS failures
     this function exists to prevent.  Flagging one at a time costs the same
     round trips as the batched call, since the batch looped anyway.
+
+    An early-bound object (``sw_binding``) has nothing to flag: its wrappers
+    call every member by dispid with the invoke kind the type library declares.
     """
+    if isinstance(obj, EarlyBound):
+        return obj
     for name in names:
         try:
             obj._FlagAsMethod(name)
@@ -538,7 +546,11 @@ def as_list(com_array: Any) -> list[Any]:
 
 
 def running_app() -> Any:
-    """Attach only to an already-running SOLIDWORKS session; never start one."""
+    """Attach only to an already-running SOLIDWORKS session; never start one.
+
+    The session is bound late or early as ``sw_binding`` decides (``SW_MCP_BINDING``); every object
+    reached from the returned application is bound the same way.
+    """
     pythoncom.CoInitialize()
     try:
         app = win32com.client.GetActiveObject("SldWorks.Application")
@@ -546,7 +558,7 @@ def running_app() -> Any:
         raise RuntimeError(
             "No running SOLIDWORKS session is available. Open SOLIDWORKS and finish any modal dialogs first."
         ) from exc
-    return flag_methods(app, *_APP_METHODS)
+    return flag_methods(sw_binding.bind_application(app), *_APP_METHODS)
 
 
 # swUserPreferenceToggle_e.swInputDimValOnCreate.  When this is on — and it is
@@ -573,6 +585,64 @@ def dimension_dialog_suppressed(app: Any) -> Iterator[None]:
                 app.SetUserPreferenceToggle(SW_INPUT_DIM_VAL_ON_CREATE, previous)
             except Exception:
                 logger.info("Could not restore the SOLIDWORKS dimension-input dialog setting.")
+
+
+# The display switches quiet_ui turns off for one tool call, as (member of the
+# active document, property on it).
+_QUIET_UI_SWITCHES = (
+    ("ActiveView", "EnableGraphicsUpdate"),
+    ("FeatureManager", "EnableFeatureTree"),
+    ("FeatureManager", "EnableFeatureTreeWindow"),
+    ("SketchManager", "DisplayWhenAdded"),
+)
+
+
+def quiet_ui_enabled() -> bool:
+    return os.environ.get("SW_MCP_QUIET_UI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def quiet_ui() -> Iterator[None]:
+    """Leave the view, the feature tree and new sketch entities undrawn while a tool runs.
+
+    Opt-in through ``SW_MCP_QUIET_UI``; off, this does nothing and touches no
+    COM object.  On SOLIDWORKS Design R2026x the API crashed in slduiu.dll
+    while sketching with the display live (#26).  Only the document active
+    when the call starts is quieted; a switch that cannot be read or set is
+    skipped, and every switch that was changed is put back, followed by one
+    ``GraphicsRedraw2``.
+    """
+    if not quiet_ui_enabled():
+        yield
+        return
+    doc: Any = None
+    changed: list[tuple[Any, str, bool]] = []
+    try:
+        doc = running_app().ActiveDoc
+    except Exception:
+        doc = None
+    if doc is not None:
+        for owner_name, switch in _QUIET_UI_SWITCHES:
+            try:
+                owner = getattr(doc, owner_name)
+                previous = bool(getattr(owner, switch))
+                setattr(owner, switch, False)
+                changed.append((owner, switch, previous))
+            except Exception:
+                logger.info("Quiet UI: could not switch off %s.%s.", owner_name, switch)
+    try:
+        yield
+    finally:
+        for owner, switch, previous in reversed(changed):
+            try:
+                setattr(owner, switch, previous)
+            except Exception:
+                logger.info("Quiet UI: could not restore %s.", switch)
+        if changed:
+            try:
+                invoke_no_arg(doc, "GraphicsRedraw2")
+            except Exception:
+                logger.info("Quiet UI: GraphicsRedraw2 failed.")
 
 
 def active_document() -> tuple[Any, Any]:

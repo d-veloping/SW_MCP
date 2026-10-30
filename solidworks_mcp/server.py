@@ -85,7 +85,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent | 
     else:
         async with COM_LOCK:
             try:
-                payload = handler(arguments or {})
+                with sw_core.quiet_ui():
+                    payload = handler(arguments or {})
             except RuntimeError as exc:
                 payload = result(False, str(exc))
             except KeyError as exc:
