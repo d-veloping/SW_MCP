@@ -88,8 +88,8 @@ args = ['C:\path\to\solidworks-mcp\server.py']
 | `SW_MCP_OUTPUT_ROOT` | `~/Documents/solidworks-mcp` | Every file the server writes stays under here. Paths outside it are refused. |
 | `SW_MCP_TEMPLATE_DIR` | auto-discovered | Where to look for `.prtdot` / `.asmdot` / `.drwdot` templates if SOLIDWORKS has no default configured. |
 | `SW_MCP_DEMO_TOOLS` | unset | Set to `1` to register the basketball demo tools. Off by default: a `create_basketball` sitting next to `revolve` measurably degrades tool selection. |
-| `SW_MCP_BINDING` | `late` | How COM objects are bound: `late` (pywin32 dynamic dispatch, members resolved by name) or `early` (makepy wrappers generated from the installed `sldworks.tlb`, members called by dispid). Set `early` for SOLIDWORKS Design 2026 / 3DEXPERIENCE R2026x (#26). Early binding falls back to late with a warning in `server.log` when the type library cannot be loaded. See [Supported releases](#supported-releases). |
-| `SW_MCP_QUIET_UI` | unset | Set to `1` to leave the view, the feature tree and new sketch entities undrawn for the duration of each tool call, restored and redrawn afterwards. Opt-in for SOLIDWORKS Design R2026x, where the API crashed in `slduiu.dll` while sketching (#26); unverified there. |
+| `SW_MCP_BINDING` | `late` | How COM objects are bound: `late` (pywin32 dynamic dispatch, members resolved by name) or `early` (makepy wrappers generated from the installed `sldworks.tlb`, members called by dispid). Made for SOLIDWORKS Design 2026 / 3DEXPERIENCE R2026x (#26), which is still not supported. Early binding falls back to late with a warning in `server.log` when the type library cannot be loaded. See [Supported releases](#supported-releases). |
+| `SW_MCP_QUIET_UI` | unset | Set to `1` to leave the view, the feature tree and new sketch entities undrawn for the duration of each tool call, restored and redrawn afterwards. Made for SOLIDWORKS Design R2026x, where the API crashes in `slduiu.dll` while sketching (#26); there it moves the crash later but does not prevent it. |
 
 ---
 
@@ -528,7 +528,7 @@ newest-name-first fallback.
 | --- | --- | --- |
 | SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured |
 | SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments and `activate_document` measured |
-| SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | set `early`, plus `SW_MCP_QUIET_UI=1` | unverified (#26): late binding fails on the first sketch member there; with early binding `create_sketch` works, but SOLIDWORKS crashed in `slduiu.dll` at the first `CreateLine` with the display live |
+| SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | not supported | late binding fails on the first sketch member; with `early` and `SW_MCP_QUIET_UI=1` (SP4.0) a sketch rectangle is drawn, then SOLIDWORKS crashes in `slduiu.dll` during `close_sketch` (#26) |
 
 Late binding is pywin32's dynamic dispatch: every member is resolved by name on
 the object's default interface. Early binding (`solidworks_mcp/sw_binding.py`)
