@@ -68,11 +68,20 @@ class FakeView:
         return self.edges
 
 
+class SelectAnything:
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def SelectByID2(self, *args) -> bool:  # noqa: N802 - COM member name
+        return True
+
+
 class FakeDrawing:
     def __init__(self, views: list[FakeView]) -> None:
         self.views = views
         self.created: list[FakeView] = []
         self.next_view: FakeView | None = None
+        self.Extension = SelectAnything()
 
     def _link(self) -> None:
         for a, b in zip(self.views, self.views[1:] + [None]):
@@ -100,6 +109,55 @@ class FakeDrawing:
     def CreateUnfoldedViewAt3(self, x, y, z, not_aligned):  # noqa: N802 - COM member name
         view = self.next_view or FakeView("Drawing View8")
         self.views.append(view)
+        return view
+
+
+class FakeExtension:
+    """Records selections; SelectByID2 succeeds for the names in `known`."""
+
+    def __init__(self, doc: "ProjectingDrawing") -> None:
+        self.doc = doc
+
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def SelectByID2(self, name, kind, x, y, z, append, mark, callout, option):  # noqa: N802 - COM member name
+        self.doc.log.append(("select", name, kind))
+        self.doc.selected = name if name in self.doc.known else None
+        return self.doc.selected is not None
+
+
+class ProjectingDrawing(FakeDrawing):
+    """Like SOLIDWORKS 2016: a projection needs the parent selected, except the first one off an active parent."""
+
+    def __init__(self, views: list[FakeView]) -> None:
+        super().__init__(views)
+        self.known = {v.name for v in views}
+        self.active: str | None = None
+        self.selected: str | None = None
+        self.projected: dict[str, int] = {}
+        self.log: list[tuple] = []
+        self.Extension = FakeExtension(self)
+
+    def ActivateView(self, name: str) -> bool:  # noqa: N802 - COM member name
+        self.log.append(("activate", name))
+        self.active = name
+        return True
+
+    def ClearSelection2(self, all_: bool) -> None:  # noqa: N802 - COM member name
+        self.log.append(("clear",))
+        self.selected = None
+
+    def CreateUnfoldedViewAt3(self, x, y, z, not_aligned):  # noqa: N802 - COM member name
+        parent = self.selected or (self.active if not self.projected.get(self.active or "") else None)
+        self.log.append(("project", parent))
+        if parent is None:
+            return None
+        self.projected[parent] = self.projected.get(parent, 0) + 1
+        view = FakeView(f"Drawing View{len(self.views) + 1}")
+        self.views.append(view)
+        self.known.add(view.name)
+        self.active = view.name
         return view
 
 
@@ -198,6 +256,41 @@ class DisplayModeTests(unittest.TestCase):
                 self.assertFalse(answer["ok"], answer)
                 self.assertEqual(answer["data"]["display"][0]["actual"], "hidden_lines_removed")
                 target.broken = False
+
+
+class ProjectedViewTests(unittest.TestCase):
+    """insert_projected_view selects the parent before every projection, so a second one off it works."""
+
+    def setUp(self) -> None:
+        self.doc = ProjectingDrawing([FakeView("Sheet1", kind=1), FakeView("Drawing View1")])
+        for patch in (
+            unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, self.doc)),
+            unittest.mock.patch.object(sw_drawing, "rebuild"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_two_projections_off_one_parent(self) -> None:
+        right = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        down = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "down"})
+        self.assertTrue(right["ok"], right)
+        self.assertTrue(down["ok"], down)
+        self.assertEqual(self.doc.projected, {"Drawing View1": 2})
+        self.assertNotEqual(right["data"]["view"]["name"], down["data"]["view"]["name"])
+        for i, entry in enumerate(self.doc.log):
+            if entry[0] == "project":
+                self.assertEqual(self.doc.log[i - 1], ("select", "Drawing View1", "DRAWINGVIEW"))
+        self.assertIsNone(self.doc.selected)
+
+    def test_parent_that_cannot_be_selected_fails_after_its_first_projection(self) -> None:
+        self.doc.known.discard("Drawing View1")
+        first = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        second = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "down"})
+        self.assertTrue(first["ok"], first)
+        self.assertFalse(second["ok"], second)
+        self.assertIn("active and selected", second["message"])
+        self.assertEqual(second["data"]["parent"], "Drawing View1")
+        self.assertEqual([e for e in self.doc.log if e[0] == "project"][-2:], [("project", None)] * 2)
 
 
 # --------------------------------------------------------------------------

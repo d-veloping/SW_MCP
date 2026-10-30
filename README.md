@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-116 tools: sketching with real relations and driving dimensions, the solid
+117 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -227,7 +227,7 @@ metal parts only.
 `activate_drawing_view`, `create_drawing_sketch`, `set_drawing_view`,
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
 `insert_centerlines`, `add_note`, `list_drawing_dimensions`,
-`hide_drawing_dimensions`, `arrange_drawing_dimensions`.
+`hide_drawing_dimensions`, `arrange_drawing_dimensions`, `check_dimension_attachments`.
 
 `insert_standard_views`, `insert_model_view`, `insert_projected_view` and
 `set_drawing_view` take `display_mode`: `hidden_lines_removed` (SOLIDWORKS'
@@ -279,6 +279,18 @@ Both activate the view's sheet for that and the previous sheet again afterwards.
 A section label already used on the sheet is refused. A dimension is
 selected by its selection name: `IAnnotation.Select3` does not select drawing
 dimensions.
+
+`check_dimension_attachments` tells, for one view, which dimensions point into
+the void: their measured points (`IDimension.ReferencePoints`, model space,
+mapped onto the sheet) lie on an edge of the part's solid bodies, projected
+like the view, but on none the view draws with hidden lines removed — a bore
+depth or an inner step seen from outside, the case for a section view. The
+view is set to hidden lines removed for the reading, then back, and read back.
+The edges come from the bodies because a view placed without hidden lines keeps
+listing only its visible edges after a switch to hidden lines visible
+(2016 SP3). Silhouette edges are not read:
+`ISilhouetteEdge.GetCurve` and `GetStartPoint` raise RPC_E_SERVERFAULT inside
+SOLIDWORKS 2016, and the part could not be closed afterwards.
 
 For hand-made section and detail views, call `create_drawing_sketch` after
 activating the parent view, then use the normal `draw_line` or `draw_circle`
@@ -392,10 +404,10 @@ every line into "unknown".
   (right for a cross-section profile) and retries the other direction
   automatically, reporting which one worked. A profile that overlaps an existing
   rib still fails, and the tool says so rather than pretending.
-- Only the **first** `insert_projected_view` off a given parent succeeds;
-  subsequent projections from the same parent return nothing, through
-  re-activation and rebuild alike. Use `insert_standard_views` for a full
-  orthographic set.
+- `CreateUnfoldedViewAt3` projects from the **selected** view. With the parent
+  only activated, the first projection off it succeeds and every further one
+  returns nothing; `insert_projected_view` therefore activates and selects the
+  parent before every projection, so several projections off one parent work.
 - Detail-view scale is **absolute** (model to paper), not relative to the parent.
   On a 1:4 sheet, `2:1` makes the detail eight times the parent view and it
   overflows the sheet. Pick a scale near the sheet scale.

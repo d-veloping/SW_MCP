@@ -49,6 +49,7 @@ from .sw_core import (
     dimension_value,
     clear_selection,
     document_info,
+    double_array,
     document_type,
     extension,
     feature_property,
@@ -654,20 +655,26 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
         }[str(args.get("direction", "right"))]
         x, y = float(position[0]) + dx, float(position[1]) + dy
 
-    # The parent has to be the active view, and creating a view activates the
-    # new one, so re-activate before every projection.
-    doc.ActivateView(parent_name)
-    view = doc.CreateUnfoldedViewAt3(x, y, 0.0, bool(args.get("not_aligned", False)))
+    # SOLIDWORKS projects from the selected view. Activation alone is enough only
+    # for the first projection off a parent (measured on 2016 SP3), and creating
+    # a view activates the new one, so activate and select before every attempt.
+    def project() -> Any:
+        doc.ActivateView(parent_name)
+        clear_selection(doc)
+        extension(doc).SelectByID2(parent_name, "DRAWINGVIEW", 0.0, 0.0, 0.0, False, 0, nothing(), 0)
+        try:
+            return doc.CreateUnfoldedViewAt3(x, y, 0.0, bool(args.get("not_aligned", False)))
+        finally:
+            clear_selection(doc)
+
+    view = project()
     if view is None:
         rebuild(doc)
-        doc.ActivateView(parent_name)
-        view = doc.CreateUnfoldedViewAt3(x, y, 0.0, bool(args.get("not_aligned", False)))
+        view = project()
     if view is None:
         return result(
             False,
-            f"SOLIDWORKS did not project a view from '{parent_name}'. In practice only the first "
-            f"projection off a given parent succeeds through this API; for a full set of "
-            f"orthographic views use insert_standard_views, which places them in one call.",
+            f"SOLIDWORKS did not project a view from '{parent_name}', with the parent active and selected.",
             parent=parent_name,
             point_mm=[round(to_mm(x), 2), round(to_mm(y), 2)],
         )
@@ -738,6 +745,11 @@ def _sheet_point(view: Any, point_mm: list[float]) -> tuple[float, float]:
     transform = _model_to_sheet(view)
     if transform is None:
         raise ToolFailure(f"View '{safe(view, 'GetName2', '')}' does not report its model transform.", readable=False)
+    return _project(transform, point_mm)
+
+
+def _project(transform: dict[str, Any], point_mm: list[float]) -> tuple[float, float]:
+    """A model point (mm) on the sheet (mm) through a transform read by _model_to_sheet."""
     r, t, s = transform["rotation"], transform["translation_mm"], transform["scale"]
     p = [float(c) for c in point_mm]
     return (s * (r[0] * p[0] + r[3] * p[1] + r[6] * p[2]) + t[0],
@@ -1248,6 +1260,173 @@ def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     entries = _all_dimensions(doc, {str(view_name)} if view_name else None)
     return result(True, f"Read {len(entries)} dimensions.", dimensions=entries, duplicates=_duplicates(entries),
                   outside_sheet=_outside_sheet(entries))
+
+
+# swViewEntityType_e: edges only. Silhouette edges (4) are never read: on 2016 SP3 ISilhouetteEdge.GetCurve and
+# GetStartPoint raise RPC_E_SERVERFAULT inside SOLIDWORKS, and afterwards a part opened in that session could not be
+# closed any more (CloseDoc, QuitDoc and CloseAllDocuments returned success and left it open; measured 2026-10-30).
+VIEW_ENTITY_EDGE = 1
+SOLID_BODY = 0           # swBodyType_e
+ATTACHMENT_TOLERANCE_MM = 0.3
+
+
+def _edge_geometry(edges: list[Any], transform: list[float], label: str) -> dict[str, Any]:
+    """Edges as polylines on the sheet (mm), and the centres of their circles and arcs on the sheet. An edge whose
+    curve cannot be read is counted in `unreadable`, never guessed."""
+    lines: list[list[tuple[float, float]]] = []
+    centres: list[tuple[float, float]] = []
+    unreadable = 0
+    for edge in edges:
+        try:
+            params = [float(c) for c in as_list(value(edge, "GetCurveParams2"))]
+            curve = value(edge, "GetCurve")
+            centre = None
+            if bool(value(curve, "IsCircle")):
+                centre = [to_mm(float(c)) for c in as_list(value(curve, "CircleParams"))[:3]]
+            raw = [float(c) for c in as_list(flag_methods(curve, "GetTessPts").GetTessPts(
+                1e-5, 1e-4, double_array(params[0:3]), double_array(params[3:6])))]
+            points = [[to_mm(raw[i]), to_mm(raw[i + 1]), to_mm(raw[i + 2])] for i in range(0, len(raw) - 2, 3)]
+            if len(points) < 2:
+                points = [[to_mm(c) for c in params[0:3]], [to_mm(c) for c in params[3:6]]]
+        except Exception:
+            logger.info("Could not read an edge of %s", label, exc_info=True)
+            unreadable += 1
+            continue
+        lines.append([_project(transform, p) for p in points])
+        if centre is not None:
+            centres.append(_project(transform, centre))
+    return {"lines": lines, "centres": centres, "unreadable": unreadable, "transform": transform}
+
+
+def _view_transform(view: Any) -> list[float]:
+    transform = _model_to_sheet(view)
+    if transform is None:
+        raise ToolFailure(f"View '{safe(view, 'GetName2', '')}' does not report its model transform.", readable=False)
+    return transform
+
+
+def _shown_edges(view: Any) -> dict[str, Any]:
+    """The model edges the view draws in its current display mode."""
+    edges = as_list(flag_methods(view, "GetVisibleEntities2").GetVisibleEntities2(nothing(), VIEW_ENTITY_EDGE))
+    return _edge_geometry(edges, _view_transform(view), f"view {safe(view, 'GetName2', '')}")
+
+
+def _model_edges(view: Any) -> dict[str, Any]:
+    """Every edge of the visible solid bodies of the part the view shows, projected like the view projects it: what
+    the view would draw with hidden lines visible. Read from the bodies because a view switched to hidden lines
+    visible keeps returning only the edges it showed before (2016 SP3, measured 2026-10-30)."""
+    name = safe(view, "GetName2", "")
+    model = safe(view, "ReferencedDocument")
+    bodies = as_list(flag_methods(model, "GetBodies2").GetBodies2(SOLID_BODY, True)) if model is not None else []
+    if not bodies:
+        raise ToolFailure(f"View '{name}' shows no part with solid bodies to read.", readable=False)
+    edges = [e for body in bodies for e in as_list(value(body, "GetEdges"))]
+    return _edge_geometry(edges, _view_transform(view), f"the model of view {name}")
+
+
+def _distance(point: tuple[float, float], edges: dict[str, Any]) -> float:
+    """Shortest distance (sheet mm) from a point to the edges or to a circle centre; inf when there are none."""
+    best = min((math.hypot(point[0] - c[0], point[1] - c[1]) for c in edges["centres"]), default=math.inf)
+    for line in edges["lines"]:
+        for a, b in zip(line, line[1:]):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length2 = dx * dx + dy * dy
+            u = 0.0 if length2 == 0 else max(0.0, min(1.0, ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length2))
+            best = min(best, math.hypot(point[0] - a[0] - u * dx, point[1] - a[1] - u * dy))
+    return best
+
+
+def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any], tolerance: float) -> dict[str, Any]:
+    """Where one display dimension is attached: its first two reference points (IDimension.ReferencePoints, model
+    metres) on the sheet, their distances to the shown and to all edges, and which of them only a hidden edge carries.
+    `into_void` is None when the points cannot be read."""
+    out: dict[str, Any] = {"into_void": None}
+    try:
+        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+        model = [[to_mm(float(c)) for c in as_list(value(p, "ArrayData"))[:3]]
+                 for p in as_list(value(dimension, "ReferencePoints"))]
+    except Exception:
+        logger.info("Could not read the reference points of a dimension", exc_info=True)
+        return out
+    if len(model) < 2 or any(len(p) < 3 or not all(_finite(c) for c in p) for p in model[:2]):
+        return out
+    sheet = [_project(shown["transform"], p) for p in model[:2]]
+    to_shown = [_distance(p, shown) for p in sheet]
+    to_all = [_distance(p, everything) for p in sheet]
+    hidden = [s > tolerance and a <= tolerance for s, a in zip(to_shown, to_all)]
+    out.update(model_points_mm=[[round(c, 4) for c in p] for p in model[:2]],
+               sheet_points_mm=[[round(c, 3) for c in p] for p in sheet],
+               distance_shown_mm=[round(d, 3) if math.isfinite(d) else None for d in to_shown],
+               distance_all_mm=[round(d, 3) if math.isfinite(d) else None for d in to_all],
+               hidden_points=hidden, into_void=any(hidden))
+    return out
+
+
+@drawing_tool(
+    "check_dimension_attachments",
+    "Read-only check of one drawing view: does any of its visible dimensions point into the void, i.e. is one of its "
+    "measured points carried only by an edge the view hides (bore depth, inner step, groove bottom seen from outside)? "
+    "The edges the view draws are read with hidden lines removed (the display mode is set back and read back "
+    "afterwards; a mode that does not apply or come back fails the call), all edges from the solid bodies of the part, "
+    "projected like the view. A measured point is hidden when it lies within tolerance_mm (sheet) of a model edge or "
+    "circle centre but of none the view draws; a point on no edge at all (sketch origin, the virtual corner of a "
+    "rounded sketch) is not hidden. "
+    "Per dimension: full_name, type2, the measured points on the sheet and in the model, their distances, "
+    "hidden_points and into_void (null when the points cannot be read). Silhouette edges are not read.",
+    {
+        "view_name": {"type": "string"},
+        "tolerance_mm": {"type": "number", "default": ATTACHMENT_TOLERANCE_MM},
+    },
+    ["view_name"],
+)
+def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    name = str(args["view_name"])
+    view = _find_view(doc, name)
+    if view is None:
+        return result(False, f"No model view named '{name}'.")
+    tolerance = float(args.get("tolerance_mm", ATTACHMENT_TOLERANCE_MM))
+    if not _finite(tolerance) or tolerance <= 0:
+        return result(False, "tolerance_mm must be a positive number.")
+    original = _display_mode(view)
+    if original not in DISPLAY_MODES:
+        return result(False, f"The display mode of view '{name}' cannot be read ({original!r}); nothing was changed.")
+    failure = ""
+    everything: dict[str, Any] | None = None
+    shown: dict[str, Any] | None = None
+    entries: list[dict[str, Any]] = []
+    try:
+        everything = _model_edges(view)
+        outcome = _set_display_mode(view, "hidden_lines_removed")
+        rebuild(doc)
+        if outcome["ok"]:
+            shown = _shown_edges(view)
+        else:
+            failure = _display_failure([outcome])
+        if not failure and everything is not None and shown is not None:
+            for display in _display_dimensions(view):
+                entry = _dimension_entry(name, display)
+                if entry["visible"] is False:
+                    continue
+                entry.update(_attachment(display, shown, everything, tolerance))
+                entries.append(entry)
+    finally:
+        restored = _set_display_mode(view, original)
+        rebuild(doc)
+    if failure or everything is None or shown is None:
+        return result(False, f"View '{name}' could not be read with hidden lines removed: {failure}",
+                      display_mode=restored["actual"])
+    if not restored["ok"]:
+        return result(False, f"Checked view '{name}', but its display mode did not come back: "
+                             + _display_failure([restored]), display_mode=restored["actual"])
+    void = sum(1 for e in entries if e["into_void"])
+    unjudged = sum(1 for e in entries if e["into_void"] is None)
+    return result(True, f"Checked {len(entries)} dimensions in '{name}': {void} point into the void, "
+                        f"{unjudged} without readable points.",
+                  view=name, display_mode=restored["actual"], tolerance_mm=tolerance, dimensions=entries,
+                  into_void=void, unjudged=unjudged,
+                  edges={"all": len(everything["lines"]), "shown": len(shown["lines"]),
+                         "unreadable": everything["unreadable"] + shown["unreadable"]})
 
 
 @drawing_tool(
