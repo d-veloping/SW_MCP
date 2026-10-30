@@ -1872,6 +1872,8 @@ def _center_mark_count(view: Any) -> int | None:
         "style": {"type": "string", "enum": sorted(CENTER_MARK_STYLES), "default": "single"},
         "propagate": {"type": "boolean", "default": True},
         "slots": {"type": "boolean", "default": False},
+        "fillets": {"type": "boolean", "default": True, "description": "Also mark the centers of fillets and "
+                    "other arcs; false keeps the automatic marks to holes and slots."},
         "selected_only": {"type": "boolean", "default": False, "description": "Annotate the existing selection instead of every circle."},
     },
 )
@@ -1885,7 +1887,7 @@ def insert_center_marks(args: dict[str, Any]) -> dict[str, Any]:
         before = _center_mark_count(view)
         ok = bool(
             flag_methods(view, "AutoInsertCenterMarks2").AutoInsertCenterMarks2(
-                1 | 2 | 4,  # holes, fillets, slots
+                1 | (2 if bool(args.get("fillets", True)) else 0) | 4,  # holes, fillets, slots
                 1 | 2 | 8,  # linear, circular, and base connection lines
                 bool(args.get("slots", False)), bool(args.get("slots", False)),
                 True, 0.0, 0.0, False, False, 0.0,

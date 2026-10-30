@@ -454,5 +454,43 @@ class CreateDrawingActivationTests(unittest.TestCase):
         self.assertNotIn("data", answer)
 
 
+class MarkingView:
+    """The active view as AutoInsertCenterMarks2 sees it: records the option bits of each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def AutoInsertCenterMarks2(self, *args):  # noqa: N802 - COM member name
+        self.calls.append(args)
+        return True
+
+    def GetCenterMarkCount2(self, size):  # noqa: N802 - COM member name
+        return 0
+
+
+class CenterMarkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.view = MarkingView()
+        doc = unittest.mock.Mock()
+        doc.ActivateView.return_value = True
+        doc.ActiveDrawingView = self.view
+        for patch in (
+            unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, doc)),
+            unittest.mock.patch.object(sw_drawing, "rebuild"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_fillets_are_marked_by_default(self) -> None:
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1"})
+        self.assertTrue(answer["ok"])
+        self.assertEqual(self.view.calls[0][0], 1 | 2 | 4)
+
+    def test_fillets_false_keeps_holes_and_slots(self) -> None:
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1", "fillets": False})
+        self.assertTrue(answer["ok"])
+        self.assertEqual(self.view.calls[0][0], 1 | 4)
+
+
 if __name__ == "__main__":
     unittest.main()
