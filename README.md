@@ -292,7 +292,9 @@ listing only its visible edges after a switch to hidden lines visible
 `ISilhouetteEdge.GetCurve` and `GetStartPoint` raise RPC_E_SERVERFAULT inside
 SOLIDWORKS 2016, and the part could not be closed afterwards. An edge whose
 curve, end points, centre or tessellation cannot be read or is not finite is
-counted in `edges.unreadable` (model) or `edges.unreadable_shown` (drawn); a
+counted in `edges.unreadable` (model) or `edges.unreadable_shown` (drawn). An
+open edge whose tessellation comes back empty counts as its chord, a closed one
+as unreadable; a
 dimension whose verdict such an edge could change gets `into_void: null`, as
 does one whose points cannot be read, never `false`. An empty edge list, from
 the view or from the bodies, fails the call. The bodies are those of the

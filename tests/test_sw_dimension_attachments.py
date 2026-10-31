@@ -426,6 +426,27 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         self.assertIn("did not come back", answer["message"])
         self.assertEqual(answer["data"]["display_mode"], "hidden_lines_removed")
 
+    def test_a_refused_read_whose_mode_does_not_come_back_keeps_its_data(self) -> None:
+        self.view.mode = 3
+        self.view.refuse = {3}
+        self.view.GetVisibleEntities2 = lambda component, kind: None   # a ToolFailure after the switch
+        answer = self.check()
+        self.assertFalse(answer["ok"])
+        self.assertIn("lists none of the edges", answer["message"])
+        self.assertIn("did not come back", answer["message"])
+        self.assertIs(answer["data"]["readable"], False)
+        self.assertEqual(answer["data"]["display_mode"], "hidden_lines_removed")
+
+    def test_an_interrupt_still_sets_the_mode_back(self) -> None:
+        self.view.mode = 3
+
+        def interrupt(component, kind):
+            raise KeyboardInterrupt
+        self.view.GetVisibleEntities2 = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.check()
+        self.assertEqual(self.view.mode, 3)
+
     def test_a_mode_that_neither_applies_nor_comes_back_says_both(self) -> None:
         self.view.mode = 3
 

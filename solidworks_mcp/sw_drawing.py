@@ -1457,13 +1457,13 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
                     continue
                 entry.update(_attachment(display, shown, everything, tolerance))
                 entries.append(entry)
-    except Exception as exc:   # set the mode back first, then report the read that failed
+    except BaseException as exc:   # set the mode back first, then report the read that failed
         error = exc
     restored = _set_display_mode(view, original)
     rebuild(doc)
     back = "" if restored["ok"] else "its display mode did not come back: " + _display_failure([restored])
     if error is not None:
-        if not back:
+        if not back or not isinstance(error, Exception):
             raise error
         data = error.data if isinstance(error, ToolFailure) else {}
         raise ToolFailure(f"{error} View '{name}': {back}", **{**data, "display_mode": restored["actual"]}) from error
