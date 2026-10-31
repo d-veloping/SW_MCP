@@ -288,8 +288,9 @@ class ProjectedViewTests(unittest.TestCase):
         second = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "down"})
         self.assertTrue(first["ok"], first)
         self.assertFalse(second["ok"], second)
-        self.assertIn("active and selected", second["message"])
+        self.assertIn("did not select it by name", second["message"])
         self.assertEqual(second["data"]["parent"], "Drawing View1")
+        self.assertEqual(second["data"]["parent_selected"], [False, False])
         self.assertEqual([e for e in self.doc.log if e[0] == "project"][-2:], [("project", None)] * 2)
 
     def test_a_refused_projection_is_retried_after_a_rebuild_with_the_parent_selected_again(self) -> None:

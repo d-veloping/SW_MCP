@@ -247,7 +247,7 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         # a circle's centre carries a radius
         self.assertIs(found["D1@Loch@Teil.Part"]["into_void"], False)
         self.assertEqual((answer["data"]["into_void"], answer["data"]["unjudged"]), (1, 1))
-        self.assertEqual(answer["data"]["edges"], {"all": 4, "shown": 3, "unreadable": 0})
+        self.assertEqual(answer["data"]["edges"], {"all": 4, "shown": 3, "unreadable": 0, "unreadable_shown": 0})
         self.assertEqual(self.view.ReferencedDocument.calls, [(0, True)])
 
     def test_unreadable_points_give_no_verdict(self) -> None:
@@ -327,7 +327,7 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         for name in ("D1@Bohrung@Teil.Part", "D2@Skizze1@Teil.Part"):
             self.assertIsNone(found[name]["into_void"], name)
         self.assertEqual(answer["data"]["into_void"], 0)
-        self.assertEqual(answer["data"]["edges"], {"all": 0, "shown": 3, "unreadable": 4})
+        self.assertEqual(answer["data"]["edges"], {"all": 0, "shown": 3, "unreadable": 4, "unreadable_shown": 0})
 
     def test_an_unreadable_drawn_edge_leaves_a_hidden_looking_point_unjudged(self) -> None:
         self.view.shown_edges.append(Edge(Curve((0, 0, 0), (0, 0, 0)), broken=True))
@@ -340,6 +340,106 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         depth = self.by_name(answer)["D1@Bohrung@Teil.Part"]
         self.assertEqual(depth["hidden_points"], [False, None])
         self.assertIsNone(depth["into_void"])
+
+    def test_a_point_at_the_centre_of_a_hidden_circle_is_hidden(self) -> None:
+        # the bottom circle of a second bore, hidden in this view; a radius measured from its centre
+        self.view.hidden_edges.append(Edge(Curve((0.012, 0.01, 0), (0.012, 0.01, 0), centre=(0.01, 0.01, 0))))
+        self.dims["radius"].points = [(0.01, 0.01, 0.0), (0.012, 0.01, 0.0)]
+        radius = self.by_name(self.check())["D1@Loch@Teil.Part"]
+        self.assertEqual(radius["hidden_points"], [True, True])
+        self.assertIs(radius["into_void"], True)
+
+    def test_an_invisible_dimension_is_not_checked(self) -> None:
+        self.view.displays[0].annotation.Visible = 0
+        answer = self.check()
+        self.assertNotIn("D1@Bohrung@Teil.Part", self.by_name(answer))
+        self.assertEqual(answer["data"]["into_void"], 0)
+
+    def test_an_empty_list_of_drawn_edges_fails_and_the_mode_is_set_back(self) -> None:
+        for empty in (None, ()):
+            with self.subTest(empty=empty):
+                self.view.mode = 3
+                self.view.set_calls.clear()
+                self.view.GetVisibleEntities2 = lambda component, kind, empty=empty: empty
+                answer = self.check()
+                self.assertFalse(answer["ok"])
+                self.assertIn("lists none of the edges", answer["message"])
+                self.assertEqual(self.view.mode, 3)
+                self.assertEqual(self.view.set_calls, [2, 3])
+
+    def test_bodies_without_edges_fail_and_keep_the_mode(self) -> None:
+        for empty in (None, ()):
+            with self.subTest(empty=empty):
+                self.view.mode = 3
+                body = Body([])
+                body.GetEdges = lambda empty=empty: empty
+                self.view.ReferencedDocument.GetBodies2 = lambda kind, visible_only, body=body: (body,)
+                answer = self.check()
+                self.assertFalse(answer["ok"])
+                self.assertIn("list no edges", answer["message"])
+                self.assertEqual(self.view.mode, 3)
+
+    def test_every_unusable_edge_read_counts_as_unreadable(self) -> None:
+        def raises(*args):
+            raise OSError("refused")
+        circle = self.view.shown_edges[2]          # the visible hole, drawn and in the model
+        variants = {
+            "GetCurve raises": (circle, "GetCurve", raises),
+            "IsCircle raises": (circle.curve, "IsCircle", raises),
+            "CircleParams raises": (circle.curve, "CircleParams", raises),
+            "CircleParams short": (circle.curve, "CircleParams", lambda: (0.03, 0.01)),
+            "CircleParams not finite": (circle.curve, "CircleParams", lambda: (float("nan"), 0.01, 0.0, 0, 0, 1, 0.002)),
+            "GetTessPts raises": (circle.curve, "GetTessPts", raises),
+            "GetTessPts not finite": (circle.curve, "GetTessPts", lambda *a: (0.0, 0.0, 0.0, float("inf"), 0.0, 0.0)),
+            "GetTessPts not whole points": (circle.curve, "GetTessPts", lambda *a: (0.0, 0.0, 0.0, 0.01, 0.0)),
+            "closed edge without tessellation": (circle.curve, "GetTessPts", lambda *a: ()),
+            "GetCurveParams2 short": (circle, "GetCurveParams2", lambda: (0.03, 0.01, 0.0)),
+        }
+        for label, (target, member, fake) in variants.items():
+            with self.subTest(label):
+                setattr(target, member, fake)
+                try:
+                    answer = self.check()
+                finally:
+                    delattr(target, member)
+                self.assertTrue(answer["ok"], answer)
+                self.assertEqual((answer["data"]["edges"]["unreadable"], answer["data"]["edges"]["unreadable_shown"]),
+                                 (1, 1))
+                self.assertEqual((answer["data"]["edges"]["all"], answer["data"]["edges"]["shown"]), (3, 2))
+
+    def test_an_open_edge_without_tessellation_is_its_chord(self) -> None:
+        bottom = self.view.hidden_edges[0]
+        bottom.curve.GetTessPts = lambda *a: ()
+        depth = self.by_name(self.check())["D1@Bohrung@Teil.Part"]
+        self.assertEqual(depth["hidden_points"], [False, True])
+
+    def test_a_failed_read_whose_mode_does_not_come_back_says_both(self) -> None:
+        self.view.mode = 3
+        self.view.refuse = {3}
+
+        def refuse(component, kind):
+            raise OSError("GetVisibleEntities2 refused")
+        self.view.GetVisibleEntities2 = refuse
+        answer = self.check()
+        self.assertFalse(answer["ok"])
+        self.assertIn("GetVisibleEntities2 refused", answer["message"])
+        self.assertIn("did not come back", answer["message"])
+        self.assertEqual(answer["data"]["display_mode"], "hidden_lines_removed")
+
+    def test_a_mode_that_neither_applies_nor_comes_back_says_both(self) -> None:
+        self.view.mode = 3
+
+        def wrong(use_parent, mode, faceted, edges):
+            self.view.set_calls.append(mode)
+            if mode == 2:
+                self.view.mode = 1   # lands in hidden lines visible, and stays there
+            return True
+        self.view.SetDisplayMode3 = wrong
+        answer = self.check()
+        self.assertFalse(answer["ok"])
+        self.assertIn("could not be read with hidden lines removed", answer["message"])
+        self.assertIn("Also its display mode did not come back", answer["message"])
+        self.assertEqual(answer["data"]["display_mode"], "hidden_lines_visible")
 
     def test_non_finite_points_give_no_verdict(self) -> None:
         self.dims["width"].points = [(0.0, 0.02, 0.0), (float("nan"), 0.02, 0.0)]

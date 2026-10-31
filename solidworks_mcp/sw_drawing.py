@@ -657,11 +657,15 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
 
     # SOLIDWORKS projects from the selected view. Activation alone is enough only
     # for the first projection off a parent (measured on 2016 SP3), and creating
-    # a view activates the new one, so activate and select before every attempt.
+    # a view activates the new one, so activate and select before every attempt. A selection SOLIDWORKS refuses is
+    # reported, not fatal: the first projection off an active parent works without it.
+    selected: list[bool] = []
+
     def project() -> Any:
         doc.ActivateView(parent_name)
         clear_selection(doc)
-        extension(doc).SelectByID2(parent_name, "DRAWINGVIEW", 0.0, 0.0, 0.0, False, 0, nothing(), 0)
+        selected.append(bool(extension(doc).SelectByID2(parent_name, "DRAWINGVIEW", 0.0, 0.0, 0.0, False, 0,
+                                                        nothing(), 0)))
         try:
             return doc.CreateUnfoldedViewAt3(x, y, 0.0, bool(args.get("not_aligned", False)))
         finally:
@@ -672,10 +676,12 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
         rebuild(doc)
         view = project()
     if view is None:
+        how = "active and selected" if all(selected) else "active; SOLIDWORKS did not select it by name"
         return result(
             False,
-            f"SOLIDWORKS did not project a view from '{parent_name}', with the parent active and selected.",
+            f"SOLIDWORKS did not project a view from '{parent_name}', with the parent {how}.",
             parent=parent_name,
+            parent_selected=selected,
             point_mm=[round(to_mm(x), 2), round(to_mm(y), 2)],
         )
     _, display = _apply_view_options(view, {"display_mode": args.get("display_mode")})
@@ -1270,35 +1276,52 @@ SOLID_BODY = 0           # swBodyType_e
 ATTACHMENT_TOLERANCE_MM = 0.3
 
 
-def _edge_geometry(edges: list[Any], transform: list[float], label: str) -> dict[str, Any]:
+def _points_mm(flat: list[Any], minimum: int) -> list[list[float]]:
+    """Model points given as flat x, y, z metres, in mm. A count that is not a whole number of points, fewer than
+    `minimum` points or a coordinate that is not finite raises ValueError."""
+    numbers = [float(c) for c in flat]
+    if len(numbers) % 3 or len(numbers) < 3 * minimum or not all(math.isfinite(c) for c in numbers):
+        raise ValueError(f"unusable points {numbers!r}")
+    return [[to_mm(numbers[i]), to_mm(numbers[i + 1]), to_mm(numbers[i + 2])] for i in range(0, len(numbers), 3)]
+
+
+def _edge_geometry(edges: list[Any], transform: dict[str, Any], label: str) -> dict[str, Any]:
     """Edges as polylines on the sheet (mm), and the centres of their circles and arcs on the sheet. An edge whose
-    curve cannot be read is counted in `unreadable`, never guessed."""
+    curve, end points, centre or tessellation cannot be read, or reads as something other than finite points, is
+    counted in `unreadable`, never guessed. An open edge without tessellation is its chord; a closed one is
+    unreadable."""
     lines: list[list[tuple[float, float]]] = []
     centres: list[tuple[float, float]] = []
     unreadable = 0
     for edge in edges:
         try:
             params = [float(c) for c in as_list(value(edge, "GetCurveParams2"))]
+            ends = _points_mm(params[0:6], 2)
             curve = value(edge, "GetCurve")
             centre = None
             if bool(value(curve, "IsCircle")):
-                centre = [to_mm(float(c)) for c in as_list(value(curve, "CircleParams"))[:3]]
-            raw = [float(c) for c in as_list(flag_methods(curve, "GetTessPts").GetTessPts(
-                1e-5, 1e-4, double_array(params[0:3]), double_array(params[3:6])))]
-            points = [[to_mm(raw[i]), to_mm(raw[i + 1]), to_mm(raw[i + 2])] for i in range(0, len(raw) - 2, 3)]
-            if len(points) < 2:
-                points = [[to_mm(c) for c in params[0:3]], [to_mm(c) for c in params[3:6]]]
+                centre = _points_mm(as_list(value(curve, "CircleParams"))[:3], 1)[0]
+            tess = as_list(flag_methods(curve, "GetTessPts").GetTessPts(
+                1e-5, 1e-4, double_array(params[0:3]), double_array(params[3:6])))
+            if tess:
+                points = _points_mm(tess, 2)
+            elif ends[0] != ends[1]:
+                points = ends
+            else:
+                raise ValueError("a closed edge without tessellation")
+            line = [_project(transform, p) for p in points]
+            centre_on_sheet = _project(transform, centre) if centre is not None else None
         except Exception:
             logger.info("Could not read an edge of %s", label, exc_info=True)
             unreadable += 1
             continue
-        lines.append([_project(transform, p) for p in points])
-        if centre is not None:
-            centres.append(_project(transform, centre))
+        lines.append(line)
+        if centre_on_sheet is not None:
+            centres.append(centre_on_sheet)
     return {"lines": lines, "centres": centres, "unreadable": unreadable, "transform": transform}
 
 
-def _view_transform(view: Any) -> list[float]:
+def _view_transform(view: Any) -> dict[str, Any]:
     transform = _model_to_sheet(view)
     if transform is None:
         raise ToolFailure(f"View '{safe(view, 'GetName2', '')}' does not report its model transform.", readable=False)
@@ -1306,21 +1329,28 @@ def _view_transform(view: Any) -> list[float]:
 
 
 def _shown_edges(view: Any) -> dict[str, Any]:
-    """The model edges the view draws in its current display mode."""
+    """The model edges the view draws in its current display mode. A view of a part with edges draws some, so an empty
+    answer is a ToolFailure, not a view that draws nothing."""
+    name = safe(view, "GetName2", "")
     edges = as_list(flag_methods(view, "GetVisibleEntities2").GetVisibleEntities2(nothing(), VIEW_ENTITY_EDGE))
-    return _edge_geometry(edges, _view_transform(view), f"view {safe(view, 'GetName2', '')}")
+    if not edges:
+        raise ToolFailure(f"View '{name}' lists none of the edges it draws.", readable=False)
+    return _edge_geometry(edges, _view_transform(view), f"view {name}")
 
 
 def _model_edges(view: Any) -> dict[str, Any]:
     """Every edge of the visible solid bodies of the part the view shows, projected like the view projects it: what
     the view would draw with hidden lines visible. Read from the bodies because a view switched to hidden lines
-    visible keeps returning only the edges it showed before (2016 SP3, measured 2026-10-30)."""
+    visible keeps returning only the edges it showed before (2016 SP3, measured 2026-10-30). Bodies without a single
+    edge are a ToolFailure: an empty answer must not clear every point."""
     name = safe(view, "GetName2", "")
     model = safe(view, "ReferencedDocument")
     bodies = as_list(flag_methods(model, "GetBodies2").GetBodies2(SOLID_BODY, True)) if model is not None else []
     if not bodies:
         raise ToolFailure(f"View '{name}' shows no part with solid bodies to read.", readable=False)
     edges = [e for body in bodies for e in as_list(value(body, "GetEdges"))]
+    if not edges:
+        raise ToolFailure(f"The solid bodies shown in view '{name}' list no edges.", readable=False)
     return _edge_geometry(edges, _view_transform(view), f"the model of view {name}")
 
 
@@ -1380,13 +1410,15 @@ def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any],
     "Read-only check of one drawing view: does any of its visible dimensions point into the void, i.e. is one of its "
     "measured points carried only by an edge the view hides (bore depth, inner step, groove bottom seen from outside)? "
     "The edges the view draws are read with hidden lines removed (the display mode is set back and read back "
-    "afterwards; a mode that does not apply or come back fails the call), all edges from the solid bodies of the part, "
-    "projected like the view. A measured point is hidden when it lies within tolerance_mm (sheet) of a model edge or "
+    "afterwards, also when a read fails; a mode that does not apply or come back fails the call), all edges from the "
+    "solid bodies of the part in its active configuration, projected like the view; an empty edge list fails the "
+    "call. A measured point is hidden when it lies within tolerance_mm (sheet) of a model edge or "
     "circle centre but of none the view draws; a point on no edge at all (sketch origin, the virtual corner of a "
     "rounded sketch) is not hidden. "
     "Per dimension: full_name, type2, the measured points on the sheet and in the model, their distances, "
     "hidden_points and into_void (null when the points cannot be read, or when no point is hidden and an unreadable "
-    "edge could change the verdict; edges.unreadable counts those). Silhouette edges are not read.",
+    "edge could change the verdict; edges.unreadable counts the model's, edges.unreadable_shown the drawn ones). "
+    "Silhouette edges are not read.",
     {
         "view_name": {"type": "string"},
         "tolerance_mm": {"type": "number", "default": ATTACHMENT_TOLERANCE_MM},
@@ -1406,6 +1438,7 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
     if original not in DISPLAY_MODES:
         return result(False, f"The display mode of view '{name}' cannot be read ({original!r}); nothing was changed.")
     failure = ""
+    error: Exception | None = None
     everything: dict[str, Any] | None = None
     shown: dict[str, Any] | None = None
     entries: list[dict[str, Any]] = []
@@ -1424,15 +1457,21 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
                     continue
                 entry.update(_attachment(display, shown, everything, tolerance))
                 entries.append(entry)
-    finally:
-        restored = _set_display_mode(view, original)
-        rebuild(doc)
+    except Exception as exc:   # set the mode back first, then report the read that failed
+        error = exc
+    restored = _set_display_mode(view, original)
+    rebuild(doc)
+    back = "" if restored["ok"] else "its display mode did not come back: " + _display_failure([restored])
+    if error is not None:
+        if not back:
+            raise error
+        data = error.data if isinstance(error, ToolFailure) else {}
+        raise ToolFailure(f"{error} View '{name}': {back}", **{**data, "display_mode": restored["actual"]}) from error
     if failure or everything is None or shown is None:
-        return result(False, f"View '{name}' could not be read with hidden lines removed: {failure}",
-                      display_mode=restored["actual"])
-    if not restored["ok"]:
-        return result(False, f"Checked view '{name}', but its display mode did not come back: "
-                             + _display_failure([restored]), display_mode=restored["actual"])
+        return result(False, f"View '{name}' could not be read with hidden lines removed: {failure}"
+                             + (f" Also {back}" if back else ""), display_mode=restored["actual"])
+    if back:
+        return result(False, f"Checked view '{name}', but {back}", display_mode=restored["actual"])
     void = sum(1 for e in entries if e["into_void"])
     unjudged = sum(1 for e in entries if e["into_void"] is None)
     return result(True, f"Checked {len(entries)} dimensions in '{name}': {void} point into the void, "
@@ -1440,7 +1479,7 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
                   view=name, display_mode=restored["actual"], tolerance_mm=tolerance, dimensions=entries,
                   into_void=void, unjudged=unjudged,
                   edges={"all": len(everything["lines"]), "shown": len(shown["lines"]),
-                         "unreadable": everything["unreadable"] + shown["unreadable"]})
+                         "unreadable": everything["unreadable"], "unreadable_shown": shown["unreadable"]})
 
 
 @drawing_tool(
@@ -1887,7 +1926,7 @@ def _center_mark_count(view: Any) -> int | None:
         "propagate": {"type": "boolean", "default": True},
         "slots": {"type": "boolean", "default": False},
         "fillets": {"type": "boolean", "default": True, "description": "Also mark the centers of fillets and "
-                    "other arcs; false keeps the automatic marks to holes and slots."},
+                    "other arcs; false keeps the automatic marks to holes and slots. Not used with selected_only."},
         "selected_only": {"type": "boolean", "default": False, "description": "Annotate the existing selection instead of every circle."},
     },
 )

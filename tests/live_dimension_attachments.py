@@ -16,15 +16,16 @@
 
 A new part gets a block 40 x 20 x 30 mm (front plane, extruded 30) and a blind bore of radius 4 mm and depth 12 mm
 from the front face; it is saved to a temporary folder under the server's output root. A drawing gets the front view
-and two projections off it, to the right and below, without hidden lines, then the model's dimensions, and every view
-is checked. The script checks:
+and two projections off it, to the right without and below with hidden lines, then the model's dimensions, and every
+view is checked. The script checks:
 
 (a) the part has the volume of block minus bore (geometry, not the tools' answers);
 (b) every view reads the 14 edges of the part (12 of the block, the 2 circles of the bore) and shows fewer, since the
     bore is hidden in all three;
 (c) the block depth (D1 of the boss) is listed in at least one view, with readable points, and never points into the
     void;
-(d) every view reads back without hidden lines after its check, and no call failed;
+(d) every view reads back in the display mode it was placed with after its check (the one below with hidden lines
+    visible, so the check really sets it back), and no call failed;
 (e) both projections off the front view exist as separate views (the second one needs the parent selected).
 
 A dimension that does point into the void is not part of this check: SOLIDWORKS 2016 imports no model dimension onto a
@@ -118,10 +119,15 @@ def main() -> int:
         parent = ((front.get("data") or {}).get("view") or {}).get("name")
         if failed or not parent:
             return 1
-        projected = [((step(f"insert_projected_view {direction}", insert_projected_view,
-                            {"parent_view": parent, "direction": direction, "offset_mm": 90,
-                             "display_mode": "hidden_lines_removed"}).get("data") or {}).get("view") or {}).get("name")
-                     for direction in ("right", "down")]
+        placed = {parent: "hidden_lines_removed"}
+        projected = []
+        for direction, mode in (("right", "hidden_lines_removed"), ("down", "hidden_lines_visible")):
+            answer = step(f"insert_projected_view {direction}", insert_projected_view,
+                          {"parent_view": parent, "direction": direction, "offset_mm": 90, "display_mode": mode})
+            projected.append(((answer.get("data") or {}).get("view") or {}).get("name"))
+            if failed:
+                return 1
+            placed[projected[-1]] = mode
         step("insert_model_annotations", insert_model_annotations, {"all_views": True})
         views = [v["name"] for v in (list_drawing_views({}).get("data") or {}).get("views") or []
                  if v.get("type") != "sheet"]
@@ -139,11 +145,12 @@ def main() -> int:
             b_hidden_edges=bool(views) and all((v["edges"] or {}).get("all") == 14
                                                and (v["edges"] or {}).get("shown", 14) < 14
                                                and (v["edges"] or {}).get("unreadable") == 0
+                                               and (v["edges"] or {}).get("unreadable_shown") == 0
                                                for v in report["views"].values()),
             c_block_not=bool(block) and all(d["into_void"] is False and d["hidden_points"] == [False, False]
                                             for d in block),
-            d_modes_back=bool(views) and all(v["display_mode"] == "hidden_lines_removed"
-                                              for v in report["views"].values()) and not failed,
+            d_modes_back=bool(views) and all(v["display_mode"] == placed.get(name)
+                                              for name, v in report["views"].items()) and not failed,
             e_two_projections=bool(parent) and all(projected) and len(set(projected)) == 2
             and set(projected) <= set(views) and len(views) == 3,
         )

@@ -291,13 +291,20 @@ listing only its visible edges after a switch to hidden lines visible
 (2016 SP3). Silhouette edges are not read:
 `ISilhouetteEdge.GetCurve` and `GetStartPoint` raise RPC_E_SERVERFAULT inside
 SOLIDWORKS 2016, and the part could not be closed afterwards. An edge whose
-curve cannot be read is counted in `edges.unreadable`; a dimension whose
-verdict such an edge could change gets `into_void: null`, as does one whose
-points cannot be read, never `false`.
+curve, end points, centre or tessellation cannot be read or is not finite is
+counted in `edges.unreadable` (model) or `edges.unreadable_shown` (drawn); a
+dimension whose verdict such an edge could change gets `into_void: null`, as
+does one whose points cannot be read, never `false`. An empty edge list, from
+the view or from the bodies, fails the call. The bodies are those of the
+part's active configuration, so a view of another configuration is not
+checked correctly. The display mode is set back with the view's own style: a
+view that followed its parent's style keeps the same mode afterwards, but as
+its own.
 
 `insert_center_marks` marks holes, fillets and slots by default; `fillets: false`
-leaves out fillets and other arcs. Its `ok` is SOLIDWORKS' answer to
-`AutoInsertCenterMarks2`: which edges got a mark is not read back.
+leaves out fillets and other arcs (not used with `selected_only`). Its `ok` is
+SOLIDWORKS' answer to `AutoInsertCenterMarks2`: which edges got a mark is not
+read back.
 
 For hand-made section and detail views, call `create_drawing_sketch` after
 activating the parent view, then use the normal `draw_line` or `draw_circle`
