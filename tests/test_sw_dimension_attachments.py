@@ -307,6 +307,79 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         answer = self.check()
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["data"]["edges"]["unreadable"], 1)
+        found = self.by_name(answer)
+        # on a readable hidden edge, and on a drawn edge: still judged
+        self.assertIs(found["D1@Bohrung@Teil.Part"]["into_void"], True)
+        self.assertIs(found["D1@Skizze1@Teil.Part"]["into_void"], False)
+        # on no readable edge: the unreadable model edge may carry it
+        self.assertIsNone(found["D2@Skizze1@Teil.Part"]["into_void"])
+        self.assertEqual(found["D2@Skizze1@Teil.Part"]["hidden_points"], [None, None])
+        self.assertEqual((answer["data"]["into_void"], answer["data"]["unjudged"]), (1, 2))
+
+    def test_no_model_edge_readable_gives_no_all_clear(self) -> None:
+        broken = [Edge(e.curve, broken=True) for e in self.view.shown_edges + self.view.hidden_edges]
+        self.view.ReferencedDocument.GetBodies2 = lambda kind, visible_only: (Body(broken),)
+        answer = self.check()
+        self.assertTrue(answer["ok"], answer)
+        found = self.by_name(answer)
+        # what lies on a drawn edge is not hidden; everything else is unjudged, never cleared
+        self.assertIs(found["D1@Skizze1@Teil.Part"]["into_void"], False)
+        for name in ("D1@Bohrung@Teil.Part", "D2@Skizze1@Teil.Part"):
+            self.assertIsNone(found[name]["into_void"], name)
+        self.assertEqual(answer["data"]["into_void"], 0)
+        self.assertEqual(answer["data"]["edges"], {"all": 0, "shown": 3, "unreadable": 4})
+
+    def test_an_unreadable_drawn_edge_leaves_a_hidden_looking_point_unjudged(self) -> None:
+        self.view.shown_edges.append(Edge(Curve((0, 0, 0), (0, 0, 0)), broken=True))
+        # the model reads its drawn edges and the hidden bore bottom
+        self.view.ReferencedDocument.GetBodies2 = lambda kind, visible_only: (
+            Body([e for e in self.view.shown_edges if not e.broken]
+                 + [line((0.01, 0.005, 0), (0.02, 0.005, 0))]),)
+        answer = self.check()
+        self.assertTrue(answer["ok"], answer)
+        depth = self.by_name(answer)["D1@Bohrung@Teil.Part"]
+        self.assertEqual(depth["hidden_points"], [False, None])
+        self.assertIsNone(depth["into_void"])
+
+    def test_non_finite_points_give_no_verdict(self) -> None:
+        self.dims["width"].points = [(0.0, 0.02, 0.0), (float("nan"), 0.02, 0.0)]
+        self.dims["radius"].points = [(0.03, 0.01, 0.0)]
+        found = self.by_name(self.check())
+        self.assertIsNone(found["D1@Skizze1@Teil.Part"]["into_void"])
+        self.assertIsNone(found["D1@Loch@Teil.Part"]["into_void"])
+
+    def test_visible_edges_that_cannot_be_read_raise_and_the_mode_is_set_back(self) -> None:
+        self.view.mode = 3
+
+        def refuse(component, kind):
+            raise OSError("GetVisibleEntities2 refused")
+        self.view.GetVisibleEntities2 = refuse
+        with self.assertRaises(OSError):
+            self.check()
+        self.assertEqual(self.view.mode, 3)
+        self.assertEqual(self.view.set_calls, [2, 3])
+
+    def test_bodies_that_cannot_be_read_raise_and_the_mode_is_kept(self) -> None:
+        self.view.mode = 3
+
+        def refuse(kind, visible_only):
+            raise OSError("GetBodies2 refused")
+        self.view.ReferencedDocument.GetBodies2 = refuse
+        with self.assertRaises(OSError):
+            self.check()
+        self.assertEqual(self.view.mode, 3)
+
+    def test_a_refused_dimension_walk_fails_and_the_mode_is_set_back(self) -> None:
+        self.view.mode = 3
+
+        def refuse():
+            raise OSError("GetNext5 refused")
+        self.view.displays[1].GetNext5 = refuse
+        answer = self.check()
+        self.assertFalse(answer["ok"])
+        self.assertIn("GetNext5", answer["message"])
+        self.assertEqual(self.view.mode, 3)
+        self.assertEqual(self.view.set_calls, [2, 3])
 
     def test_a_view_without_transform_fails_and_is_set_back(self) -> None:
         self.view.ModelToViewTransform = None

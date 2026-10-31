@@ -292,6 +292,38 @@ class ProjectedViewTests(unittest.TestCase):
         self.assertEqual(second["data"]["parent"], "Drawing View1")
         self.assertEqual([e for e in self.doc.log if e[0] == "project"][-2:], [("project", None)] * 2)
 
+    def test_a_refused_projection_is_retried_after_a_rebuild_with_the_parent_selected_again(self) -> None:
+        create = self.doc.CreateUnfoldedViewAt3
+        attempts: list[str | None] = []
+
+        def first_refused(x, y, z, not_aligned):
+            attempts.append(self.doc.selected)
+            return None if len(attempts) == 1 else create(x, y, z, not_aligned)
+        self.doc.CreateUnfoldedViewAt3 = first_refused
+        answer = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(attempts, ["Drawing View1", "Drawing View1"])
+        self.assertGreaterEqual(sw_drawing.rebuild.call_count, 1)
+        self.assertIsNone(self.doc.selected)
+
+    def test_a_selection_that_raises_projects_nothing(self) -> None:
+        def refuse(*args):
+            raise OSError("SelectByID2 refused")
+        self.doc.Extension.SelectByID2 = refuse
+        with self.assertRaises(OSError):
+            sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertNotIn("project", [e[0] for e in self.doc.log])
+        self.assertEqual(len(self.doc.views), 2)
+
+    def test_a_projection_that_raises_leaves_nothing_selected(self) -> None:
+        def refuse(x, y, z, not_aligned):
+            raise OSError("CreateUnfoldedViewAt3 refused")
+        self.doc.CreateUnfoldedViewAt3 = refuse
+        with self.assertRaises(OSError):
+            sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertIsNone(self.doc.selected)
+        self.assertEqual(self.doc.log[-1], ("clear",))
+
 
 # --------------------------------------------------------------------------
 # create_drawing and the document that is active afterwards (ClauSW #115)
@@ -489,6 +521,13 @@ class CenterMarkTests(unittest.TestCase):
     def test_fillets_false_keeps_holes_and_slots(self) -> None:
         answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1", "fillets": False})
         self.assertTrue(answer["ok"])
+        self.assertEqual(self.view.calls[0][0], 1 | 4)
+
+    def test_fillets_false_and_no_marks_fails(self) -> None:
+        self.view.AutoInsertCenterMarks2 = lambda *args: self.view.calls.append(args) or False
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1", "fillets": False})
+        self.assertFalse(answer["ok"])
+        self.assertIn("no center marks", answer["message"])
         self.assertEqual(self.view.calls[0][0], 1 | 4)
 
 

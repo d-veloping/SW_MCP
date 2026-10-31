@@ -1336,10 +1336,22 @@ def _distance(point: tuple[float, float], edges: dict[str, Any]) -> float:
     return best
 
 
+def _hidden(to_shown: float, to_all: float, tolerance: float, shown: dict[str, Any],
+            everything: dict[str, Any]) -> bool | None:
+    """Whether only a hidden edge carries a point; None when an unreadable edge could change that: a point off every
+    drawn edge may lie on an unreadable drawn one, a point on no model edge on an unreadable model edge."""
+    if to_shown <= tolerance:
+        return False
+    if to_all <= tolerance:
+        return None if shown["unreadable"] else True
+    return None if everything["unreadable"] else False
+
+
 def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any], tolerance: float) -> dict[str, Any]:
     """Where one display dimension is attached: its first two reference points (IDimension.ReferencePoints, model
     metres) on the sheet, their distances to the shown and to all edges, and which of them only a hidden edge carries.
-    `into_void` is None when the points cannot be read."""
+    `into_void` is None when the points cannot be read, or when no point is hidden and an unreadable edge could change
+    the verdict on one of them."""
     out: dict[str, Any] = {"into_void": None}
     try:
         dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
@@ -1353,12 +1365,13 @@ def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any],
     sheet = [_project(shown["transform"], p) for p in model[:2]]
     to_shown = [_distance(p, shown) for p in sheet]
     to_all = [_distance(p, everything) for p in sheet]
-    hidden = [s > tolerance and a <= tolerance for s, a in zip(to_shown, to_all)]
+    hidden = [_hidden(s, a, tolerance, shown, everything) for s, a in zip(to_shown, to_all)]
     out.update(model_points_mm=[[round(c, 4) for c in p] for p in model[:2]],
                sheet_points_mm=[[round(c, 3) for c in p] for p in sheet],
                distance_shown_mm=[round(d, 3) if math.isfinite(d) else None for d in to_shown],
                distance_all_mm=[round(d, 3) if math.isfinite(d) else None for d in to_all],
-               hidden_points=hidden, into_void=any(hidden))
+               hidden_points=hidden,
+               into_void=True if True in hidden else None if None in hidden else False)
     return out
 
 
@@ -1372,7 +1385,8 @@ def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any],
     "circle centre but of none the view draws; a point on no edge at all (sketch origin, the virtual corner of a "
     "rounded sketch) is not hidden. "
     "Per dimension: full_name, type2, the measured points on the sheet and in the model, their distances, "
-    "hidden_points and into_void (null when the points cannot be read). Silhouette edges are not read.",
+    "hidden_points and into_void (null when the points cannot be read, or when no point is hidden and an unreadable "
+    "edge could change the verdict; edges.unreadable counts those). Silhouette edges are not read.",
     {
         "view_name": {"type": "string"},
         "tolerance_mm": {"type": "number", "default": ATTACHMENT_TOLERANCE_MM},
@@ -1422,7 +1436,7 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
     void = sum(1 for e in entries if e["into_void"])
     unjudged = sum(1 for e in entries if e["into_void"] is None)
     return result(True, f"Checked {len(entries)} dimensions in '{name}': {void} point into the void, "
-                        f"{unjudged} without readable points.",
+                        f"{unjudged} without a verdict.",
                   view=name, display_mode=restored["actual"], tolerance_mm=tolerance, dimensions=entries,
                   into_void=void, unjudged=unjudged,
                   edges={"all": len(everything["lines"]), "shown": len(shown["lines"]),

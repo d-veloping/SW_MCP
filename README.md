@@ -290,7 +290,14 @@ The edges come from the bodies because a view placed without hidden lines keeps
 listing only its visible edges after a switch to hidden lines visible
 (2016 SP3). Silhouette edges are not read:
 `ISilhouetteEdge.GetCurve` and `GetStartPoint` raise RPC_E_SERVERFAULT inside
-SOLIDWORKS 2016, and the part could not be closed afterwards.
+SOLIDWORKS 2016, and the part could not be closed afterwards. An edge whose
+curve cannot be read is counted in `edges.unreadable`; a dimension whose
+verdict such an edge could change gets `into_void: null`, as does one whose
+points cannot be read, never `false`.
+
+`insert_center_marks` marks holes, fillets and slots by default; `fillets: false`
+leaves out fillets and other arcs. Its `ok` is SOLIDWORKS' answer to
+`AutoInsertCenterMarks2`: which edges got a mark is not read back.
 
 For hand-made section and detail views, call `create_drawing_sketch` after
 activating the parent view, then use the normal `draw_line` or `draw_circle`
