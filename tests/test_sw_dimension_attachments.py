@@ -355,6 +355,60 @@ class CheckDimensionAttachmentsTests(unittest.TestCase):
         self.assertNotIn("D1@Bohrung@Teil.Part", self.by_name(answer))
         self.assertEqual(answer["data"]["into_void"], 0)
 
+    def layers(self, **visible) -> None:
+        """Drawing layers by name: True or False as Visible, None unreadable, an exception raised by GetLayer."""
+        class Layer:
+            def __init__(self, shown) -> None:
+                self.Visible = shown
+
+        class Layers:
+            def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+                pass
+
+            def GetLayer(self, name):  # noqa: N802 - COM member name
+                if isinstance(visible.get(name), Exception):
+                    raise visible[name]
+                return Layer(visible[name]) if name in visible else None
+        self.doc.GetLayerManager = lambda: Layers()
+
+    def test_a_dimension_on_a_hidden_layer_is_not_checked(self) -> None:
+        self.layers(Versteckt=False, Masse=True)
+        self.view.displays[0].annotation.Layer = "Versteckt"
+        self.view.displays[1].annotation.Layer = "Masse"
+        self.view.displays[2].annotation.Layer = "-Per Standard-"   # the manager does not return the default layer
+        answer = self.check()
+        self.assertTrue(answer["ok"], answer)
+        found = self.by_name(answer)
+        self.assertNotIn("D1@Bohrung@Teil.Part", found)
+        self.assertIs(found["D1@Skizze1@Teil.Part"]["visible"], True)
+        self.assertIs(found["D2@Skizze1@Teil.Part"]["visible"], True)
+        self.assertEqual((answer["data"]["into_void"], answer["data"]["visibility_unknown"]), (0, 0))
+
+    def test_a_layer_that_cannot_be_read_is_checked_as_unknown(self) -> None:
+        self.layers(Kaputt=OSError("no such layer"), Ohne=None)
+        self.view.displays[0].annotation.Layer = "Kaputt"
+        self.view.displays[1].annotation.Layer = "Ohne"
+        answer = self.check()
+        self.assertTrue(answer["ok"], answer)
+        found = self.by_name(answer)
+        # it may be hidden: kept, judged, and never passed off as visible
+        self.assertIsNone(found["D1@Bohrung@Teil.Part"]["visible"])
+        self.assertIs(found["D1@Bohrung@Teil.Part"]["into_void"], True)
+        self.assertIsNone(found["D1@Skizze1@Teil.Part"]["visible"])
+        self.assertEqual(answer["data"]["visibility_unknown"], 2)
+        self.assertIn("2 of unknown visibility", answer["message"])
+
+    def test_an_unreadable_layer_name_is_checked_as_unknown(self) -> None:
+        class NoLayer(Annotation):
+            @property
+            def Layer(self):  # noqa: N802 - COM member name
+                raise OSError("Layer not readable")
+        self.view.displays[0].annotation = NoLayer()
+        answer = self.check()
+        found = self.by_name(answer)
+        self.assertIsNone(found["D1@Bohrung@Teil.Part"]["visible"])
+        self.assertEqual(answer["data"]["visibility_unknown"], 1)
+
     def test_an_empty_list_of_drawn_edges_fails_and_the_mode_is_set_back(self) -> None:
         for empty in (None, ()):
             with self.subTest(empty=empty):

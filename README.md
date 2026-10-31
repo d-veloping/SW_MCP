@@ -284,7 +284,10 @@ dimensions.
 the void: their measured points (`IDimension.ReferencePoints`, model space,
 mapped onto the sheet) lie on an edge of the part's solid bodies, projected
 like the view, but on none the view draws with hidden lines removed — a bore
-depth or an inner step seen from outside, the case for a section view. The
+depth or an inner step seen from outside, the case for a section view.
+Dimensions that are hidden or sit on a hidden drawing layer are left out, as
+in `list_drawing_dimensions`; one whose visibility or layer cannot be read is
+checked with `visible: null` and counted in `visibility_unknown`. The
 view is set to hidden lines removed for the reading, then back, and read back.
 The edges come from the bodies because a view placed without hidden lines keeps
 listing only its visible edges after a switch to hidden lines visible

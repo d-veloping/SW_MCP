@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .sw_core import (
     ToolFailure,
@@ -1144,26 +1144,38 @@ def _views_of_every_sheet(doc: Any) -> list[tuple[str, Any]]:
     return found
 
 
-def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
-    """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size. A
-    display the walk returns although it is hidden (documented for suppressed dimensions) is left out, and so is one
-    on a hidden drawing layer: IAnnotation.Visible does not see the layer. One whose visibility or layer cannot be
-    read stays in the list with `visible: None`: it may be hidden, and it must not pass for visible or for gone."""
-    sizes: dict[str, tuple[float, float] | None] = {}
+def _shown_dimensions(doc: Any) -> Callable[[dict[str, Any]], bool]:
+    """keep(entry) for the `_dimension_entry` entries of one drawing: False for a display the walk returns although
+    it is hidden (documented for suppressed dimensions) and for one on a hidden drawing layer, because
+    IAnnotation.Visible does not see the layer. One whose visibility or layer cannot be read is kept with
+    `visible: None`: it may be hidden, and it must not pass for visible or for gone. A layer the manager does not
+    return (the default layer) hides nothing; each layer is read once."""
     layers: dict[str, bool | None] = {}
 
-    def layer_shown(name: str) -> bool | None:
-        """True or False as read; None when the layer or its visibility cannot be read. A layer the manager does not
-        return (the default layer) hides nothing."""
-        if name not in layers:
+    def keep(entry: dict[str, Any]) -> bool:
+        name = entry.get("layer")
+        if name and name not in layers:
             try:
                 found = flag_methods(safe(doc, "GetLayerManager"), "GetLayer").GetLayer(name)
                 shown = True if found is None else value(found, "Visible")
                 layers[name] = None if shown is None else bool(shown)
             except Exception:
                 layers[name] = None
-        return layers[name]
+        shown = layers[name] if name else True
+        if entry["visible"] is False or shown is False:
+            return False
+        if shown is None:
+            entry["visible"] = None
+        return True
 
+    return keep
+
+
+def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
+    """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size; which
+    count as visible decides `_shown_dimensions`."""
+    sizes: dict[str, tuple[float, float] | None] = {}
+    keep = _shown_dimensions(doc)
     entries: list[dict[str, Any]] = []
     for sheet_name, view in _views_of_every_sheet(doc):
         name = str(_read(view, "GetName2") or "")
@@ -1176,11 +1188,8 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
                 sizes[sheet_name] = None
         for display in _display_dimensions(view):
             entry = _dimension_entry(name, display)
-            shown = layer_shown(entry["layer"]) if entry.get("layer") else True
-            if entry["visible"] is False or shown is False:
+            if not keep(entry):
                 continue
-            if shown is None:
-                entry["visible"] = None
             entry["sheet"] = sheet_name
             size = sizes[sheet_name]
             text = entry.get("text_mm")
@@ -1407,7 +1416,8 @@ def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any],
 
 @drawing_tool(
     "check_dimension_attachments",
-    "Read-only check of one drawing view: does any of its visible dimensions point into the void, i.e. is one of its "
+    "Read-only check of one drawing view: does any of its visible dimensions (not hidden, not on a hidden drawing "
+    "layer) point into the void, i.e. is one of its "
     "measured points carried only by an edge the view hides (bore depth, inner step, groove bottom seen from outside)? "
     "The edges the view draws are read with hidden lines removed (the display mode is set back and read back "
     "afterwards, also when a read fails; a mode that does not apply or come back fails the call), all edges from the "
@@ -1418,6 +1428,8 @@ def _attachment(display: Any, shown: dict[str, Any], everything: dict[str, Any],
     "Per dimension: full_name, type2, the measured points on the sheet and in the model, their distances, "
     "hidden_points and into_void (null when the points cannot be read, or when no point is hidden and an unreadable "
     "edge could change the verdict; edges.unreadable counts the model's, edges.unreadable_shown the drawn ones). "
+    "A dimension whose visibility or layer cannot be read is checked with visible null and counted in "
+    "visibility_unknown. "
     "Silhouette edges are not read.",
     {
         "view_name": {"type": "string"},
@@ -1451,9 +1463,10 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
         else:
             failure = _display_failure([outcome])
         if not failure and everything is not None and shown is not None:
+            keep = _shown_dimensions(doc)
             for display in _display_dimensions(view):
                 entry = _dimension_entry(name, display)
-                if entry["visible"] is False:
+                if not keep(entry):
                     continue
                 entry.update(_attachment(display, shown, everything, tolerance))
                 entries.append(entry)
@@ -1474,10 +1487,11 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, f"Checked view '{name}', but {back}", display_mode=restored["actual"])
     void = sum(1 for e in entries if e["into_void"])
     unjudged = sum(1 for e in entries if e["into_void"] is None)
+    unknown = sum(1 for e in entries if e["visible"] is None)
     return result(True, f"Checked {len(entries)} dimensions in '{name}': {void} point into the void, "
-                        f"{unjudged} without a verdict.",
+                        f"{unjudged} without a verdict, {unknown} of unknown visibility.",
                   view=name, display_mode=restored["actual"], tolerance_mm=tolerance, dimensions=entries,
-                  into_void=void, unjudged=unjudged,
+                  into_void=void, unjudged=unjudged, visibility_unknown=unknown,
                   edges={"all": len(everything["lines"]), "shown": len(shown["lines"]),
                          "unreadable": everything["unreadable"], "unreadable_shown": shown["unreadable"]})
 
