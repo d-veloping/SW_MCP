@@ -68,11 +68,20 @@ class FakeView:
         return self.edges
 
 
+class SelectAnything:
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def SelectByID2(self, *args) -> bool:  # noqa: N802 - COM member name
+        return True
+
+
 class FakeDrawing:
     def __init__(self, views: list[FakeView]) -> None:
         self.views = views
         self.created: list[FakeView] = []
         self.next_view: FakeView | None = None
+        self.Extension = SelectAnything()
 
     def _link(self) -> None:
         for a, b in zip(self.views, self.views[1:] + [None]):
@@ -100,6 +109,55 @@ class FakeDrawing:
     def CreateUnfoldedViewAt3(self, x, y, z, not_aligned):  # noqa: N802 - COM member name
         view = self.next_view or FakeView("Drawing View8")
         self.views.append(view)
+        return view
+
+
+class FakeExtension:
+    """Records selections; SelectByID2 succeeds for the names in `known`."""
+
+    def __init__(self, doc: "ProjectingDrawing") -> None:
+        self.doc = doc
+
+    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
+        pass
+
+    def SelectByID2(self, name, kind, x, y, z, append, mark, callout, option):  # noqa: N802 - COM member name
+        self.doc.log.append(("select", name, kind))
+        self.doc.selected = name if name in self.doc.known else None
+        return self.doc.selected is not None
+
+
+class ProjectingDrawing(FakeDrawing):
+    """Like SOLIDWORKS 2016: a projection needs the parent selected, except the first one off an active parent."""
+
+    def __init__(self, views: list[FakeView]) -> None:
+        super().__init__(views)
+        self.known = {v.name for v in views}
+        self.active: str | None = None
+        self.selected: str | None = None
+        self.projected: dict[str, int] = {}
+        self.log: list[tuple] = []
+        self.Extension = FakeExtension(self)
+
+    def ActivateView(self, name: str) -> bool:  # noqa: N802 - COM member name
+        self.log.append(("activate", name))
+        self.active = name
+        return True
+
+    def ClearSelection2(self, all_: bool) -> None:  # noqa: N802 - COM member name
+        self.log.append(("clear",))
+        self.selected = None
+
+    def CreateUnfoldedViewAt3(self, x, y, z, not_aligned):  # noqa: N802 - COM member name
+        parent = self.selected or (self.active if not self.projected.get(self.active or "") else None)
+        self.log.append(("project", parent))
+        if parent is None:
+            return None
+        self.projected[parent] = self.projected.get(parent, 0) + 1
+        view = FakeView(f"Drawing View{len(self.views) + 1}")
+        self.views.append(view)
+        self.known.add(view.name)
+        self.active = view.name
         return view
 
 
@@ -198,6 +256,74 @@ class DisplayModeTests(unittest.TestCase):
                 self.assertFalse(answer["ok"], answer)
                 self.assertEqual(answer["data"]["display"][0]["actual"], "hidden_lines_removed")
                 target.broken = False
+
+
+class ProjectedViewTests(unittest.TestCase):
+    """insert_projected_view selects the parent before every projection, so a second one off it works."""
+
+    def setUp(self) -> None:
+        self.doc = ProjectingDrawing([FakeView("Sheet1", kind=1), FakeView("Drawing View1")])
+        for patch in (
+            unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, self.doc)),
+            unittest.mock.patch.object(sw_drawing, "rebuild"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_two_projections_off_one_parent(self) -> None:
+        right = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        down = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "down"})
+        self.assertTrue(right["ok"], right)
+        self.assertTrue(down["ok"], down)
+        self.assertEqual(self.doc.projected, {"Drawing View1": 2})
+        self.assertNotEqual(right["data"]["view"]["name"], down["data"]["view"]["name"])
+        for i, entry in enumerate(self.doc.log):
+            if entry[0] == "project":
+                self.assertEqual(self.doc.log[i - 1], ("select", "Drawing View1", "DRAWINGVIEW"))
+        self.assertIsNone(self.doc.selected)
+
+    def test_parent_that_cannot_be_selected_fails_after_its_first_projection(self) -> None:
+        self.doc.known.discard("Drawing View1")
+        first = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        second = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "down"})
+        self.assertTrue(first["ok"], first)
+        self.assertFalse(second["ok"], second)
+        self.assertIn("did not select it by name", second["message"])
+        self.assertEqual(second["data"]["parent"], "Drawing View1")
+        self.assertEqual(second["data"]["parent_selected"], [False, False])
+        self.assertEqual([e for e in self.doc.log if e[0] == "project"][-2:], [("project", None)] * 2)
+
+    def test_a_refused_projection_is_retried_after_a_rebuild_with_the_parent_selected_again(self) -> None:
+        create = self.doc.CreateUnfoldedViewAt3
+        attempts: list[str | None] = []
+
+        def first_refused(x, y, z, not_aligned):
+            attempts.append(self.doc.selected)
+            return None if len(attempts) == 1 else create(x, y, z, not_aligned)
+        self.doc.CreateUnfoldedViewAt3 = first_refused
+        answer = sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(attempts, ["Drawing View1", "Drawing View1"])
+        self.assertGreaterEqual(sw_drawing.rebuild.call_count, 1)
+        self.assertIsNone(self.doc.selected)
+
+    def test_a_selection_that_raises_projects_nothing(self) -> None:
+        def refuse(*args):
+            raise OSError("SelectByID2 refused")
+        self.doc.Extension.SelectByID2 = refuse
+        with self.assertRaises(OSError):
+            sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertNotIn("project", [e[0] for e in self.doc.log])
+        self.assertEqual(len(self.doc.views), 2)
+
+    def test_a_projection_that_raises_leaves_nothing_selected(self) -> None:
+        def refuse(x, y, z, not_aligned):
+            raise OSError("CreateUnfoldedViewAt3 refused")
+        self.doc.CreateUnfoldedViewAt3 = refuse
+        with self.assertRaises(OSError):
+            sw_drawing.insert_projected_view({"parent_view": "Drawing View1", "direction": "right"})
+        self.assertIsNone(self.doc.selected)
+        self.assertEqual(self.doc.log[-1], ("clear",))
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +485,51 @@ class CreateDrawingActivationTests(unittest.TestCase):
         answer = self.create([self.part])
         self.assertFalse(answer["ok"])
         self.assertNotIn("data", answer)
+
+
+class MarkingView:
+    """The active view as AutoInsertCenterMarks2 sees it: records the option bits of each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def AutoInsertCenterMarks2(self, *args):  # noqa: N802 - COM member name
+        self.calls.append(args)
+        return True
+
+    def GetCenterMarkCount2(self, size):  # noqa: N802 - COM member name
+        return 0
+
+
+class CenterMarkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.view = MarkingView()
+        doc = unittest.mock.Mock()
+        doc.ActivateView.return_value = True
+        doc.ActiveDrawingView = self.view
+        for patch in (
+            unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, doc)),
+            unittest.mock.patch.object(sw_drawing, "rebuild"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_fillets_are_marked_by_default(self) -> None:
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1"})
+        self.assertTrue(answer["ok"])
+        self.assertEqual(self.view.calls[0][0], 1 | 2 | 4)
+
+    def test_fillets_false_keeps_holes_and_slots(self) -> None:
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1", "fillets": False})
+        self.assertTrue(answer["ok"])
+        self.assertEqual(self.view.calls[0][0], 1 | 4)
+
+    def test_fillets_false_and_no_marks_fails(self) -> None:
+        self.view.AutoInsertCenterMarks2 = lambda *args: self.view.calls.append(args) or False
+        answer = sw_drawing.insert_center_marks({"view_name": "Drawing View1", "fillets": False})
+        self.assertFalse(answer["ok"])
+        self.assertIn("no center marks", answer["message"])
+        self.assertEqual(self.view.calls[0][0], 1 | 4)
 
 
 if __name__ == "__main__":
