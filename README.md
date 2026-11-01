@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-117 tools: sketching with real relations and driving dimensions, the solid
+121 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -227,7 +227,8 @@ metal parts only.
 `activate_drawing_view`, `create_drawing_sketch`, `set_drawing_view`,
 `insert_model_annotations`, `auto_dimension_view`, `insert_center_marks`,
 `insert_centerlines`, `add_note`, `list_drawing_dimensions`,
-`hide_drawing_dimensions`, `arrange_drawing_dimensions`, `check_dimension_attachments`.
+`hide_drawing_dimensions`, `arrange_drawing_dimensions`, `check_dimension_attachments`,
+`set_sheet_format`, `set_dimension_style`, `move_dimension_text`, `list_view_arcs`.
 
 `insert_standard_views`, `insert_model_view`, `insert_projected_view` and
 `set_drawing_view` take `display_mode`: `hidden_lines_removed` (SOLIDWORKS'
@@ -305,6 +306,57 @@ part's active configuration, so a view of another configuration is not
 checked correctly. The display mode is set back with the view's own style: a
 view that followed its parent's style keeps the same mode afterwards, but as
 its own.
+
+`set_sheet_format` puts a sheet format file (`.slddrt`, border and title block)
+on a sheet with a standard `paper_size` and the projection (`first_angle`),
+keeping the sheet's scale (`SetupSheet5` with a custom template). It reads back
+the template path (`GetTemplateName`, compared case-insensitively), the sheet
+size (within 0.5 mm of the paper size), the projection and the scale, and
+succeeds only when `SetupSheet5` returned true and all of them match. A missing
+file, a relative path or one that is not a `.slddrt` is refused before anything
+is called; a sheet that cannot be read back after `SetupSheet5` fails the call with
+`setup_returned`. The file is used in place; in the live check SOLIDWORKS did not change
+it (size and modification time), and views and dimension texts stayed where they
+were (2016 SP3, 2026-11-01).
+
+`set_dimension_style`, `move_dimension_text` and `list_view_arcs` work on one
+view of the active sheet (`view_name`); the first two name each dimension by the
+`full_name` that `list_drawing_dimensions` reports, and a dimension shown more
+than once in that view, or not at all, is not touched and fails its entry, as is
+every dimension of a view that holds an unreadable one (it could be the same
+dimension once more).
+`set_dimension_style` sets only the properties passed, `shortened_radius`
+(`IDisplayDimension.ShortenedRadius`, the foreshortened radius with a jogged
+leader) and `solid_leader` (`SolidLeader`, the leader as one solid line; false
+draws it from the arc to the text only), and reads both back after a rebuild: an
+entry succeeds when each property passed reads as asked and the other one, if it
+was readable before, reads back unchanged; a property passed that the release
+does not take or read gives the entry an `error`. `move_dimension_text` sets each text to a sheet position in mm
+(`IAnnotation.SetPosition`) and reads it back with `GetPosition`; an entry
+succeeds within 0.5 mm. Both succeed only when every entry does; when the
+dimensions cannot be read again after the change, the call fails, says the
+change was made, and carries the entries. Where a text
+should go is the caller's decision; the tool only places and checks it. Changing
+a style can move a text (switching `shortened_radius` on moved a radius text by
+up to 22 mm on 2016 SP3), so set the style first and move the text afterwards.
+SOLIDWORKS also keeps a radius text on the ray from its centre at a distance of
+its own choosing in some cases (with `shortened_radius` on and the position asked
+for inside the arc it landed 31.5 mm away); the move then fails with the
+position read back.
+
+`list_view_arcs` lists the circles and arcs a view draws in true shape (circle
+axis along the view direction): centre, radius on the sheet (scale applied), the
+point at half the arc's length and the tessellated points, all in sheet mm. It
+reads only edges (`GetVisibleEntities2` with edges, never silhouette edges, see
+above) and counts every drawn edge: `oblique` for circles seen at an angle,
+`unreadable` for edges whose curve, circle or tessellation cannot be read. An
+empty `arcs` with `unreadable: 0` means the view draws no circular edge in true
+shape among the edges the view lists; a view switched to hidden lines visible
+may still list only the edges it showed before (see above), so dashed circles
+can be missing. A view that lists no edge at all fails the call. `list_drawing_dimensions`
+gives each dimension its measured points on the sheet, `reference_points_mm`
+(`IDimension.ReferencePoints` through the view's model transform), or `null`
+when they cannot be read, never an empty list.
 
 `insert_center_marks` marks holes, fillets and slots by default; `fillets: false`
 leaves out fillets and other arcs (not used with `selected_only`). Its `ok` is
@@ -533,8 +585,9 @@ plate ends flush inside, the recut member is reported), are checked by
 readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
 with every option off its default by readback and reach.
 
-Every tool except the 16 sheet metal and weldment tools and `activate_document`
-has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
+Every tool except the 16 sheet metal and weldment tools, `activate_document` and
+`set_sheet_format`, `set_dimension_style`, `move_dimension_text` and `list_view_arcs`
+(measured on 2016 SP3 only) has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
 could be checked numerically it was: the revolved ring, swept rod and lofted
 cone match their closed-form volumes; a 5-degree `draft` removes exactly the
 expected wedge; `rib` produces exactly the triangle under its profile;
@@ -558,7 +611,7 @@ newest-name-first fallback.
 | Release | Binding | State |
 | --- | --- | --- |
 | SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured |
-| SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments and `activate_document` measured |
+| SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments, `activate_document` and the four 2016-only drawing tools above measured |
 | SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | not supported | late binding fails on the first sketch member; with `early` and `SW_MCP_QUIET_UI=1` (SP4.0) a sketch rectangle is drawn, then SOLIDWORKS crashes in `slduiu.dll` during `close_sketch` (#26) |
 
 Late binding is pywin32's dynamic dispatch: every member is resolved by name on
@@ -597,7 +650,7 @@ the cache on a machine where such a tool runs, or move it aside afterwards.
 | `sw_weldment.py` | 3D sketches, structural members, end caps, trim/extend, gussets |
 | `sw_inspect.py` | Topology listings, measurement, mass properties, screenshots |
 | `sw_assembly.py` | Components and mates |
-| `sw_drawing.py` | Sheets, views, model items, dimensions, center marks, notes |
+| `sw_drawing.py` | Sheets and sheet formats, views, model items, dimensions and their style, arcs, center marks, notes |
 | `sw_demo.py` | Basketball demo, opt-in via `SW_MCP_DEMO_TOOLS` |
 | `tests/live_p0_regression.py` | Live regression checks for the confirmed P0 part/sketch defects |
 | `tests/live_sheet_metal.py` | Live sheet metal checks against closed-form geometry |

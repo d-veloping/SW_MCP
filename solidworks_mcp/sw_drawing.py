@@ -37,6 +37,7 @@ creates a "section view" that cuts nothing (issue #2).
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -455,6 +456,97 @@ def activate_sheet(args: dict[str, Any]) -> dict[str, Any]:
     name = str(args["name"])
     ok = bool(doc.ActivateSheet(name))
     return result(ok, f"Activated sheet '{name}'." if ok else f"No sheet named '{name}'.", sheets=_sheet_names(doc))
+
+
+# Width and height (mm) of each standard swDwgPaperSizes_e, the size set_sheet_format reads back.
+PAPER_SIZES_MM = {
+    "A": (279.4, 215.9), "A_portrait": (215.9, 279.4), "B": (431.8, 279.4), "C": (558.8, 431.8),
+    "D": (863.6, 558.8), "E": (1117.6, 863.6), "A4": (297.0, 210.0), "A4_portrait": (210.0, 297.0),
+    "A3": (420.0, 297.0), "A2": (594.0, 420.0), "A1": (841.0, 594.0), "A0": (1189.0, 841.0),
+}
+SHEET_SIZE_TOLERANCE_MM = 0.5
+CUSTOM_TEMPLATE = 12     # swDwgTemplates_e: swDwgTemplateCustom, a sheet format file
+
+
+def _sheet_properties(sheet: Any) -> list[Any]:
+    """ISheet.GetProperties2 ([paper size, template, scale1, scale2, first angle, width, height]); anything but seven
+    finite numbers is a ToolFailure."""
+    properties = as_list(_read(sheet, "GetProperties2"))
+    if len(properties) < 7 or not all(_finite(p) or isinstance(p, bool) for p in properties[:7]):
+        raise ToolFailure(f"SOLIDWORKS reports no usable sheet properties ({properties!r}).", readable=False)
+    return properties
+
+
+def _same_path(a: str, b: str) -> bool:
+    return bool(a) and os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+@drawing_tool(
+    "set_sheet_format",
+    "Put a sheet format file (.slddrt: border and title block) on a sheet of the active drawing, with a standard "
+    "paper size and the projection, keeping the sheet's scale (SetupSheet5 with a custom template). Read back: the "
+    "template file (GetTemplateName, the same path), the sheet size in mm (within 0.5 mm of the paper size), the "
+    "projection and the scale. Succeeds only when SetupSheet5 returns true and all of these read back as asked; a "
+    "missing file or one that is not a .slddrt is refused before anything is called. The file is used in place.",
+    {
+        "template_path": {"type": "string", "description": "Absolute path of the .slddrt file."},
+        "paper_size": {"type": "string", "enum": sorted(PAPER_SIZES_MM), "default": "A3"},
+        "first_angle": {"type": "boolean", "default": True,
+                        "description": "True for first-angle (ISO) projection, false for third-angle."},
+        "sheet": {"type": "string", "description": "Sheet name; the active sheet when left out."},
+    },
+    ["template_path"],
+)
+def set_sheet_format(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    raw = str(args.get("template_path") or "")
+    template = Path(raw)
+    if not raw or not template.is_absolute() or template.suffix.lower() != ".slddrt" or not template.is_file():
+        return result(False, f"template_path must be the absolute path of an existing .slddrt file, not '{raw}'; "
+                             "nothing was changed.")
+    paper = str(args.get("paper_size") or "A3")
+    if paper not in PAPER_SIZES_MM:
+        return result(False, f"Unknown paper_size '{paper}'; nothing was changed.")
+    first_angle = bool(args.get("first_angle", True))
+    wanted_sheet = str(args.get("sheet") or "")
+    sheet = flag_methods(doc, "Sheet").Sheet(wanted_sheet) if wanted_sheet else _read(doc, "GetCurrentSheet")
+    if sheet is None:
+        return result(False, f"No sheet named '{wanted_sheet}'; nothing was changed.")
+    name = str(_read(sheet, "GetName") or "")
+    before = _sheet_properties(sheet)
+    scale = [float(before[2]), float(before[3])]
+    width, height = PAPER_SIZES_MM[paper]
+    try:
+        returned = bool(doc.SetupSheet5(name, PAPER_SIZES[paper], CUSTOM_TEMPLATE, scale[0], scale[1], first_angle,
+                                        str(template), to_m(width), to_m(height), "", True))
+    except Exception as exc:
+        logger.info("SetupSheet5 raised on sheet %s", name, exc_info=True)
+        returned, error = False, f"SetupSheet5 raised: {exc}"
+    else:
+        error = "" if returned else "SetupSheet5 returned false"
+    rebuild(doc)
+    try:
+        read_template = str(_read(sheet, "GetTemplateName") or "")
+        after = _sheet_properties(sheet)
+    except ToolFailure as exc:
+        raise ToolFailure(f"SetupSheet5 was called on sheet '{name}', but the sheet could not be read back: {exc}",
+                          **{**exc.data, "sheet": name, "setup_returned": returned}) from exc
+    size = [round(to_mm(after[5]), 2), round(to_mm(after[6]), 2)]
+    read_scale = [float(after[2]), float(after[3])]
+    deviations = [error] if error else []
+    if not _same_path(read_template, str(template)):
+        deviations.append(f"the sheet uses '{read_template}'")
+    if abs(size[0] - width) > SHEET_SIZE_TOLERANCE_MM or abs(size[1] - height) > SHEET_SIZE_TOLERANCE_MM:
+        deviations.append(f"the sheet is {size[0]:g} x {size[1]:g} mm, not {width:g} x {height:g}")
+    if bool(after[4]) != first_angle:
+        deviations.append(f"the projection reads back as {'first' if after[4] else 'third'} angle")
+    if any(abs(a - b) > 1e-9 for a, b in zip(read_scale, scale)):
+        deviations.append(f"the scale changed from {scale[0]:g}:{scale[1]:g} to {read_scale[0]:g}:{read_scale[1]:g}")
+    ok = not deviations
+    return result(ok, f"Sheet '{name}' uses '{template.name}' on {paper}." if ok
+                  else f"Sheet format of '{name}' not set as asked: " + "; ".join(deviations) + ".",
+                  sheet=name, template=read_template, paper_size=paper, sheet_size_mm=size,
+                  first_angle=bool(after[4]), scale=read_scale, setup_returned=returned)
 
 
 # --------------------------------------------------------------------------
@@ -1171,9 +1263,27 @@ def _shown_dimensions(doc: Any) -> Callable[[dict[str, Any]], bool]:
     return keep
 
 
-def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[str, Any]]:
+def _reference_points(display: Any, transform: dict[str, Any] | None) -> list[list[float]] | None:
+    """The measured points of a display dimension (IDimension.ReferencePoints, model metres) on the sheet (mm), through
+    the view's transform; None when the transform, the points or one of their coordinates cannot be read, and when
+    SOLIDWORKS lists no point: never an empty list."""
+    if transform is None:
+        return None
+    try:
+        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+        model = [[float(c) for c in as_list(value(p, "ArrayData"))[:3]]
+                 for p in as_list(value(dimension, "ReferencePoints"))]
+    except Exception:
+        logger.info("Could not read the reference points of a dimension", exc_info=True)
+        return None
+    if not model or any(len(p) < 3 or not all(math.isfinite(c) for c in p) for p in model):
+        return None
+    return [[round(c, 3) for c in _project(transform, [to_mm(c) for c in p])] for p in model]
+
+
+def _all_dimensions(doc: Any, view_names: set[str] | None = None, points: bool = False) -> list[dict[str, Any]]:
     """Every visible dimension of every sheet, or of the named views, each with its sheet and that sheet's size; which
-    count as visible decides `_shown_dimensions`."""
+    count as visible decides `_shown_dimensions`. With `points`, each also carries `reference_points_mm`."""
     sizes: dict[str, tuple[float, float] | None] = {}
     keep = _shown_dimensions(doc)
     entries: list[dict[str, Any]] = []
@@ -1186,10 +1296,13 @@ def _all_dimensions(doc: Any, view_names: set[str] | None = None) -> list[dict[s
                 sizes[sheet_name] = _sheet_size_mm(flag_methods(doc, "Sheet").Sheet(sheet_name))
             except Exception:
                 sizes[sheet_name] = None
+        transform = _model_to_sheet(view) if points else None
         for display in _display_dimensions(view):
             entry = _dimension_entry(name, display)
             if not keep(entry):
                 continue
+            if points:
+                entry["reference_points_mm"] = _reference_points(display, transform)
             entry["sheet"] = sheet_name
             size = sizes[sheet_name]
             text = entry.get("text_mm")
@@ -1264,7 +1377,8 @@ def _select_dimensions(doc: Any, entries: list[dict[str, Any]]) -> list[str]:
     "false. Hidden dimensions, also those on a hidden drawing layer, are not listed; each entry names its layer. An "
     "entry whose model dimension cannot be read has readable false and no full_name or value; one whose visibility "
     "or layer cannot be read has visible null (it may be hidden) and counts for no duplicate; a walk SOLIDWORKS "
-    "refuses fails the call.",
+    "refuses fails the call. reference_points_mm are the dimension's measured points (IDimension.ReferencePoints) on "
+    "the sheet in mm, mapped through the view's model transform; null when they cannot be read, never an empty list.",
     {"view_name": {"type": "string", "description": "Only this view, on whichever sheet it is."}},
 )
 def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
@@ -1272,7 +1386,7 @@ def list_drawing_dimensions(args: dict[str, Any]) -> dict[str, Any]:
     view_name = args.get("view_name")
     if view_name and _view_sheet(doc, str(view_name)) is None:
         return result(False, f"No view named '{view_name}' on any sheet.")
-    entries = _all_dimensions(doc, {str(view_name)} if view_name else None)
+    entries = _all_dimensions(doc, {str(view_name)} if view_name else None, points=True)
     return result(True, f"Read {len(entries)} dimensions.", dimensions=entries, duplicates=_duplicates(entries),
                   outside_sheet=_outside_sheet(entries))
 
@@ -1494,6 +1608,312 @@ def check_dimension_attachments(args: dict[str, Any]) -> dict[str, Any]:
                   into_void=void, unjudged=unjudged, visibility_unknown=unknown,
                   edges={"all": len(everything["lines"]), "shown": len(shown["lines"]),
                          "unreadable": everything["unreadable"], "unreadable_shown": shown["unreadable"]})
+
+
+def _named_model_view(doc: Any, args: dict[str, Any]) -> tuple[str, Any]:
+    """`view_name` and the model view of that name on the active sheet; none is a ToolFailure."""
+    name = str(args.get("view_name") or "")
+    view = _find_view(doc, name) if name else None
+    if view is None:
+        raise ToolFailure(f"No model view named '{name}' on the active sheet; nothing was changed.")
+    return name, view
+
+
+def _displays_by_name(view: Any) -> dict[str, list[Any]]:
+    """The display dimensions of a view by the full_name of their model dimension. One whose model dimension or name
+    cannot be read is under '' : it may be any of them."""
+    found: dict[str, list[Any]] = {}
+    for display in _display_dimensions(view):
+        try:
+            name = str(value(flag_methods(display, "GetDimension2").GetDimension2(0), "FullName") or "")
+        except Exception:
+            name = ""
+        found.setdefault(name, []).append(display)
+    return found
+
+
+def _one_display(found: dict[str, list[Any]], full_name: str, view_name: str) -> tuple[Any | None, str]:
+    """The one display of `full_name` in the view, or None and why not: not there, there more than once, or the view
+    holds a display that cannot be read and may be the same dimension once more."""
+    displays, unreadable = found.get(full_name, []), len(found.get("", []))
+    if len(displays) > 1:
+        return None, f"shown {len(displays)} times in view '{view_name}'; which one is meant is not clear"
+    if unreadable:
+        return None, (f"{unreadable} dimensions in view '{view_name}' cannot be read; one of them may be this one"
+                      + ("" if displays else ", which is not among the others"))
+    if not displays:
+        return None, f"not in view '{view_name}'"
+    return displays[0], ""
+
+
+def _read_back(read: Callable[[], Any], done: str, **data: Any) -> Any:
+    """`read()` after a change; a read SOLIDWORKS refuses is a ToolFailure that says the change was made and carries
+    what is known about it in `data`."""
+    try:
+        return read()
+    except ToolFailure as exc:
+        raise ToolFailure(f"{done}, but could not be read back: {exc}", **{**exc.data, **data}) from exc
+
+
+# set_dimension_style parameter -> IDisplayDimension property
+DIMENSION_STYLES = {"shortened_radius": "ShortenedRadius", "solid_leader": "SolidLeader"}
+TEXT_POSITION_TOLERANCE_MM = 0.5
+
+
+def _dimension_style(display: Any) -> dict[str, bool | None]:
+    """Both style properties of a display dimension as read; None for one SOLIDWORKS does not read."""
+    out: dict[str, bool | None] = {}
+    for key, member in DIMENSION_STYLES.items():
+        try:
+            out[key] = bool(value(display, member))
+        except Exception:
+            out[key] = None
+    return out
+
+
+@drawing_tool(
+    "set_dimension_style",
+    "Set how dimensions in one view of the active sheet are drawn: shortened_radius (a radius drawn foreshortened, "
+    "with a jogged leader; IDisplayDimension.ShortenedRadius) and solid_leader (a radial or diameter dimension's "
+    "leader as one solid line; false draws it only from the arc to the text; SolidLeader). Name each dimension by "
+    "the full_name list_drawing_dimensions reports; it must be shown exactly once in the view, and no dimension of "
+    "the view may be unreadable (it could be the same one once more). Only the properties passed are set (at least "
+    "one); after a rebuild both are read back for every dimension. A dimension succeeds when each property passed "
+    "reads back as asked and the other, when it was readable before, reads back unchanged; a property passed that "
+    "SOLIDWORKS does not take or read gives that dimension an error. The call succeeds only when every dimension "
+    "does; a walk refused after the change fails it with the entries in `dimensions`. The part is not changed.",
+    {
+        "view_name": {"type": "string"},
+        "dimensions": {"type": "array", "items": {"type": "string"}, "description": "full_name of each dimension."},
+        "shortened_radius": {"type": "boolean"},
+        "solid_leader": {"type": "boolean"},
+    },
+    ["view_name", "dimensions"],
+)
+def set_dimension_style(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    view_name, view = _named_model_view(doc, args)
+    names = args.get("dimensions")
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names):
+        return result(False, "Name at least one dimension by its full_name; nothing was changed.")
+    if len(set(names)) != len(names):
+        return result(False, "A dimension is named twice; nothing was changed.")
+    wanted = {key: args[key] for key in DIMENSION_STYLES if args.get(key) is not None}
+    if not wanted or not all(isinstance(v, bool) for v in wanted.values()):
+        return result(False, "Pass shortened_radius, solid_leader or both as true or false; nothing was changed.")
+    found = _displays_by_name(view)
+    entries: list[dict[str, Any]] = []
+    for full_name in names:
+        display, missing = _one_display(found, full_name, view_name)
+        entry: dict[str, Any] = {"full_name": full_name, "found": display is not None}
+        entries.append(entry)
+        if display is None:
+            entry["error"] = missing
+            continue
+        entry["before"] = _dimension_style(display)
+        for key, flag in wanted.items():
+            try:
+                setattr(display, DIMENSION_STYLES[key], flag)
+            except Exception as exc:
+                logger.info("%s was not taken by %s", DIMENSION_STYLES[key], full_name, exc_info=True)
+                entry.setdefault("error", f"SOLIDWORKS did not take {DIMENSION_STYLES[key]}: {exc}")
+    rebuild(doc)
+    found = _read_back(lambda: _displays_by_name(view), "The dimension styles were set", dimensions=entries)
+    for entry in entries:
+        if not entry["found"]:
+            entry["ok"] = False
+            continue
+        display, missing = _one_display(found, entry["full_name"], view_name)
+        if display is None:
+            entry.update(ok=False, error=entry.get("error") or f"after the rebuild {missing}")
+            continue
+        read = _dimension_style(display)
+        entry.update(read)
+        wrong = [key for key, flag in wanted.items() if read[key] != flag]
+        # a property not asked for counts once it was readable before: then it must read back unchanged
+        changed = [key for key in DIMENSION_STYLES if key not in wanted and entry["before"][key] is not None
+                   and read[key] != entry["before"][key]]
+        if wrong and "error" not in entry:
+            entry["error"] = "reads back as " + ", ".join(f"{k}={read[k]}" for k in wrong)
+        if changed and "error" not in entry:
+            entry["error"] = "changed without being asked or no longer readable: " + ", ".join(
+                f"{k}={read[k]}" for k in changed)
+        entry["ok"] = not wrong and not changed and "error" not in entry
+    bad = [f"{e['full_name']}: {e['error']}" for e in entries if not e["ok"]]
+    return result(not bad, f"Set {', '.join(f'{k}={v}' for k, v in wanted.items())} on {len(entries)} dimensions."
+                  if not bad else "Not every dimension reads back as asked: " + "; ".join(bad) + ".",
+                  view=view_name, requested=wanted, dimensions=entries)
+
+
+def _text_position(display: Any) -> list[float] | None:
+    """Where the text of a display dimension sits on the sheet (mm); None when it cannot be read."""
+    try:
+        position = as_list(value(value(display, "GetAnnotation"), "GetPosition"))
+    except Exception:
+        return None
+    if len(position) < 2 or not all(_finite(c) for c in position[:2]):
+        return None
+    return [round(to_mm(position[0]), 3), round(to_mm(position[1]), 3)]
+
+
+@drawing_tool(
+    "move_dimension_text",
+    "Move the texts of dimensions in one view of the active sheet to given sheet positions (mm from the sheet's lower "
+    "left corner), IAnnotation.SetPosition. Name each dimension by the full_name list_drawing_dimensions reports; it "
+    "must be shown exactly once in the view, and no dimension of the view may be unreadable. After a rebuild every "
+    "text position is read back: a move succeeds when it lies within 0.5 mm of the one asked for, the call only when "
+    "every move does; a walk refused after the change fails it with the entries in `moves`. A later style change can "
+    "move the text again, so call set_dimension_style first. The part is not changed.",
+    {
+        "view_name": {"type": "string"},
+        "moves": {
+            "type": "array",
+            "items": {"type": "object",
+                      "properties": {"full_name": {"type": "string"}, "x_mm": {"type": "number"},
+                                     "y_mm": {"type": "number"}},
+                      "required": ["full_name", "x_mm", "y_mm"]},
+        },
+    },
+    ["view_name", "moves"],
+)
+def move_dimension_text(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    view_name, view = _named_model_view(doc, args)
+    moves = args.get("moves")
+    if (not isinstance(moves, list) or not moves
+            or not all(isinstance(m, dict) and isinstance(m.get("full_name"), str) and m["full_name"]
+                       and _finite(m.get("x_mm")) and _finite(m.get("y_mm")) for m in moves)):
+        return result(False, "Pass moves as {full_name, x_mm, y_mm} with finite numbers; nothing was changed.")
+    if len({m["full_name"] for m in moves}) != len(moves):
+        return result(False, "A dimension is named twice; nothing was changed.")
+    found = _displays_by_name(view)
+    entries: list[dict[str, Any]] = []
+    for move in moves:
+        target = [float(move["x_mm"]), float(move["y_mm"])]
+        display, missing = _one_display(found, move["full_name"], view_name)
+        entry: dict[str, Any] = {"full_name": move["full_name"], "requested_mm": target, "found": display is not None}
+        entries.append(entry)
+        if display is None:
+            entry["error"] = missing
+            continue
+        entry["before_mm"] = _text_position(display)
+        try:
+            entry["set_returned"] = bool(value(display, "GetAnnotation").SetPosition(
+                to_m(target[0]), to_m(target[1]), 0.0))
+        except Exception as exc:
+            logger.info("SetPosition raised for %s", move["full_name"], exc_info=True)
+            entry["error"] = f"SetPosition raised: {exc}"
+    rebuild(doc)
+    found = _read_back(lambda: _displays_by_name(view), "The dimension texts were moved", moves=entries)
+    for entry in entries:
+        if not entry["found"]:
+            entry["ok"] = False
+            continue
+        display, missing = _one_display(found, entry["full_name"], view_name)
+        entry["read_mm"] = _text_position(display) if display is not None else None
+        if entry["read_mm"] is None:
+            entry.setdefault("error", f"after the rebuild {missing}" if display is None else "position not readable")
+            entry["ok"] = False
+            continue
+        off = math.hypot(entry["read_mm"][0] - entry["requested_mm"][0], entry["read_mm"][1] - entry["requested_mm"][1])
+        entry["deviation_mm"] = round(off, 3)
+        if off > TEXT_POSITION_TOLERANCE_MM:
+            entry.setdefault("error", f"text sits {off:.2f} mm away from the position asked for")
+        entry["ok"] = "error" not in entry
+    bad = [f"{e['full_name']}: {e['error']}" for e in entries if not e["ok"]]
+    return result(not bad, f"Moved {len(entries)} dimension texts in '{view_name}'." if not bad
+                  else "Not every dimension text sits where asked: " + "; ".join(bad) + ".",
+                  view=view_name, moves=entries)
+
+
+TRUE_SHAPE_COSINE = 1.0 - 1e-6   # circle axis along the view direction within about 0.08 degrees
+
+
+def _polyline_middle(line: list[tuple[float, float]]) -> tuple[float, float]:
+    """The point at half the length of a polyline."""
+    pieces = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(line, line[1:])]
+    rest = sum(pieces) / 2
+    for (a, b), piece in zip(zip(line, line[1:]), pieces):
+        if rest <= piece and piece > 0:
+            return a[0] + (b[0] - a[0]) * rest / piece, a[1] + (b[1] - a[1]) * rest / piece
+        rest -= piece
+    return line[-1]
+
+
+def _view_direction(transform: dict[str, Any]) -> list[float]:
+    """The model direction the view looks along: the cross product of the model directions of sheet x and y."""
+    r = transform["rotation"]
+    x, y = (r[0], r[3], r[6]), (r[1], r[4], r[7])
+    d = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]]
+    length = math.sqrt(sum(c * c for c in d))
+    if not length:
+        raise ToolFailure("The view's model transform has no view direction.", readable=False)
+    return [c / length for c in d]
+
+
+def _arc(edge: Any, transform: dict[str, Any], direction: list[float]) -> dict[str, Any] | str:
+    """One drawn edge: its circle or arc on the sheet when it lies in true shape, 'line' for an edge that is no circle,
+    'oblique' for a circle seen at an angle. Anything not readable raises."""
+    curve = value(edge, "GetCurve")
+    if not bool(value(curve, "IsCircle")):
+        return "line"
+    circle = [float(c) for c in as_list(value(curve, "CircleParams"))[:7]]
+    if len(circle) < 7 or not all(math.isfinite(c) for c in circle) or circle[6] <= 0:
+        raise ValueError(f"unusable circle {circle!r}")
+    axis_length = math.sqrt(sum(c * c for c in circle[3:6]))
+    if not axis_length:
+        raise ValueError(f"circle without axis {circle!r}")
+    if abs(sum(a * d for a, d in zip(circle[3:6], direction))) / axis_length < TRUE_SHAPE_COSINE:
+        return "oblique"
+    params = [float(c) for c in as_list(value(edge, "GetCurveParams2"))]
+    ends = _points_mm(params[0:6], 2)
+    tess = _points_mm(as_list(flag_methods(curve, "GetTessPts").GetTessPts(
+        1e-5, 1e-4, double_array(params[0:3]), double_array(params[3:6]))), 2)
+    line = [_project(transform, p) for p in tess]
+    middle = _polyline_middle(line)
+    return {"centre_mm": [round(c, 3) for c in _project(transform, _points_mm(circle[0:3], 1)[0])],
+            "radius_mm": round(to_mm(circle[6]) * transform["scale"], 3),
+            "mid_mm": [round(c, 3) for c in middle], "full_circle": math.dist(ends[0], ends[1]) < 1e-3,
+            "points_mm": [[round(c, 3) for c in p] for p in line]}
+
+
+@drawing_tool(
+    "list_view_arcs",
+    "Read-only: the circles and arcs one view of the active sheet draws in true shape (circle axis along the view "
+    "direction), on the sheet in mm: centre_mm, radius_mm (on the sheet, scale applied), mid_mm (the point at half "
+    "the arc's length), points_mm (tessellated, from start to end) and full_circle. Only the view's edges are read "
+    "(GetVisibleEntities2 with edges), never silhouette edges. Every drawn edge is counted: `edges` all of them, "
+    "`oblique` circles seen at an angle, `unreadable` edges whose curve, circle or tessellation cannot be read; "
+    "those are never left out silently. An empty `arcs` with unreadable 0 means the edges the view lists include no "
+    "circle in true shape; a view switched to hidden lines visible may still list only the edges it showed before "
+    "(2016 SP3), so dashed circles can be missing. A view that lists no edge at all fails the call.",
+    {"view_name": {"type": "string"}},
+    ["view_name"],
+)
+def list_view_arcs(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing(args)
+    view_name, view = _named_model_view(doc, args)
+    transform = _view_transform(view)
+    direction = _view_direction(transform)
+    edges = as_list(flag_methods(view, "GetVisibleEntities2").GetVisibleEntities2(nothing(), VIEW_ENTITY_EDGE))
+    if not edges:
+        raise ToolFailure(f"View '{view_name}' lists none of the edges it draws.", readable=False)
+    arcs: list[dict[str, Any]] = []
+    oblique = unreadable = 0
+    for edge in edges:
+        try:
+            found = _arc(edge, transform, direction)
+        except Exception:
+            logger.info("Could not read an edge of view %s", view_name, exc_info=True)
+            unreadable += 1
+            continue
+        if isinstance(found, dict):
+            arcs.append(found)
+        elif found == "oblique":
+            oblique += 1
+    return result(True, f"View '{view_name}' draws {len(arcs)} arcs in true shape; {oblique} oblique, "
+                        f"{unreadable} edges not readable.",
+                  view=view_name, arcs=arcs, edges=len(edges), oblique=oblique, unreadable=unreadable)
 
 
 @drawing_tool(
