@@ -722,16 +722,7 @@ def _options_data(scale: dict[str, Any] | None, display: dict[str, Any] | None) 
 def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_drawing(args)
     parent_name = args.get("parent_view")
-    parent = None
-    for view in _iter_views(doc):
-        if int(safe(view, "Type", 1) or 1) == 1:
-            continue
-        if parent_name:
-            if str(safe(view, "GetName2", "")) == str(parent_name):
-                parent = view
-                break
-        else:
-            parent = view
+    parent = _find_view(doc, parent_name)
     if parent is None:
         return result(False, "No parent drawing view to project from. Place a view first.")
 

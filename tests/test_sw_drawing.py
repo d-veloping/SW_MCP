@@ -331,7 +331,8 @@ class FindViewTests(unittest.TestCase):
 
     def test_a_projection_without_parent_projects_off_the_last_view_of_the_chain(self) -> None:
         doc = ProjectingDrawing([FakeView("Sheet1", kind=1), FakeView("Drawing View2"), FakeView("Drawing View1")])
-        with unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, doc)),                 unittest.mock.patch.object(sw_drawing, "rebuild"):
+        with unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_drawing, "rebuild"):
             answer = sw_drawing.insert_projected_view({"direction": "right"})
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(doc.projected, {"Drawing View1": 1})
