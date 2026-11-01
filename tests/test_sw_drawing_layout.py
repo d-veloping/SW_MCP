@@ -36,6 +36,8 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp import sw_drawing
 
+from drawing_fakes import ChainView, first_view
+
 REQUIRE_DRAWING = sw_drawing.require_drawing
 
 
@@ -333,19 +335,12 @@ class Transform:
     ArrayData = (1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.0, 2.0, 0, 0, 0)
 
 
-class View(Methods):
+class View(ChainView):
     def __init__(self, name: str, kind: int = 7) -> None:
-        self.name, self.Type = name, kind
-        self.next = None
+        super().__init__(name, kind)
         self.displays: list[Display] = []
         self.edges: list = []
         self.ModelToViewTransform = Transform()
-
-    def GetName2(self) -> str:  # noqa: N802 - COM member name
-        return self.name
-
-    def GetNextView(self):  # noqa: N802 - COM member name
-        return self.next
 
     def GetFirstDisplayDimension5(self):  # noqa: N802 - COM member name
         return self.displays[0] if self.displays else None
@@ -366,9 +361,7 @@ class Drawing(Methods):
         return 3
 
     def GetFirstView(self):  # noqa: N802 - COM member name
-        for a, b in zip(self.views, self.views[1:] + [None]):
-            a.next = b
-        return self.views[0]
+        return first_view(self.views)
 
     def GetViews(self):  # noqa: N802 - COM member name
         return (tuple(self.views),)

@@ -33,6 +33,8 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp import sw_drawing
 
+from drawing_fakes import ChainView, first_view
+
 
 class Point:
     def __init__(self, *xyz: float) -> None:
@@ -146,27 +148,17 @@ class Transform:
     ArrayData = (1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.0, 1.0, 0, 0, 0)
 
 
-class View:
+class View(ChainView):
     def __init__(self, name: str, kind: int = 7) -> None:
-        self.name, self.Type = name, kind
+        super().__init__(name, kind)
         self.mode = 2
         self.refuse: set[int] = set()     # modes SetDisplayMode3 accepts and does not apply
         self.set_calls: list[int] = []
-        self.next = None
         self.shown_edges: list[Edge] = []
         self.hidden_edges: list[Edge] = []
         self.displays: list[Display] = []
         self.ModelToViewTransform = Transform()
         self.ReferencedDocument = Model(self)
-
-    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
-        pass
-
-    def GetName2(self) -> str:  # noqa: N802 - COM member name
-        return self.name
-
-    def GetNextView(self):  # noqa: N802 - COM member name
-        return self.next
 
     def GetDisplayMode2(self):  # noqa: N802 - COM member name
         return self.mode
@@ -193,9 +185,7 @@ class Drawing:
         self.views = views
 
     def GetFirstView(self):  # noqa: N802 - COM member name
-        for a, b in zip(self.views, self.views[1:] + [None]):
-            a.next = b
-        return self.views[0]
+        return first_view(self.views)
 
 
 def line(a, b) -> Edge:

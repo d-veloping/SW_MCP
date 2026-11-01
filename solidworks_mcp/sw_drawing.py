@@ -710,7 +710,7 @@ def _options_data(scale: dict[str, Any] | None, display: dict[str, Any] | None) 
     "Project a new view off an existing one. Name the parent and a direction and the placement is "
     "worked out for you; pass x_mm/y_mm instead to place it exactly. Millimetres.",
     {
-        "parent_view": {"type": "string", "description": "View to project from. Defaults to the last view placed."},
+        "parent_view": {"type": "string", "description": "View to project from. Defaults to the last view in the active sheet's view order."},
         "direction": {"type": "string", "enum": ["right", "left", "up", "down"], "default": "right"},
         "offset_mm": {"type": "number", "default": 80, "description": "How far from the parent to place it."},
         "x_mm": {"type": "number", "description": "Exact placement, overriding direction/offset."},
@@ -785,7 +785,10 @@ def insert_projected_view(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _find_view(doc: Any, name: str | None) -> Any | None:
-    """The model view called `name`, or the last one placed when no name is given."""
+    """The view called `name` on the current sheet, or without a name the last view of its GetNextView chain.
+
+    That is SOLIDWORKS' own order (_iter_views); it is not established that this is the view placed last, so a caller
+    that needs one particular view names it."""
     found = None
     for view in _iter_views(doc):
         if _is_sheet(view):
@@ -956,7 +959,7 @@ def _draw_in_view(doc: Any, parent_view: str | None, draw: Any) -> tuple[str, An
                       "description": "Direction of the cutting line on the sheet, with through_model_mm."},
         "place_x_mm": {"type": "number", "description": "Where the section view goes."},
         "place_y_mm": {"type": "number"},
-        "parent_view": {"type": "string", "description": "View to cut. Defaults to the last one placed."},
+        "parent_view": {"type": "string", "description": "View to cut. Defaults to the last view in the active sheet's view order."},
         "label": {"type": "string", "default": "A"},
         "depth_mm": {"type": "number", "default": 0, "description": "Partial-section depth; 0 cuts all the way."},
         "reverse": {"type": "boolean", "default": False, "description": "Look the other way along the cutting line."},
@@ -1072,7 +1075,7 @@ def insert_section_view(args: dict[str, Any]) -> dict[str, Any]:
         "radius_mm": {"type": "number", "description": "Detail circle radius, on the sheet."},
         "place_x_mm": {"type": "number", "description": "Where the enlarged view goes."},
         "place_y_mm": {"type": "number"},
-        "parent_view": {"type": "string", "description": "View to detail. Defaults to the last one placed."},
+        "parent_view": {"type": "string", "description": "View to detail. Defaults to the last view in the active sheet's view order."},
         "label": {"type": "string", "default": "I"},
         "scale_numerator": {"type": "number", "default": 2},
         "scale_denominator": {"type": "number", "default": 1},
