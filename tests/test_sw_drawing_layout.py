@@ -105,6 +105,7 @@ class SetSheetFormatTests(unittest.TestCase):
                       unittest.mock.patch.object(sw_drawing, "rebuild")):
             patch.start()
             self.addCleanup(patch.stop)
+        self.rebuild = sw_drawing.rebuild
 
     def call(self, **args):
         return sw_drawing.set_sheet_format({"template_path": str(self.template), **args})
@@ -117,6 +118,22 @@ class SetSheetFormatTests(unittest.TestCase):
         data = answer["data"]
         self.assertEqual((data["template"], data["sheet_size_mm"], data["first_angle"], data["scale"]),
                          (str(self.template), [420.0, 297.0], True, [1.0, 2.0]))
+        self.rebuild.assert_called_once_with(self.doc)
+
+    def test_a_sheet_unreadable_after_setup_fails_and_says_setup_ran(self) -> None:
+        original = self.doc.SetupSheet5
+
+        def setup(*args):
+            answer = original(*args)
+            def refused():
+                raise OSError("RPC_E_SERVERFAULT")
+            self.doc.sheet.GetTemplateName = refused
+            return answer
+        self.doc.SetupSheet5 = setup
+        answer = self.call()
+        self.assertFalse(answer["ok"])
+        self.assertIn("SetupSheet5 was called on sheet 'Blatt1', but the sheet could not be read back", answer["message"])
+        self.assertEqual((answer["data"]["setup_returned"], answer["data"]["readable"]), (True, False))
 
     def test_paper_size_projection_and_named_sheet(self) -> None:
         answer = self.call(paper_size="A2", first_angle=False, sheet="Blatt1")
@@ -290,6 +307,27 @@ class Coupled(Display):
             super().__setattr__("SolidLeader", not self.SolidLeader)
 
 
+class Unreadable(Display):
+    """A display whose model dimension SOLIDWORKS does not hand over."""
+
+    def GetDimension2(self, index: int):  # noqa: N802 - COM member name
+        raise OSError("server fault")
+
+
+class Vanishing(Display):
+    """SolidLeader reads before the change and no longer after ShortenedRadius is set."""
+
+    def __getattribute__(self, name: str):
+        if name == "SolidLeader" and object.__getattribute__(self, "__dict__").get("gone"):
+            raise AttributeError("SldWorks.DisplayDimension.SolidLeader")
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value) -> None:
+        super().__setattr__(name, value)
+        if name == "ShortenedRadius" and "SolidLeader" in self.__dict__:
+            self.__dict__["gone"] = True
+
+
 class Transform:
     # front view, scale 2, model origin at (200, 150) mm on the sheet
     ArrayData = (1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0.0, 2.0, 0, 0, 0)
@@ -352,6 +390,7 @@ class DimensionToolsBase(unittest.TestCase):
                       unittest.mock.patch.object(sw_drawing, "double_array", side_effect=lambda v: tuple(v))):
             patch.start()
             self.addCleanup(patch.stop)
+        self.rebuild = sw_drawing.rebuild
 
     def replace(self, old: Display, cls: type) -> Display:
         new = cls(old.dimension, self.view)
@@ -375,6 +414,30 @@ class SetDimensionStyleTests(DimensionToolsBase):
         self.assertEqual((entry["shortened_radius"], entry["solid_leader"], entry["ok"]), (False, True, True))
         self.assertEqual((self.radius.ShortenedRadius, self.radius.SolidLeader), (False, True))
         self.assertEqual((self.width.ShortenedRadius, self.width.SolidLeader), (True, True))
+        self.rebuild.assert_called_once_with(self.doc)
+
+    def test_an_unreadable_display_in_the_view_changes_nothing(self) -> None:
+        self.view.displays.append(Unreadable(Dimension("D7@Skizze1@Teil.Part"), self.view))
+        answer = self.style(names=("D1@Fillet1@Teil.Part", "D9@Nichts@Teil.Part"), shortened_radius=False)
+        self.assertFalse(answer["ok"])
+        known, unknown = answer["data"]["dimensions"]
+        self.assertIn("1 dimensions in view 'Drawing View1' cannot be read; one of them may be this one",
+                      known["error"])
+        self.assertIn("which is not among the others", unknown["error"])
+        self.assertIs(self.radius.ShortenedRadius, True)
+
+    def test_an_unrequested_property_unreadable_before_is_not_held_against_the_entry(self) -> None:
+        self.replace(self.radius, Unknown)
+        answer = self.style(shortened_radius=False)
+        self.assertTrue(answer["ok"], answer)
+        entry = answer["data"]["dimensions"][0]
+        self.assertEqual((entry["shortened_radius"], entry["solid_leader"]), (False, None))
+
+    def test_an_unrequested_property_that_stops_reading_fails(self) -> None:
+        self.replace(self.radius, Vanishing)
+        answer = self.style(shortened_radius=False)
+        self.assertFalse(answer["ok"])
+        self.assertIn("no longer readable: solid_leader=None", answer["data"]["dimensions"][0]["error"])
 
     def test_both_properties(self) -> None:
         answer = self.style(shortened_radius=False, solid_leader=False)
@@ -400,7 +463,8 @@ class SetDimensionStyleTests(DimensionToolsBase):
         self.replace(self.radius, Coupled)
         answer = self.style(shortened_radius=False)
         self.assertFalse(answer["ok"])
-        self.assertIn("changed without being asked: solid_leader", answer["data"]["dimensions"][0]["error"])
+        self.assertIn("changed without being asked or no longer readable: solid_leader=False",
+                      answer["data"]["dimensions"][0]["error"])
 
     def test_a_missing_dimension_fails_and_the_others_are_set(self) -> None:
         answer = self.style(names=("D9@Nichts@Teil.Part", "D1@Fillet1@Teil.Part"), shortened_radius=False)
@@ -444,7 +508,10 @@ class SetDimensionStyleTests(DimensionToolsBase):
         self.view.GetFirstDisplayDimension5 = walk
         answer = self.style(shortened_radius=False)
         self.assertFalse(answer["ok"])
+        self.assertIn("The dimension styles were set, but could not be read back", answer["message"])
         self.assertIs(answer["data"]["readable"], False)
+        self.assertEqual(answer["data"]["dimensions"][0]["before"], {"shortened_radius": True, "solid_leader": True})
+        self.assertIs(self.radius.ShortenedRadius, False)
 
     def test_another_active_document_changes_nothing(self) -> None:
         answer = self.wrong_document(lambda a: sw_drawing.set_dimension_style(
@@ -465,6 +532,29 @@ class MoveDimensionTextTests(DimensionToolsBase):
         self.assertEqual((entry["before_mm"], entry["read_mm"], entry["deviation_mm"]),
                          ([100.0, 100.0], [250.5, 180.0], 0.0))
         self.assertEqual(self.width.annotation.position, (0.1, 0.1, 0.0))
+        self.rebuild.assert_called_once_with(self.doc)
+
+    def test_a_walk_refused_after_the_move_fails_and_keeps_the_entries(self) -> None:
+        original = self.view.GetFirstDisplayDimension5
+        calls = []
+
+        def walk():
+            calls.append(1)
+            if len(calls) > 1:
+                raise OSError("walk refused")
+            return original()
+        self.view.GetFirstDisplayDimension5 = walk
+        answer = self.move({"full_name": "D1@Fillet1@Teil.Part", "x_mm": 250, "y_mm": 180})
+        self.assertFalse(answer["ok"])
+        self.assertIn("The dimension texts were moved, but could not be read back", answer["message"])
+        self.assertEqual(answer["data"]["moves"][0]["set_returned"], True)
+
+    def test_an_unreadable_display_in_the_view_moves_nothing(self) -> None:
+        self.view.displays.append(Unreadable(Dimension("D7@Skizze1@Teil.Part"), self.view))
+        answer = self.move({"full_name": "D1@Fillet1@Teil.Part", "x_mm": 250, "y_mm": 180})
+        self.assertFalse(answer["ok"])
+        self.assertIn("cannot be read", answer["data"]["moves"][0]["error"])
+        self.assertEqual(self.radius.annotation.position, (0.1, 0.1, 0.0))
 
     def test_a_text_that_lands_elsewhere_fails(self) -> None:
         self.radius.annotation.snap = (0.2504, 0.18)   # 0.1 mm off: within tolerance
@@ -553,6 +643,7 @@ class Curve(Methods):
         self.centre, self.radius, self.a0, self.a1, self.axis = centre, radius, a0, a1, axis
         self.start, self.end = (self.at(a0), self.at(a1)) if radius else (start, end)
         self.broken = ""
+        self.fractions: list[float] = []
 
     def at(self, degrees: float) -> tuple[float, float, float]:
         a = math.radians(degrees)
@@ -570,8 +661,9 @@ class Curve(Methods):
     def GetTessPts(self, chord, length, start, end):  # noqa: N802 - COM member name
         if self.broken == "tess":
             return ()
-        steps = 8
-        return tuple(c for i in range(steps + 1) for c in self.at(self.a0 + (self.a1 - self.a0) * i / steps))
+        # uneven steps: the point half way along the arc is not the middle one of the list
+        fractions = self.fractions or [i / 8 for i in range(9)]
+        return tuple(c for f in fractions for c in self.at(self.a0 + (self.a1 - self.a0) * f))
 
 
 class Edge:
@@ -594,7 +686,9 @@ class ListViewArcsTests(DimensionToolsBase):
         self.fillet = Edge(Curve(centre=(0.03, 0.01, 0.0), radius=0.005, a0=0.0, a1=90.0))
         self.side = Edge(Curve())
         self.across = Edge(Curve(centre=(0.0, 0.0, 0.0), radius=0.004, axis=(1.0, 0.0, 0.0)))
-        self.view.edges = [self.hole, self.fillet, self.side, self.across]
+        # the circle of the back face: its axis points away from the viewer, and it still lies in true shape
+        self.back = Edge(Curve(centre=(0.05, 0.01, -0.01), radius=0.002, axis=(0.0, 0.0, -1.0)))
+        self.view.edges = [self.hole, self.fillet, self.side, self.across, self.back]
 
     def arcs(self) -> dict:
         return sw_drawing.list_view_arcs({"view_name": "Drawing View1"})
@@ -603,8 +697,9 @@ class ListViewArcsTests(DimensionToolsBase):
         answer = self.arcs()
         self.assertTrue(answer["ok"], answer)
         data = answer["data"]
-        self.assertEqual((data["edges"], data["oblique"], data["unreadable"], len(data["arcs"])), (4, 1, 0, 2))
-        hole, fillet = data["arcs"]
+        self.assertEqual((data["edges"], data["oblique"], data["unreadable"], len(data["arcs"])), (5, 1, 0, 3))
+        hole, fillet, back = data["arcs"]
+        self.assertEqual((back["centre_mm"], back["radius_mm"]), ([300.0, 170.0], 4.0))
         self.assertEqual((hole["centre_mm"], hole["radius_mm"], hole["full_circle"]), ([220.0, 170.0], 8.0, True))
         self.assertEqual((fillet["centre_mm"], fillet["radius_mm"], fillet["full_circle"]), ([260.0, 170.0], 10.0, False))
         # half way along a quarter arc from 0 to 90 degrees: at 45 degrees
@@ -613,13 +708,21 @@ class ListViewArcsTests(DimensionToolsBase):
         self.assertAlmostEqual(fillet["mid_mm"][1], 170.0 + half, delta=0.01)
         self.assertEqual((fillet["points_mm"][0], fillet["points_mm"][-1]), ([270.0, 170.0], [260.0, 180.0]))
 
+    def test_the_middle_is_half_way_along_the_arc_not_the_middle_point(self) -> None:
+        # dense on the first 40 %, coarse after: the middle point of the list sits at about 23 %
+        self.fillet.curve.fractions = [i / 100 for i in range(41)] + [0.4 + i / 10 for i in range(1, 7)]
+        fillet = self.arcs()["data"]["arcs"][1]
+        half = 10.0 / math.sqrt(2)
+        self.assertAlmostEqual(fillet["mid_mm"][0], 260.0 + half, delta=0.2)
+        self.assertAlmostEqual(fillet["mid_mm"][1], 170.0 + half, delta=0.2)
+
     def test_an_unreadable_edge_is_counted_never_left_out(self) -> None:
         for broken in ("curve", "circle", "tess"):
             with self.subTest(broken=broken):
                 self.fillet.curve.broken = broken
                 answer = self.arcs()
                 self.assertTrue(answer["ok"], answer)
-                self.assertEqual((answer["data"]["unreadable"], len(answer["data"]["arcs"])), (1, 1))
+                self.assertEqual((answer["data"]["unreadable"], len(answer["data"]["arcs"])), (1, 2))
                 self.assertIn("1 edges not readable", answer["message"])
 
     def test_a_view_without_circular_edges_lists_none(self) -> None:

@@ -77,7 +77,11 @@ INSTALLED_FORMAT = "C:/ProgramData/SOLIDWORKS/SOLIDWORKS */lang/*/sheetformat/a3
 
 
 def open_titles() -> list[str]:
-    return [d["title"] for d in (list_open_documents({}).get("data") or {}).get("documents") or []]
+    """Titles of the open documents; a listing that fails raises, so nobody else's document counts as new."""
+    answer = list_open_documents({})
+    if not answer.get("ok"):
+        raise RuntimeError(f"list_open_documents failed: {answer.get('message')}")
+    return [d["title"] for d in (answer.get("data") or {}).get("documents") or []]
 
 
 def data(answer: dict[str, Any]) -> dict[str, Any]:
@@ -256,10 +260,13 @@ def main() -> int:
                      {"template_path": str(format_copy), "document": "no such drawing"}, expect=False)
         report["checks"]["g_refused_and_no_failure"] = "active_document" in data(other) and not failed
     finally:
-        for title in sorted(set(open_titles()) - before, key=lambda t: "Draw" not in t and " - " not in t):
-            # the drawing first, then the part it references
-            report["steps"][f"close {title}"] = close_document({"title": title}).get("ok")
-        report["left_open"] = sorted(set(open_titles()) - before)
+        try:
+            for title in sorted(set(open_titles()) - before, key=lambda t: "Draw" not in t and " - " not in t):
+                # the drawing first, then the part it references
+                report["steps"][f"close {title}"] = close_document({"title": title}).get("ok")
+            report["left_open"] = sorted(set(open_titles()) - before)
+        except RuntimeError as exc:   # which documents are new is not known: close none
+            report["left_open"] = [f"unknown: {exc}"]
         report["failed"] = failed
         shutil.rmtree(folder, ignore_errors=True)
         print(json.dumps(report, indent=2, ensure_ascii=False))

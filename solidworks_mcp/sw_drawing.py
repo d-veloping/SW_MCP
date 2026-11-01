@@ -525,8 +525,12 @@ def set_sheet_format(args: dict[str, Any]) -> dict[str, Any]:
     else:
         error = "" if returned else "SetupSheet5 returned false"
     rebuild(doc)
-    read_template = str(_read(sheet, "GetTemplateName") or "")
-    after = _sheet_properties(sheet)
+    try:
+        read_template = str(_read(sheet, "GetTemplateName") or "")
+        after = _sheet_properties(sheet)
+    except ToolFailure as exc:
+        raise ToolFailure(f"SetupSheet5 was called on sheet '{name}', but the sheet could not be read back: {exc}",
+                          **{**exc.data, "sheet": name, "setup_returned": returned}) from exc
     size = [round(to_mm(after[5]), 2), round(to_mm(after[6]), 2)]
     read_scale = [float(after[2]), float(after[3])]
     deviations = [error] if error else []
@@ -1629,15 +1633,26 @@ def _displays_by_name(view: Any) -> dict[str, list[Any]]:
 
 
 def _one_display(found: dict[str, list[Any]], full_name: str, view_name: str) -> tuple[Any | None, str]:
-    """The one display of `full_name` in the view, or None and why not: not there, or there more than once."""
-    displays = found.get(full_name, [])
-    if len(displays) == 1:
-        return displays[0], ""
+    """The one display of `full_name` in the view, or None and why not: not there, there more than once, or the view
+    holds a display that cannot be read and may be the same dimension once more."""
+    displays, unreadable = found.get(full_name, []), len(found.get("", []))
+    if len(displays) > 1:
+        return None, f"shown {len(displays)} times in view '{view_name}'; which one is meant is not clear"
+    if unreadable:
+        return None, (f"{unreadable} dimensions in view '{view_name}' cannot be read; one of them may be this one"
+                      + ("" if displays else ", which is not among the others"))
     if not displays:
-        unreadable = len(found.get("", []))
-        return None, f"not in view '{view_name}'" + (
-            f" ({unreadable} dimensions there cannot be read)" if unreadable else "")
-    return None, f"shown {len(displays)} times in view '{view_name}'; which one is meant is not clear"
+        return None, f"not in view '{view_name}'"
+    return displays[0], ""
+
+
+def _read_back(read: Callable[[], Any], done: str, **data: Any) -> Any:
+    """`read()` after a change; a read SOLIDWORKS refuses is a ToolFailure that says the change was made and carries
+    what is known about it in `data`."""
+    try:
+        return read()
+    except ToolFailure as exc:
+        raise ToolFailure(f"{done}, but could not be read back: {exc}", **{**exc.data, **data}) from exc
 
 
 # set_dimension_style parameter -> IDisplayDimension property
@@ -1660,11 +1675,13 @@ def _dimension_style(display: Any) -> dict[str, bool | None]:
     "set_dimension_style",
     "Set how dimensions in one view of the active sheet are drawn: shortened_radius (a radius drawn foreshortened, "
     "with a jogged leader; IDisplayDimension.ShortenedRadius) and solid_leader (a radial or diameter dimension's "
-    "leader as one solid line; false draws it only from the arc to the text; SolidLeader). Name each dimension by the full_name list_drawing_dimensions reports; it must be shown "
-    "exactly once in the view. Only the properties passed are set (at least one); after a rebuild both are read back "
-    "for every dimension. A dimension succeeds when each property passed reads back as asked and the other did not "
-    "change; the call succeeds only when every dimension does. A property SOLIDWORKS does not take or read gives "
-    "that dimension an error. The part is not changed.",
+    "leader as one solid line; false draws it only from the arc to the text; SolidLeader). Name each dimension by "
+    "the full_name list_drawing_dimensions reports; it must be shown exactly once in the view, and no dimension of "
+    "the view may be unreadable (it could be the same one once more). Only the properties passed are set (at least "
+    "one); after a rebuild both are read back for every dimension. A dimension succeeds when each property passed "
+    "reads back as asked and the other, when it was readable before, reads back unchanged; a property passed that "
+    "SOLIDWORKS does not take or read gives that dimension an error. The call succeeds only when every dimension "
+    "does; a walk refused after the change fails it with the entries in `dimensions`. The part is not changed.",
     {
         "view_name": {"type": "string"},
         "dimensions": {"type": "array", "items": {"type": "string"}, "description": "full_name of each dimension."},
@@ -1701,7 +1718,7 @@ def set_dimension_style(args: dict[str, Any]) -> dict[str, Any]:
                 logger.info("%s was not taken by %s", DIMENSION_STYLES[key], full_name, exc_info=True)
                 entry.setdefault("error", f"SOLIDWORKS did not take {DIMENSION_STYLES[key]}: {exc}")
     rebuild(doc)
-    found = _displays_by_name(view)
+    found = _read_back(lambda: _displays_by_name(view), "The dimension styles were set", dimensions=entries)
     for entry in entries:
         if not entry["found"]:
             entry["ok"] = False
@@ -1713,12 +1730,14 @@ def set_dimension_style(args: dict[str, Any]) -> dict[str, Any]:
         read = _dimension_style(display)
         entry.update(read)
         wrong = [key for key, flag in wanted.items() if read[key] != flag]
-        changed = [key for key in DIMENSION_STYLES if key not in wanted and None not in (read[key], entry["before"][key])
+        # a property not asked for counts once it was readable before: then it must read back unchanged
+        changed = [key for key in DIMENSION_STYLES if key not in wanted and entry["before"][key] is not None
                    and read[key] != entry["before"][key]]
         if wrong and "error" not in entry:
             entry["error"] = "reads back as " + ", ".join(f"{k}={read[k]}" for k in wrong)
         if changed and "error" not in entry:
-            entry["error"] = "changed without being asked: " + ", ".join(changed)
+            entry["error"] = "changed without being asked or no longer readable: " + ", ".join(
+                f"{k}={read[k]}" for k in changed)
         entry["ok"] = not wrong and not changed and "error" not in entry
     bad = [f"{e['full_name']}: {e['error']}" for e in entries if not e["ok"]]
     return result(not bad, f"Set {', '.join(f'{k}={v}' for k, v in wanted.items())} on {len(entries)} dimensions."
@@ -1741,9 +1760,10 @@ def _text_position(display: Any) -> list[float] | None:
     "move_dimension_text",
     "Move the texts of dimensions in one view of the active sheet to given sheet positions (mm from the sheet's lower "
     "left corner), IAnnotation.SetPosition. Name each dimension by the full_name list_drawing_dimensions reports; it "
-    "must be shown exactly once in the view. After a rebuild every text position is read back: a move succeeds when "
-    "it lies within 0.5 mm of the one asked for, the call only when every move does. A later style change can move "
-    "the text again, so call set_dimension_style first. The part is not changed.",
+    "must be shown exactly once in the view, and no dimension of the view may be unreadable. After a rebuild every "
+    "text position is read back: a move succeeds when it lies within 0.5 mm of the one asked for, the call only when "
+    "every move does; a walk refused after the change fails it with the entries in `moves`. A later style change can "
+    "move the text again, so call set_dimension_style first. The part is not changed.",
     {
         "view_name": {"type": "string"},
         "moves": {
@@ -1784,7 +1804,7 @@ def move_dimension_text(args: dict[str, Any]) -> dict[str, Any]:
             logger.info("SetPosition raised for %s", move["full_name"], exc_info=True)
             entry["error"] = f"SetPosition raised: {exc}"
     rebuild(doc)
-    found = _displays_by_name(view)
+    found = _read_back(lambda: _displays_by_name(view), "The dimension texts were moved", moves=entries)
     for entry in entries:
         if not entry["found"]:
             entry["ok"] = False
@@ -1864,8 +1884,9 @@ def _arc(edge: Any, transform: dict[str, Any], direction: list[float]) -> dict[s
     "the arc's length), points_mm (tessellated, from start to end) and full_circle. Only the view's edges are read "
     "(GetVisibleEntities2 with edges), never silhouette edges. Every drawn edge is counted: `edges` all of them, "
     "`oblique` circles seen at an angle, `unreadable` edges whose curve, circle or tessellation cannot be read; "
-    "those are never left out silently. An empty `arcs` with unreadable 0 means the view draws no circular edge in "
-    "true shape; a view that lists no edge at all fails the call.",
+    "those are never left out silently. An empty `arcs` with unreadable 0 means the edges the view lists include no "
+    "circle in true shape; a view switched to hidden lines visible may still list only the edges it showed before "
+    "(2016 SP3), so dashed circles can be missing. A view that lists no edge at all fails the call.",
     {"view_name": {"type": "string"}},
     ["view_name"],
 )

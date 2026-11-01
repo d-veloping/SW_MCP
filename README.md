@@ -314,23 +314,28 @@ the template path (`GetTemplateName`, compared case-insensitively), the sheet
 size (within 0.5 mm of the paper size), the projection and the scale, and
 succeeds only when `SetupSheet5` returned true and all of them match. A missing
 file, a relative path or one that is not a `.slddrt` is refused before anything
-is called. The file is used in place; in the live check SOLIDWORKS did not change
+is called; a sheet that cannot be read back after `SetupSheet5` fails the call with
+`setup_returned`. The file is used in place; in the live check SOLIDWORKS did not change
 it (size and modification time), and views and dimension texts stayed where they
 were (2016 SP3, 2026-11-01).
 
 `set_dimension_style`, `move_dimension_text` and `list_view_arcs` work on one
 view of the active sheet (`view_name`); the first two name each dimension by the
 `full_name` that `list_drawing_dimensions` reports, and a dimension shown more
-than once in that view, or not at all, is not touched and fails its entry.
+than once in that view, or not at all, is not touched and fails its entry, as is
+every dimension of a view that holds an unreadable one (it could be the same
+dimension once more).
 `set_dimension_style` sets only the properties passed, `shortened_radius`
 (`IDisplayDimension.ShortenedRadius`, the foreshortened radius with a jogged
 leader) and `solid_leader` (`SolidLeader`, the leader as one solid line; false
 draws it from the arc to the text only), and reads both back after a rebuild: an
-entry succeeds when each property passed reads as asked and the other one did
-not change; a property the release does not take or read gives the entry an
-`error`. `move_dimension_text` sets each text to a sheet position in mm
+entry succeeds when each property passed reads as asked and the other one, if it
+was readable before, reads back unchanged; a property passed that the release
+does not take or read gives the entry an `error`. `move_dimension_text` sets each text to a sheet position in mm
 (`IAnnotation.SetPosition`) and reads it back with `GetPosition`; an entry
-succeeds within 0.5 mm. Both succeed only when every entry does. Where a text
+succeeds within 0.5 mm. Both succeed only when every entry does; when the
+dimensions cannot be read again after the change, the call fails, says the
+change was made, and carries the entries. Where a text
 should go is the caller's decision; the tool only places and checks it. Changing
 a style can move a text (switching `shortened_radius` on moved a radius text by
 up to 22 mm on 2016 SP3), so set the style first and move the text afterwards.
@@ -346,7 +351,9 @@ reads only edges (`GetVisibleEntities2` with edges, never silhouette edges, see
 above) and counts every drawn edge: `oblique` for circles seen at an angle,
 `unreadable` for edges whose curve, circle or tessellation cannot be read. An
 empty `arcs` with `unreadable: 0` means the view draws no circular edge in true
-shape; a view that lists no edge at all fails the call. `list_drawing_dimensions`
+shape among the edges the view lists; a view switched to hidden lines visible
+may still list only the edges it showed before (see above), so dashed circles
+can be missing. A view that lists no edge at all fails the call. `list_drawing_dimensions`
 gives each dimension its measured points on the sheet, `reference_points_mm`
 (`IDimension.ReferencePoints` through the view's model transform), or `null`
 when they cannot be read, never an empty list.
@@ -578,8 +585,9 @@ plate ends flush inside, the recut member is reported), are checked by
 readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
 with every option off its default by readback and reach.
 
-Every tool except the 16 sheet metal and weldment tools and `activate_document`
-has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
+Every tool except the 16 sheet metal and weldment tools, `activate_document` and
+`set_sheet_format`, `set_dimension_style`, `move_dimension_text` and `list_view_arcs`
+(measured on 2016 SP3 only) has been exercised against SOLIDWORKS 2026 SP3.2 on a Simplified Chinese install. Where a result
 could be checked numerically it was: the revolved ring, swept rod and lofted
 cone match their closed-form volumes; a 5-degree `draft` removes exactly the
 expected wedge; `rib` produces exactly the triangle under its profile;
@@ -603,7 +611,7 @@ newest-name-first fallback.
 | Release | Binding | State |
 | --- | --- | --- |
 | SOLIDWORKS 2016 SP3 (desktop, German) | `late` (default) | every tool measured |
-| SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments and `activate_document` measured |
+| SOLIDWORKS 2026 SP3.2 (desktop, Simplified Chinese) | `late` (default) | every tool except sheet metal, weldments, `activate_document` and the four 2016-only drawing tools above measured |
 | SOLIDWORKS Design 2026 (3DEXPERIENCE R2026x, German) | not supported | late binding fails on the first sketch member; with `early` and `SW_MCP_QUIET_UI=1` (SP4.0) a sketch rectangle is drawn, then SOLIDWORKS crashes in `slduiu.dll` during `close_sketch` (#26) |
 
 Late binding is pywin32's dynamic dispatch: every member is resolved by name on
