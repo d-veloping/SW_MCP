@@ -32,26 +32,17 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp import sw_drawing
 
+from drawing_fakes import ChainView, first_view
 
-class FakeView:
+
+class FakeView(ChainView):
     def __init__(self, name: str, kind: int = 4, broken: bool = False) -> None:
-        self.name = name
-        self.Type = kind
+        super().__init__(name, kind)
         self.mode = 2            # hidden lines removed, the default after placing
         self.edges = False
         self.broken = broken     # accepts every call, keeps its mode: a refused style
         self.calls: list[tuple] = []
-        self.next: FakeView | None = None
         self.ScaleDecimal = 1.0
-
-    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
-        pass
-
-    def GetName2(self) -> str:  # noqa: N802 - COM member name
-        return self.name
-
-    def GetNextView(self):  # noqa: N802 - COM member name
-        return self.next
 
     def SetDisplayMode3(self, use_parent, mode, facetted, edges):  # noqa: N802 - COM member name
         self.calls.append((use_parent, mode, facetted, edges))
@@ -83,13 +74,8 @@ class FakeDrawing:
         self.next_view: FakeView | None = None
         self.Extension = SelectAnything()
 
-    def _link(self) -> None:
-        for a, b in zip(self.views, self.views[1:] + [None]):
-            a.next = b
-
     def GetFirstView(self):  # noqa: N802 - COM member name
-        self._link()
-        return self.views[0] if self.views else None
+        return first_view(self.views)
 
     def Create1stAngleViews2(self, model: str) -> bool:  # noqa: N802 - COM member name
         start = len([v for v in self.views if v.Type != 1]) + 1
@@ -329,6 +315,27 @@ class ProjectedViewTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 # create_drawing and the document that is active afterwards (ClauSW #115)
 # --------------------------------------------------------------------------
+
+
+class FindViewTests(unittest.TestCase):
+    """Without a name, _find_view takes the last view of the sheet's chain, whatever the names or the placing order."""
+
+    def test_no_name_is_the_last_view_of_the_chain(self) -> None:
+        doc = FakeDrawing([FakeView("Sheet1", kind=1), FakeView("Drawing View3"), FakeView("Drawing View1")])
+        self.assertEqual(sw_drawing._find_view(doc, None).name, "Drawing View1")
+        self.assertEqual(sw_drawing._find_view(doc, "Drawing View3").name, "Drawing View3")
+        self.assertIsNone(sw_drawing._find_view(doc, "Drawing View2"))
+
+    def test_a_sheet_without_views_has_none(self) -> None:
+        self.assertIsNone(sw_drawing._find_view(FakeDrawing([FakeView("Sheet1", kind=1)]), None))
+
+    def test_a_projection_without_parent_projects_off_the_last_view_of_the_chain(self) -> None:
+        doc = ProjectingDrawing([FakeView("Sheet1", kind=1), FakeView("Drawing View2"), FakeView("Drawing View1")])
+        with unittest.mock.patch.object(sw_drawing, "require_drawing", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_drawing, "rebuild"):
+            answer = sw_drawing.insert_projected_view({"direction": "right"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(doc.projected, {"Drawing View1": 1})
 
 
 class _Sheet:

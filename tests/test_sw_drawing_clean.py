@@ -34,6 +34,8 @@ if str(ROOT) not in sys.path:
 
 from solidworks_mcp import sw_core, sw_drawing
 
+from drawing_fakes import ChainView, first_view
+
 
 class Transform:
     def __init__(self, data: list[float]) -> None:
@@ -86,11 +88,10 @@ class DisplayDimension:
         return shown[index + 1] if index + 1 < len(shown) else None
 
 
-class View:
+class View(ChainView):
     def __init__(self, name: str, kind: int = 7, position=(0.2, 0.15), scale: float = 0.5,
                  outline=(0.15, 0.1, 0.25, 0.2), hatches: int = 0, transform=None) -> None:
-        self.name = name
-        self.Type = kind
+        super().__init__(name, kind)
         self.Position = position
         self.Angle = 0.0
         self.ScaleDecimal = scale
@@ -98,21 +99,11 @@ class View:
         self.hatches = hatches
         self.section_lines: list[object] = []
         self.transform = transform or Transform([1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0.15, 0, scale, 0, 0, 0])
-        self.next = None
         self.displays: list[DisplayDimension] = []
         self.section = None
 
     def shown(self) -> list[DisplayDimension]:
         return [d for d in self.displays if d.annotation.Visible == 1]
-
-    def _FlagAsMethod(self, *names: str) -> None:  # noqa: N802 - pywin32 member name
-        pass
-
-    def GetName2(self) -> str:  # noqa: N802 - COM member name
-        return self.name
-
-    def GetNextView(self):  # noqa: N802 - COM member name
-        return self.next
 
     def GetDisplayMode2(self) -> int:  # noqa: N802 - COM member name
         return 2
@@ -236,9 +227,7 @@ class Drawing:
         pass
 
     def GetFirstView(self):  # noqa: N802 - COM member name
-        for a, b in zip(self.views, self.views[1:] + [None]):
-            a.next = b
-        return self.views[0]
+        return first_view(self.views)
 
     def GetViews(self):  # noqa: N802 - COM member name
         sheets = [tuple(self.views)]
