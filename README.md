@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-121 tools: sketching with real relations and driving dimensions, the solid
+122 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so

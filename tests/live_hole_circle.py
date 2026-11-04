@@ -16,9 +16,11 @@
 
 Per case one part: a plate 160 x 160 x 10 mm on the front plane (256 000 mm3), then a sketch on the front plane with
 draw_hole_circle (pitch 108, hole 14.5) at the case's start angle, close_sketch and a through-all cut.  Cases: the
-brake disc's 90 degrees and one angle per quadrant, 15, 105, 195 and 285 degrees.  Checks per case:
+brake disc's 90 degrees, the other
+quadrant angles 0, 180, 270, one angle per quadrant, 15, 105, 195 and 285, and -30 degrees.  Checks per case:
 
-(a) the call answers ok true, fully_defined, angle_mode vertical for 90 and dimension otherwise, the dimensions
+(a) the call answers ok true, fully_defined, angle_mode vertical for 90 and 270, horizontal for 0 and 180 and
+    dimension otherwise, the dimensions
     Lochkreis 108, Bohrung 14.5 and, off the quadrants, Startwinkel at the angle below 180 and 360 - angle above,
     all driving; list_dimensions of the sketch names exactly these and none driven;
 (b) after the cut the volume is 256 000 - pi * 7.25^2 * 10 mm3 and the hole centre in the closed sketch lies at
@@ -53,7 +55,7 @@ from solidworks_mcp.sw_core import HANDLERS  # noqa: E402
 
 PLATE = 160.0 * 160.0 * 10.0
 CUT = PLATE - math.pi * 7.25 ** 2 * 10.0
-CASES = [90, 15, 105, 195, 285]
+CASES = [90, 0, 180, 270, 15, 105, 195, 285, -30]
 
 
 def data(answer: dict[str, Any], key: str, default: Any = None) -> Any:
@@ -130,17 +132,18 @@ def case(run: Run, angle: float) -> None:
                                                "start_angle_deg": angle})
         recorded[f"{label}_answer"] = answer
         run.require("close_sketch")
-        quadrant = angle % 90 == 0
+        phi = angle % 360
+        mode = {0: "horizontal", 180: "horizontal", 90: "vertical", 270: "vertical"}.get(phi, "dimension")
         wanted = {"Lochkreis": ("value_mm", 108.0), "Bohrung": ("value_mm", 14.5)}
-        if not quadrant:
-            wanted["Startwinkel"] = ("value_deg", angle if angle <= 180 else 360 - angle)
+        if mode == "dimension":
+            wanted["Startwinkel"] = ("value_deg", phi if phi <= 180 else 360 - phi)
         dims = data(answer, "dimensions", []) or []
         got = {d.get("name"): d for d in dims}
         rows = data(run.call("list_dimensions", {"feature_name": sketch}), "dimensions", []) or []
         recorded[f"{label}_list_dimensions"] = rows
         checks[f"a_{label}_answer"] = (
             answer.get("ok") is True and data(answer, "sketch_status") == "fully_defined"
-            and data(answer, "angle_mode") == ("vertical" if angle == 90 else "dimension")
+            and data(answer, "angle_mode") == mode
             and set(got) == set(wanted)
             and all(close_to(got[n].get(k), v, 1e-9) and got[n].get("driven") is False for n, (k, v) in wanted.items())
             and sorted(str(r.get("name")) for r in rows) == sorted(wanted)

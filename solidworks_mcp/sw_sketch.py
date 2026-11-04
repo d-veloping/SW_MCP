@@ -1469,7 +1469,12 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
     sketch = doc.SketchManager.ActiveSketch
     if sketch is None:
         return result(False, "No sketch is open. Call create_sketch first; draw_hole_circle drew nothing.")
-    if as_list(safe(sketch, "GetSketchSegments")):
+    try:
+        existing = as_list(value(sketch, "GetSketchSegments"))
+    except Exception as exc:
+        return result(False, f"The segments of the open sketch cannot be read ({type(exc).__name__}: {exc}); "
+                             "draw_hole_circle drew nothing.", sketch_status=sketch_status(sketch))
+    if existing:
         return result(False, "The open sketch is not empty; draw_hole_circle needs an empty one and drew nothing.",
                       sketch_status=sketch_status(sketch))
 
@@ -1479,6 +1484,7 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
     hx, hy = r * math.cos(math.radians(phi)), r * math.sin(math.radians(phi))
     created: dict[str, Any] = {"segments": [], "relations": [], "dimensions": []}
     entities: dict[str, Any] = {}
+    current = ["geometry"]   # the step under way, for a COM error that is no _HoleCircleStop
     try:
         manager = sketch_manager(doc)
         with _direct_to_db(manager):
@@ -1506,11 +1512,13 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
         if quadrant is None:
             shared.append(("reference_start_on_centre", value(entities["reference"], "GetStartPoint2"), centre))
         for step, a, b in shared:
+            current[0] = step
             ids = _entity_id(a), _entity_id(b)
             if ids[0] is None or ids[0] != ids[1]:
                 raise _HoleCircleStop(step, f"the two points are not one sketch point (IDs {ids[0]} and {ids[1]})")
             created["relations"].append(step)
 
+        current[0] = "centre_on_origin"
         relations = flag_methods(value(sketch, "RelationManager"), "AddRelation", "GetRelationsCount")
         steps = [("centre_on_origin", [centre, origin_sketch_point(doc)], RELATIONS["coincident"]),
                  ("hole_centre_on_pitch_circle", [hole_centre, entities["pitch"]], RELATIONS["coincident"])]
@@ -1521,6 +1529,7 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
         else:
             steps.append((f"radius_{mode}", [entities["radius"]], RELATIONS[mode]))
         for step, objects, code in steps:
+            current[0] = step
             before = int(relations.GetRelationsCount(0))
             relations.AddRelation(dispatch_array(objects), code)
             after = int(relations.GetRelationsCount(0))
@@ -1528,6 +1537,7 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
                 raise _HoleCircleStop(step, f"SOLIDWORKS did not add the relation (relation count {before} -> {after})")
             created["relations"].append(step)
 
+        current[0] = "pitch_dimension"
         hole_r = to_m(hole_mm) / 2
         specs = [("pitch", [entities["pitch"]], "AddDiameterDimension2", (-0.7 * r, 1.25 * r), to_m(pitch_mm),
                   _DIAMETER_TYPE),
@@ -1540,12 +1550,15 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
                           (0.5 * r * math.cos(half), 0.5 * r * math.sin(half)),
                           to_rad(phi if phi <= 180.0 else 360.0 - phi), _ANGULAR_TYPE))
         for key, objects, member, text, target, kind in specs:
+            current[0] = f"{key}_dimension"
             created["dimensions"].append(_hole_circle_dimension(app, doc, names[key], f"{key}_dimension", objects,
                                                                 member, text, target, kind))
 
+        current[0] = "dimension_count"
         count = _sketch_dimension_count(sketch)
         if count != len(specs):
             raise _HoleCircleStop("dimension_count", f"the sketch carries {count} dimensions, not {len(specs)}")
+        current[0] = "sketch_status"
         status = sketch_status(sketch)
         if status != "fully_defined":
             raise _HoleCircleStop("sketch_status", f"the sketch reads {status}, not fully_defined")
@@ -1553,6 +1566,11 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
         clear_selection(doc)
         return result(False, f"draw_hole_circle stopped at {exc.step}: {exc}. The sketch stays open as it is.",
                       step=exc.step, sketch_status=_sketch_status(doc), angle_mode=mode, created=created, **exc.data)
+    except Exception as exc:
+        clear_selection(doc)
+        return result(False, f"draw_hole_circle stopped at {current[0]}: SOLIDWORKS raised {type(exc).__name__}: "
+                             f"{exc}. The sketch stays open as it is.",
+                      step=current[0], sketch_status=_sketch_status(doc), angle_mode=mode, created=created)
 
     measured = next((d["value_deg"] for d in created["dimensions"] if "value_deg" in d), None)
     return result(True, f"Drew the hole circle with {len(specs)} named driving dimensions; the sketch is fully defined.",
