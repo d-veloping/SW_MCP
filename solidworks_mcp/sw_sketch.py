@@ -936,7 +936,10 @@ _DIMENSION_METHODS = {
     "as it does for one that duplicates a dimension already there), and when its driven state cannot be read "
     "(driven null, verified false). "
     "With no sketch open the change is rebuilt and read back after the rebuild; a failed rebuild is ok false too. "
-    "The new dimension stays in the sketch in every case; full_name names it.",
+    "With diametric true, a dimension whose Diametric display does not read back true (SOLIDWORKS 2016 refuses it "
+    "for a line measured to a centerline) gets no value and is deleted again: ok false, diametric false, removed "
+    "true, or removed false with its full_name when it could not be deleted. "
+    "Otherwise the new dimension stays in the sketch in every case; full_name names it.",
     {
         "selection": SELECTION_SCHEMA,
         "value_mm": {"type": "number", "description": "Target value for a linear dimension, in millimetres."},
@@ -946,7 +949,8 @@ _DIMENSION_METHODS = {
             "type": "boolean",
             "default": False,
             "description": "Show a linear dimension measured to a centerline as a diameter, the revolve-profile "
-                           "convention; value_mm is then the diameter.",
+                           "convention; value_mm is then the diameter. Not taken on SOLIDWORKS 2016: the call then "
+                           "fails, sets no value and removes the dimension. For a circle use kind diameter.",
         },
         "place_x_mm": {"type": "number", "default": 0},
         "place_y_mm": {"type": "number", "default": 0},
@@ -979,24 +983,24 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
             entities=count,
         )
 
+    dimension = None
+    try:
+        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+    except Exception:
+        dimension = safe(display, "GetDimension")
+
     applied: dict[str, Any] = {}
     if bool(args.get("diametric", False)):
         # Placing the text beyond the centerline, which flips a dimension to a
         # diameter in the UI, does nothing through AddDimension2; the display
         # dimension's Diametric property is the switch.  Set it before the
         # value, so the value is applied as a diameter.
-        try:
-            display.Diametric = True
-            applied["diametric"] = bool(display.Diametric)
-        except Exception:
-            logger.info("Could not switch the new dimension to diametric display.")
-            applied["diametric"] = False
-
-    dimension = None
-    try:
-        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
-    except Exception:
-        dimension = safe(display, "GetDimension")
+        why = _switch_diametric(display, True)
+        if why:
+            # A value set now would be applied as the plain distance and move the geometry (#75), so none is set
+            # and the new dimension goes again.
+            return _diametric_refused(doc, display, dimension, why, entities=count, sketch_status_before=status_before)
+        applied["diametric"] = True
 
     target, unit, convert = None, "", to_mm
     if args.get("value_mm") is not None:
@@ -1116,6 +1120,52 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Added a dimension.", **data)
 
 
+def _switch_diametric(display: Any, wanted: bool) -> str:
+    """Set ``IDisplayDimension.Diametric`` and read it back; the reason it did not take, empty when it did."""
+    try:
+        display.Diametric = wanted
+    except Exception as exc:
+        return f"setting Diametric raised {type(exc).__name__}: {exc}"
+    try:
+        actual = display.Diametric
+    except Exception as exc:
+        return f"Diametric cannot be read back ({type(exc).__name__}: {exc})"
+    if not isinstance(actual, bool) or actual is not wanted:
+        return f"Diametric reads {actual!r}, not {wanted}"
+    return ""
+
+
+def _diametric_refused(doc: Any, display: Any, dimension: Any, why: str, **data: Any) -> dict[str, Any]:
+    """add_dimension's answer when the new dimension did not take the diameter display: no value set, dimension removed.
+
+    The removal selects the display dimension by its selection name and deletes it; it counts only when the full
+    name no longer resolves afterwards (``IModelDoc2.Parameter`` answers None).  A dimension that stays is named.
+    """
+    full_name = str(safe(dimension, "FullName", "") or "") if dimension is not None else ""
+    removed = False
+    try:
+        clear_selection(doc)
+        selection_name = str(safe(display, "GetNameForSelection", "") or "")
+        ext = flag_methods(extension(doc), "SelectByID2", "DeleteSelection2")
+        if selection_name and bool(ext.SelectByID2(selection_name, "DIMENSION", 0.0, 0.0, 0.0, False, 0, nothing(), 0)):
+            ext.DeleteSelection2(0)
+        removed = bool(full_name) and doc.Parameter(full_name) is None
+    except Exception:
+        logger.info("Could not remove the dimension that refused the diameter display.", exc_info=True)
+    finally:
+        clear_selection(doc)
+    message = (f"SOLIDWORKS did not take the diameter display for the new dimension ({why}). A value would have been "
+               "set as the plain distance and moved the geometry, so none was set. ")
+    if removed:
+        message += f"The dimension {full_name} was removed again."
+    elif full_name:
+        message += f"The dimension {full_name} could not be removed and stays in the sketch; delete it by hand."
+    else:
+        message += "The new dimension could not be named or removed and may stay in the sketch."
+    return result(False, message, diametric=False, removed=removed, full_name=full_name,
+                  sketch_status=_sketch_status(doc), **data)
+
+
 def _display_dimension(doc: Any, full_name: str) -> Any | None:
     """The display dimension behind a full name such as 'D1@Sketch1@Part1.Part'.
 
@@ -1177,7 +1227,8 @@ def _same_sketch(open_sketch: Any, owner_sketch: Any | None) -> bool:
     "set_dimension",
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
     "find names. Linear values are millimetres, angular values are degrees. diametric switches a "
-    "dimension measured to a centerline between radius and diameter display. A value change is "
+    "dimension measured to a centerline between radius and diameter display; when Diametric does not read back "
+    "the requested state, ok is false and no value is written. A value change is "
     "rebuilt (unless its own sketch is open), read back, and judged by the owning sketch's solve "
     "state: ok is false when the value did not stick or the sketch is left over_defined, no_solution "
     "or invalid_solution, because the geometry then did not move; a sketch state that cannot be read "
@@ -1227,8 +1278,16 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
         display = _display_dimension(doc, name)
         if display is None:
             return result(False, f"No display dimension named '{name}' was found to restyle.")
-        display.Diametric = bool(args["diametric"])
-        applied["diametric"] = bool(display.Diametric)
+        wanted = bool(args["diametric"])
+        why = _switch_diametric(display, wanted)
+        if why:
+            # A value written now would land as the other measure (distance instead of diameter or back) and move
+            # the geometry (#75), so nothing is written.
+            mode = "diameter" if wanted else "plain distance"
+            not_set = f" {applied[f'value_{unit}']} {unit} was not set." if target is not None else ""
+            return result(False, f"SOLIDWORKS did not switch {name} to the {mode} display ({why}).{not_set}",
+                          diametric=safe(display, "Diametric"), owner=owner, **applied)
+        applied["diametric"] = wanted
     if target is None:
         if doc.SketchManager.ActiveSketch is None:
             rebuild(doc)

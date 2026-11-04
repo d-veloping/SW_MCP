@@ -725,6 +725,239 @@ class AddDimensionTests(unittest.TestCase):
                 self.assertIn("not confirmed", answer["message"])
 
 
+class FakeDiametricDisplay(FakeDisplayDimension):
+    """IDisplayDimension with Diametric as measured on 2016 SP3 (#75): with `takes` false a write is ignored and the
+    property reads back what it was; `set_error` / `read_error` make the write or the read raise; `reads` replaces the
+    value read back (a non-bool, say)."""
+
+    def __init__(self, dimension: FakeNewDimension | None, takes: bool = True, initial: bool = False,
+                 set_error: Exception | None = None, read_error: Exception | None = None, reads: object = ...,
+                 selection_name: str = "D3@Skizze1") -> None:
+        super().__init__(dimension)
+        self._takes, self._state = takes, initial
+        self._set_error, self._read_error, self._reads = set_error, read_error, reads
+        self.selection_name = selection_name
+
+    @property
+    def Diametric(self) -> object:  # noqa: N802 - COM member name
+        if self._read_error is not None:
+            raise self._read_error
+        return self._state if self._reads is ... else self._reads
+
+    @Diametric.setter
+    def Diametric(self, wanted: bool) -> None:  # noqa: N802 - COM member name
+        if self._set_error is not None:
+            raise self._set_error
+        if self._takes:
+            self._state = bool(wanted)
+
+    def GetNameForSelection(self) -> str:  # noqa: N802 - COM member name
+        return self.selection_name
+
+
+class FakeExtension:
+    """IModelDocExtension: SelectByID2 selects the display by its selection name (unless `selects` is false),
+    DeleteSelection2 removes the selected dimension from the document (unless `deletes` is false)."""
+
+    def __init__(self, doc: "FakeDiametricDoc", selects: bool, deletes: bool) -> None:
+        self._doc, self._selects, self._deletes = doc, selects, deletes
+        self.selected: list[tuple[str, str]] = []
+        self.delete_calls = 0
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def SelectByID2(self, name, kind, x, y, z, append, mark, callout, option) -> bool:  # noqa: N802 - COM member name
+        self.selected.append((name, kind))
+        return self._selects and kind == "DIMENSION" and name == self._doc._display.selection_name
+
+    def DeleteSelection2(self, options: int) -> bool:  # noqa: N802 - COM member name
+        self.delete_calls += 1
+        if self._deletes and self.selected:
+            self._doc.present.clear()
+        return True   # measured elsewhere: the answer says True also for what stays (sw_drawing._delete_selected)
+
+
+class FakeDiametricDoc(FakeDimensionDoc):
+    """FakeDimensionDoc plus Extension and Parameter: the new dimension resolves by full name until it is deleted."""
+
+    def __init__(self, display: FakeDiametricDisplay, sketch: FakeSketch | None, selects: bool = True,
+                 deletes: bool = True) -> None:
+        super().__init__(display, sketch)
+        self.Extension = FakeExtension(self, selects, deletes)
+        dimension = display._dimension
+        self.present = {dimension.FullName} if dimension is not None else set()
+
+    def Parameter(self, name: str):  # noqa: N802 - COM member name
+        return self._display._dimension if name in self.present else None
+
+
+class AddDimensionDiametricTests(unittest.TestCase):
+    """add_dimension with diametric: a refused diameter display sets no value and removes the dimension (#75)."""
+
+    def call(self, doc: FakeDiametricDoc, **args) -> dict:
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_sketch, "require_selection", return_value=2), \
+                unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None), \
+                unittest.mock.patch.object(sw_sketch, "nothing", return_value=None):
+            return sw_sketch.add_dimension({"selection": {"sketch_segments": [1, 0]}, "diametric": True, **args})
+
+    def refused(self, display: FakeDiametricDisplay, **doc_args) -> tuple[FakeDiametricDoc, FakeNewDimension]:
+        return FakeDiametricDoc(display, FakeSketch(UNDER), **doc_args), display._dimension
+
+    def test_refused_display_sets_no_value_and_removes_the_dimension(self) -> None:
+        # The four ways of probe_durchmesser.py differ in selection order, text position and kind; on 2016 every
+        # one read Diametric false and moved the line to 2·y. Offline the kind is the one input that reaches the code.
+        for kind in ("auto", "vertical", "horizontal"):
+            with self.subTest(kind=kind):
+                doc, dimension = self.refused(FakeDiametricDisplay(FakeNewDimension(0.010), takes=False))
+                answer = self.call(doc, kind=kind, value_mm=20)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                data = answer["data"]
+                self.assertIs(data["diametric"], False)
+                self.assertIs(data["removed"], True)
+                self.assertEqual(data["full_name"], "D3@Skizze1@Part1.Part")
+                self.assertEqual(data["sketch_status_before"], "under_defined")
+                self.assertEqual(doc.Extension.selected, [("D3@Skizze1", "DIMENSION")])
+                self.assertEqual(doc.Extension.delete_calls, 1)
+                self.assertEqual(doc.rebuilds, 0)
+                for part in ("did not take the diameter display", "Diametric reads False", "none was set",
+                             "D3@Skizze1@Part1.Part was removed again"):
+                    self.assertIn(part, answer["message"])
+
+    def test_refused_display_without_a_value_also_fails_and_removes(self) -> None:
+        doc, dimension = self.refused(FakeDiametricDisplay(FakeNewDimension(0.010), takes=False))
+        answer = self.call(doc)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["removed"], True)
+        self.assertEqual(dimension.set_calls, [])
+
+    def test_unreadable_or_raising_display_counts_as_refused(self) -> None:
+        cases = {
+            "write raises": (FakeDiametricDisplay(FakeNewDimension(0.010), set_error=RuntimeError("COM")),
+                             "setting Diametric raised RuntimeError"),
+            "read raises": (FakeDiametricDisplay(FakeNewDimension(0.010), read_error=RuntimeError("COM")),
+                            "Diametric cannot be read back"),
+            "reads None": (FakeDiametricDisplay(FakeNewDimension(0.010), reads=None), "Diametric reads None"),
+            "reads 1": (FakeDiametricDisplay(FakeNewDimension(0.010), reads=1), "Diametric reads 1"),
+        }
+        for label, (display, why) in cases.items():
+            with self.subTest(case=label):
+                doc, dimension = self.refused(display)
+                answer = self.call(doc, value_mm=20)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertIs(answer["data"]["diametric"], False)
+                self.assertIs(answer["data"]["removed"], True)
+                self.assertIn(why, answer["message"])
+
+    def test_failed_removal_says_the_dimension_stays_and_names_it(self) -> None:
+        for label, doc_args in (("not selected", {"selects": False}), ("not deleted", {"deletes": False})):
+            with self.subTest(case=label):
+                doc, dimension = self.refused(FakeDiametricDisplay(FakeNewDimension(0.010), takes=False), **doc_args)
+                answer = self.call(doc, value_mm=20)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertIs(answer["data"]["removed"], False)
+                self.assertEqual(answer["data"]["full_name"], "D3@Skizze1@Part1.Part")
+                self.assertIn("D3@Skizze1@Part1.Part could not be removed and stays in the sketch", answer["message"])
+
+    def test_raising_removal_is_reported_as_not_removed(self) -> None:
+        doc, dimension = self.refused(FakeDiametricDisplay(FakeNewDimension(0.010), takes=False))
+
+        def broken(options: int) -> bool:
+            raise RuntimeError("COM")
+        doc.Extension.DeleteSelection2 = broken
+        answer = self.call(doc, value_mm=20)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["removed"], False)
+        self.assertEqual(dimension.set_calls, [])
+
+    def test_refused_display_without_its_dimension_cannot_confirm_a_removal(self) -> None:
+        doc, _ = self.refused(FakeDiametricDisplay(None, takes=False))
+        answer = self.call(doc, value_mm=20)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["removed"], False)
+        self.assertEqual(answer["data"]["full_name"], "")
+        self.assertIn("could not be named or removed", answer["message"])
+
+    def test_taken_display_sets_the_value_as_a_diameter(self) -> None:
+        doc, dimension = self.refused(FakeDiametricDisplay(FakeNewDimension(0.010)))
+        answer = self.call(doc, value_mm=20)
+        self.assertTrue(answer["ok"], answer)
+        self.assertIs(answer["data"]["diametric"], True)
+        self.assertNotIn("removed", answer["data"])
+        self.assertEqual(dimension.set_calls, [0.020])
+        self.assertEqual(doc.Extension.delete_calls, 0)
+
+
+class SetDimensionDiametricTests(unittest.TestCase):
+    """set_dimension with diametric: a display that does not switch is ok false and no value is written (#75)."""
+
+    NAME = SetDimensionTests.NAME
+
+    def call(self, doc: FakeDoc, display: FakeDiametricDisplay, **args) -> dict:
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None), \
+                unittest.mock.patch.object(sw_sketch, "_display_dimension", return_value=display):
+            return sw_sketch.set_dimension({"full_name": self.NAME, **args})
+
+    def case(self, active: bool) -> tuple[FakeDoc, FakeDimension]:
+        sketch = FakeSketch(FULLY)
+        dimension = FakeDimension(0.025, FakeOwner("P_Skizze", sw_core.SKETCH_2D_TYPE, sketch))
+        return FakeDoc(dimension, active_sketch=sketch if active else None), dimension
+
+    def test_display_only_that_does_not_switch_fails_without_a_rebuild(self) -> None:
+        for active in (False, True):
+            with self.subTest(sketch_open=active):
+                doc, dimension = self.case(active)
+                answer = self.call(doc, FakeDiametricDisplay(None, takes=False), diametric=True)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertEqual(doc.rebuilds, 0)
+                self.assertIs(answer["data"]["diametric"], False)
+                self.assertIn("did not switch", answer["message"])
+                self.assertIn("diameter display", answer["message"])
+
+    def test_value_with_a_refused_display_is_never_written(self) -> None:
+        for active in (False, True):
+            with self.subTest(sketch_open=active):
+                doc, dimension = self.case(active)
+                answer = self.call(doc, FakeDiametricDisplay(None, takes=False), diametric=True, value_mm=50)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertEqual(doc.rebuilds, 0)
+                self.assertIn("50.0 mm was not set", answer["message"])
+                self.assertEqual(answer["data"]["value_mm"], 50.0)
+
+    def test_switch_back_to_the_distance_is_checked_too(self) -> None:
+        doc, dimension = self.case(False)
+        answer = self.call(doc, FakeDiametricDisplay(None, takes=False, initial=True), diametric=False, value_mm=25)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(dimension.set_calls, [])
+        self.assertIs(answer["data"]["diametric"], True)
+        self.assertIn("plain distance display", answer["message"])
+
+    def test_raising_or_unreadable_display_fails_without_a_write(self) -> None:
+        for label, display in (("write raises", FakeDiametricDisplay(None, set_error=RuntimeError("COM"))),
+                               ("read raises", FakeDiametricDisplay(None, read_error=RuntimeError("COM"))),
+                               ("reads None", FakeDiametricDisplay(None, reads=None))):
+            with self.subTest(case=label):
+                doc, dimension = self.case(False)
+                answer = self.call(doc, display, diametric=True, value_mm=50)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertEqual(doc.rebuilds, 0)
+
+    def test_switched_display_then_writes_the_value(self) -> None:
+        doc, dimension = self.case(False)
+        answer = self.call(doc, FakeDiametricDisplay(None), diametric=True, value_mm=50)
+        self.assertTrue(answer["ok"], answer)
+        self.assertIs(answer["data"]["diametric"], True)
+        self.assertEqual(dimension.set_calls, [0.050])
+
+
 class FakeLine:
     """A sketch line for _anchor_sketch: GetType 0 (swSketchLINE) and its ends in metres."""
 

@@ -35,6 +35,11 @@ value stays 80), so the unsolved-sketch rule is reached through part D, the unso
     unsolved sketch_status and sketch_status_before, and a message that says "already" and "did not move";
 (s) the open sketch's state is current: the state add_dimension reports in (b) and (c) is unsolved exactly when
     check_errors with sketches true lists the sketch after close_sketch (SW_MCP#15, step 4 of the brief);
+(f) diametric (#75): part E has a centerline on the x axis and four separate horizontal lines at y = 10, 20, 30, 40;
+    each gets one of the four ways of ClauSW's probe_durchmesser.py (line first with the text inside, centerline
+    first, text beyond the centerline, kind vertical), diametric true and value_mm 2·y.  Each answers either ok false
+    with diametric false and removed true, the line still at y and no dimension of it left in list_dimensions, or ok
+    true with diametric true and the line still at y (a real diameter);
 (e) recorded, not asserted: every answer, `driven` of each new dimension from list_dimensions, the time of every
     add_dimension call.
 
@@ -43,7 +48,7 @@ Run this only on a workstation with SOLIDWORKS already running and nothing else 
     ..\\.venv\\Scripts\\python.exe tests\\live_add_dimension.py
 
 Every part is closed without saving.  The output is one JSON object, also when a step raises; exit code 0 when (a)
-to (d) and (s) hold.
+to (d), (f) and (s) hold.
 """
 
 from __future__ import annotations
@@ -249,6 +254,48 @@ def unsolvable(run: Run) -> None:
         run.close_part("d", title)
 
 
+DIAMETRIC_WAYS = [
+    # name, y, order (line, centerline), kind, text position
+    ("line_first_text_inside", 10, lambda line, centre: [line, centre], "auto", (-10, 5)),
+    ("centerline_first", 20, lambda line, centre: [centre, line], "auto", (-10, 10)),
+    ("text_beyond_centerline", 30, lambda line, centre: [line, centre], "auto", (-10, -15)),
+    ("kind_vertical", 40, lambda line, centre: [line, centre], "vertical", (-10, 20)),
+]
+
+
+def diametric(run: Run) -> None:
+    """(f)"""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
+    try:
+        run.require("create_sketch", {"plane": "front", "name": "E_Skizze"})
+        run.require("draw_centerline", {"x1_mm": -5, "y1_mm": 0, "x2_mm": 60, "y2_mm": 0})
+        for _, y, _, _, _ in DIAMETRIC_WAYS:
+            run.require("draw_line", {"x1_mm": 0, "y1_mm": y, "x2_mm": 50, "y2_mm": y})
+        segments = data(run.call("list_sketch_segments"), "segments", []) or []
+        centre = next(s["index"] for s in segments if s["construction"])
+        index = {y: next(s["index"] for s in segments if not s["construction"] and abs(s["start_mm"][1] - y) < EPS)
+                 for _, y, _, _, _ in DIAMETRIC_WAYS}
+        for name, y, order, kind, (x, text_y) in DIAMETRIC_WAYS:
+            answer = run.call("add_dimension", {"selection": {"sketch_segments": order(index[y], centre)}, "kind": kind,
+                                                "diametric": True, "value_mm": 2 * y, "place_x_mm": x,
+                                                "place_y_mm": text_y})
+            after = {s["index"]: s for s in data(run.call("list_sketch_segments"), "segments", []) or []}
+            line_y = after[index[y]]["start_mm"][1]
+            names = [str(r.get("full_name", "")).split("@")[0] for r in
+                     data(run.call("list_dimensions", {"feature_name": "E_Skizze"}), "dimensions", []) or []]
+            full_name = str(data(answer, "full_name", ""))
+            left = bool(full_name) and full_name.split("@")[0] in names
+            recorded[f"f_{name}"] = {"answer": answer, "line_y_mm": line_y, "dimension_left": left}
+            refused = (answer.get("ok") is False and data(answer, "diametric") is False
+                       and data(answer, "removed") is True and not left)
+            real = answer.get("ok") is True and data(answer, "diametric") is True
+            checks[f"f_{name}"] = (refused or real) and close_to(line_y, y, 1e-6)
+        run.call("close_sketch")
+    finally:
+        run.close_part("e", title)
+
+
 def main() -> int:
     run = Run()
     try:
@@ -256,6 +303,7 @@ def main() -> int:
         conflict(run)
         redundant(run)
         unsolvable(run)
+        diametric(run)
     finally:
         print(json.dumps(run.report, indent=2, default=str))
     checks = run.report["checks"]
