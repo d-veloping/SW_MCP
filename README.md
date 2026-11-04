@@ -158,6 +158,21 @@ Editing: `sketch_fillet`, `sketch_chamfer`, `sketch_trim`, `sketch_offset`,
 
 Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`.
 
+`draw_hole_circle` draws the seed of a centred bolt-hole pattern in the open,
+empty sketch in one call: a construction pitch circle around the origin, one
+hole on it at `start_angle_deg`, a construction radius line and, off the
+quadrants, a construction reference line along +x, with the relations and the
+named diameter dimensions (`Lochkreis`, `Bohrung`) and, off the quadrants, an
+angle dimension (`Startwinkel`). The angle dimension is unsigned: above 180
+degrees it reads 360 minus the angle, and the hole stays where asked (measured
+on 2016 SP3 for 15, 105, 195, 285 and 330 degrees, with changes of the angle
+and the pitch in the open and the closed sketch). Line ends drawn on a circle
+centre share its sketch point, so those coincidences are checked by point ID,
+not by a relation. The call is `ok` only when every relation and dimension is
+confirmed, the sketch carries exactly these driving dimensions and is
+`fully_defined`; otherwise it stops at the failed `step` and leaves the sketch
+open as it is. Pattern the cut with `circular_pattern`.
+
 ### Features
 `boss_extrude`, `cut_extrude`, `revolve`, `fillet`, `chamfer`, `shell`, `draft`,
 `rib`, `simple_hole`, `sweep`, `loft`, `linear_pattern`, `circular_pattern`,
