@@ -438,8 +438,13 @@ would over-define the sketch, a duplicate say, is not refused either: SOLIDWORKS
 creates it driven, a reference dimension, and the sketch still solves. So
 `add_dimension` also reads the new dimension's `DrivenState` and fails on
 `driven: true`, and on a state it cannot read (`driven: null`,
-`verified: false`). The new dimension stays in the sketch in every case, named
-by `full_name`. `check_errors` reads the
+`verified: false`). The new dimension stays in the sketch in those cases, named
+by `full_name`. One exception: with `diametric: true` a dimension whose
+`Diametric` display does not read back true gets no value and is deleted again
+(`removed`), because SOLIDWORKS 2016 refuses that display for a line measured to
+a centerline and the value would land as the plain distance; `set_dimension`
+with `diametric` likewise writes no value when the display does not switch.
+`check_errors` reads the
 same state for every sketch when asked with `sketches: true`; that is one pass
 over the feature tree, so it is off by default. Measured on 2016 SP3.
 

@@ -32,6 +32,10 @@ extrude 10 mm (40 000 mm³), where changes do apply.  Checks:
 (i) a second part F, open path: edit_sketch, the radius change inside the sketch answers ok false with
     sketch_status no_solution and actual_value_mm ≈ 5; after close_sketch the sketch solves again
     (unsolved_sketches []) and the volume is unchanged.
+(j) diametric (#75): part L has a centerline on the x axis and a line at y = 25 with a linear dimension 25 to the
+    centerline.  set_dimension with diametric true alone, in the open sketch and again after close_sketch, and with
+    diametric true and value_mm 50 in the open sketch, each answers either ok false with the line still at 25 and the
+    dimension still 25, or ok true with diametric true and the line still at 25 (a real diameter);
 (h) recorded, not asserted: F's recovery edit_sketch → set_dimension 5 → close_sketch, then the sketch state and the
     volume; and the time of every set_dimension call.
 
@@ -40,7 +44,7 @@ Run this only on a workstation with SOLIDWORKS already running and nothing else 
     ..\\.venv\\Scripts\\python.exe tests\\live_set_dimension.py
 
 Every part is closed without saving.  The output is one JSON object, also when a step raises; exit code 0 when (a)
-to (g) and (i) hold.
+to (g), (i) and (j) hold.
 """
 
 from __future__ import annotations
@@ -215,12 +219,58 @@ def part_f_open(run: Run) -> None:
         run.close_part("f_open", title)
 
 
+def part_l(run: Run) -> None:
+    """(j)"""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
+    try:
+        run.call("create_sketch", {"plane": "front", "name": "L_Skizze"})
+        run.call("draw_centerline", {"x1_mm": -5, "y1_mm": 0, "x2_mm": 60, "y2_mm": 0})
+        run.call("draw_line", {"x1_mm": 0, "y1_mm": 25, "x2_mm": 50, "y2_mm": 25})
+        segments = run.segments()
+        centre = next(s["index"] for s in segments if s["construction"])
+        line = next(s["index"] for s in segments if not s["construction"])
+        added = run.call("add_dimension", {"selection": {"sketch_segments": [line, centre]}, "value_mm": 25,
+                                           "place_x_mm": -10, "place_y_mm": 12})
+        recorded["j_added"] = added
+        name = str(data(added, "full_name", ""))
+
+        def line_y(sketch_open: bool) -> float:
+            rows = (run.segments() if sketch_open else
+                    data(run.call("list_sketch_segments", {"sketch_name": "L_Skizze"}), "segments", []) or [])
+            return float(next(s for s in rows if s["index"] == line)["start_mm"][1])
+
+        def judged(answer: dict[str, Any], y: float) -> bool:
+            rows = data(run.call("list_dimensions", {"feature_name": "L_Skizze"}), "dimensions", []) or []
+            still_25 = any(str(r.get("full_name", "")).split("@")[0] == name.split("@")[0]
+                           and close_to(r.get("value_mm"), 25, 1e-6) for r in rows)
+            refused = answer.get("ok") is False and still_25
+            real = answer.get("ok") is True and data(answer, "diametric") is True
+            return (refused or real) and close_to(y, 25, 1e-6)
+
+        results = {}
+        for label, args, sketch_open in (("open_display", {"diametric": True}, True),
+                                         ("open_display_value", {"diametric": True, "value_mm": 50}, True),
+                                         ("closed_display", {"diametric": True}, False)):
+            if not sketch_open:
+                run.call("close_sketch")
+            answer = run.call("set_dimension", {"full_name": name, **args})
+            y = line_y(sketch_open)
+            recorded[f"j_{label}"] = {"answer": answer, "line_y_mm": y}
+            results[label] = judged(answer, y)
+        checks["j_diametric_never_moves_the_line"] = bool(name) and added.get("ok") is True and all(results.values())
+        recorded["j_results"] = results
+    finally:
+        run.close_part("l", title)
+
+
 def main() -> int:
     run = Run()
     try:
         part_f(run)
         part_k(run)
         part_f_open(run)
+        part_l(run)
     finally:
         print(json.dumps(run.report, indent=2, default=str))
     checks = run.report["checks"]
