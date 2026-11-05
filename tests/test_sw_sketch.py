@@ -1069,11 +1069,16 @@ class DrawHoleCircleTests(unittest.TestCase):
         self.assertIn("stays open", answer["message"])
         return data
 
-    def test_missing_segment_stops_before_any_relation(self) -> None:
-        sketch = FakeHoleSketch(missing="line")
-        data = self.assert_stopped(self.call(FakeHoleDoc(sketch), start_angle_deg=15), "geometry")
-        self.assertEqual(sketch.RelationManager.added, [])
-        self.assertEqual(data["created"]["dimensions"], [])
+    def test_missing_segment_stops_before_the_next_segment(self) -> None:
+        for missing, drawn, recorded in (("circle", ["circle"], []),
+                                         ("line", ["circle", "circle", "line"], ["pitch", "hole"])):
+            with self.subTest(missing=missing):
+                sketch = FakeHoleSketch(missing=missing)
+                data = self.assert_stopped(self.call(FakeHoleDoc(sketch), start_angle_deg=15), "geometry")
+                self.assertEqual(sketch.created, drawn)   # no Create* call after the one that returned nothing
+                self.assertEqual(data["created"]["segments"], recorded)
+                self.assertEqual(sketch.RelationManager.added, [])
+                self.assertEqual(data["created"]["dimensions"], [])
 
     def test_construction_flag_not_taken_stops(self) -> None:
         sketch = FakeHoleSketch(refuses_construction=True)
@@ -1140,8 +1145,31 @@ class DrawHoleCircleTests(unittest.TestCase):
                 self.assertIn("raised RuntimeError: COM error", answer["message"])
                 self.assertEqual(len(data["created"]["dimensions"]), dims)
                 self.assertEqual(data["sketch_status"], "fully_defined")
+                if where == "create":   # both circles are in the sketch and reported, no segment after the error
+                    self.assertEqual(data["created"]["segments"], ["pitch", "hole"])
+                    self.assertEqual(sketch.created, ["circle", "circle"])
                 if where in ("diameter", "angle"):
                     self.assertEqual(len(data["created"]["relations"]), 7)
+
+    def test_com_error_while_checking_a_created_dimension_names_it(self) -> None:
+        def boom(*args):
+            raise RuntimeError("COM error")
+
+        doc = FakeHoleDoc(FakeHoleSketch())
+        real_add = doc.AddDiameterDimension2
+
+        def add_then_fail(x, y, z):
+            display = real_add(x, y, z)
+            if len(doc.dimensions) == 2:
+                doc.dimensions[1].SetSystemValue3 = boom
+            return display
+
+        doc.AddDiameterDimension2 = add_then_fail
+        answer = self.call(doc, start_angle_deg=15)
+        data = self.assert_stopped(answer, "hole_dimension")
+        self.assertIn("raised RuntimeError: COM error while checking the Bohrung dimension", answer["message"])
+        self.assertEqual(data["failed_dimension"], "D2@Loecher_Skizze@Part1.Part")
+        self.assertEqual(len(data["created"]["dimensions"]), 1)
 
     def test_unreadable_segments_draw_nothing(self) -> None:
         sketch = FakeHoleSketch()

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .sw_core import (
     active_document,
@@ -1487,16 +1487,19 @@ def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
     current = ["geometry"]   # the step under way, for a COM error that is no _HoleCircleStop
     try:
         manager = sketch_manager(doc)
+        geometry = [("pitch", "CreateCircleByRadius", (0.0, 0.0, 0.0, r)),
+                    ("hole", "CreateCircleByRadius", (hx, hy, 0.0, to_m(hole_mm) / 2)),
+                    ("radius", "CreateLine", (0.0, 0.0, 0.0, hx, hy, 0.0))]
+        if quadrant is None:
+            geometry.append(("reference", "CreateLine", (0.0, 0.0, 0.0, r, 0.0, 0.0)))
         with _direct_to_db(manager):
-            entities["pitch"] = manager.CreateCircleByRadius(0.0, 0.0, 0.0, r)
-            entities["hole"] = manager.CreateCircleByRadius(hx, hy, 0.0, to_m(hole_mm) / 2)
-            entities["radius"] = manager.CreateLine(0.0, 0.0, 0.0, hx, hy, 0.0)
-            if quadrant is None:
-                entities["reference"] = manager.CreateLine(0.0, 0.0, 0.0, r, 0.0, 0.0)
-        for key, segment in entities.items():
-            if segment is None:
-                raise _HoleCircleStop("geometry", f"SOLIDWORKS did not create the {key} segment")
-            created["segments"].append(key)
+            # Each segment is checked and recorded before the next is drawn, so `created` lists what is in the sketch.
+            for key, member, coordinates in geometry:
+                segment = getattr(manager, member)(*coordinates)
+                if segment is None:
+                    raise _HoleCircleStop("geometry", f"SOLIDWORKS did not create the {key} segment")
+                entities[key] = segment
+                created["segments"].append(key)
         for key in ("pitch", "radius", "reference"):
             if key in entities:
                 entities[key].ConstructionGeometry = True
@@ -1601,6 +1604,18 @@ def _hole_circle_dimension(app: Any, doc: Any, name: str, step: str, objects: li
     def stop(why: str) -> None:
         raise _HoleCircleStop(step, why, failed_dimension=str(safe(dimension, "FullName", "") or ""))
 
+    try:
+        return _hole_circle_check(dimension, display, name, target, kind, stop)
+    except _HoleCircleStop:
+        raise
+    except Exception as exc:   # the dimension exists: a COM error while checking it still names it
+        stop(f"SOLIDWORKS raised {type(exc).__name__}: {exc} while checking the {name} dimension")
+        raise
+
+
+def _hole_circle_check(dimension: Any, display: Any, name: str, target: float, kind: int,
+                       stop: Callable[[str], None]) -> dict[str, Any]:
+    """Set, name and read back one created draw_hole_circle dimension; `stop` ends the call at a failed check."""
     actual_kind = safe(display, "Type2")
     if actual_kind != kind:
         stop(f"the {name} dimension is of type {actual_kind}, not {kind}")
