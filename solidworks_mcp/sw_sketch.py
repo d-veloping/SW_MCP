@@ -21,8 +21,9 @@ afterthought.
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .sw_core import (
     active_document,
@@ -1451,6 +1452,263 @@ def _next_display(feature: Any, current: Any) -> Any:
         return flag_methods(feature, 'GetNextDisplayDimension').GetNextDisplayDimension(current)
     except Exception:
         return None
+
+
+# --------------------------------------------------------------------------
+# Hole circle: one call for a centred bolt-hole sketch (ClauSW#78)
+# --------------------------------------------------------------------------
+
+# swDimensionType_e of IDisplayDimension.Type2 as read on 2016 SP3 (ClauSW#78, probe B1)
+_ANGULAR_TYPE, _DIAMETER_TYPE = 3, 6
+_HOLE_CIRCLE_NAMES = {"pitch": "Lochkreis", "hole": "Bohrung", "angle": "Startwinkel"}
+
+
+class _HoleCircleStop(Exception):
+    """draw_hole_circle stops at a step that did not hold; it carries the step, the reason and, for a dimension
+    that was created but failed a check, its full name (it stays in the sketch)."""
+
+    def __init__(self, step: str, why: str, **data: Any) -> None:
+        super().__init__(why)
+        self.step = step
+        self.data = data
+
+
+def _hole_circle_angle(start_angle_deg: float) -> tuple[float, int | None]:
+    """The start angle in [0, 360) and its quadrant k (the angle is k * 90 degrees), None off the quadrants."""
+    phi = float(start_angle_deg) % 360.0
+    k = round(phi / 90.0)
+    return phi, (int(k) % 4 if abs(phi - 90.0 * k) < 1e-9 else None)
+
+
+def _entity_id(entity: Any) -> tuple[int, ...] | None:
+    """GetID of a sketch point or segment as a tuple, None when it cannot be read."""
+    try:
+        return tuple(int(v) for v in as_list(value(entity, "GetID")))
+    except Exception:
+        return None
+
+
+@tool(
+    "draw_hole_circle",
+    "Draw the seed of a centred bolt-hole pattern in the open, empty sketch in one call: a construction circle (the "
+    "pitch circle) around the sketch origin, one hole on it at start_angle_deg from the sketch x axis, a construction "
+    "radius line from the centre to the hole and, off the quadrants, a construction reference line along +x. "
+    "Relations: pitch centre on the origin, hole centre on the pitch circle; at 0/90/180/270 degrees the radius line "
+    "horizontal or vertical (angle_mode horizontal or vertical), otherwise the reference line horizontal with its end "
+    "on the pitch circle and an angular dimension between the two lines (angle_mode dimension). Dimensions, named "
+    "after `names`: the pitch and the hole diameter and the angle. The angle dimension is unsigned: above 180 degrees "
+    "it reads 360 - angle (angle_measured_deg) and the hole stays where asked. ok is true only when every relation is "
+    "confirmed, every dimension reads back its value, type and name and is driving, the sketch carries exactly these "
+    "dimensions and no other, and it is fully_defined. At the first step that does not hold the call stops: ok false "
+    "with `step`, sketch_status, `created` (segments, relations and dimensions so far) and, for a dimension that "
+    "failed its check, failed_dimension; nothing is cleaned up and the sketch stays open, "
+    "closing it is the caller's.",
+    {
+        "pitch_diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+        "hole_diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+        "start_angle_deg": {"type": "number", "default": 90,
+                            "description": "Angle of the hole centre from the sketch x axis, any value."},
+        "names": {
+            "type": "object",
+            "description": "Dimension names; default Lochkreis, Bohrung, Startwinkel.",
+            "properties": {"pitch": {"type": "string"}, "hole": {"type": "string"}, "angle": {"type": "string"}},
+        },
+    },
+    ["pitch_diameter_mm", "hole_diameter_mm"],
+)
+def draw_hole_circle(args: dict[str, Any]) -> dict[str, Any]:
+    app, doc = active_document()
+    pitch_mm, hole_mm = float(args["pitch_diameter_mm"]), float(args["hole_diameter_mm"])
+    angle_in = float(args.get("start_angle_deg", 90))
+    names = {**_HOLE_CIRCLE_NAMES, **{k: str(v) for k, v in (args.get("names") or {}).items() if v is not None}}
+    if not all(math.isfinite(v) for v in (pitch_mm, hole_mm, angle_in)) or pitch_mm <= 0 or hole_mm <= 0:
+        return result(False, "pitch_diameter_mm and hole_diameter_mm must be positive and start_angle_deg finite.")
+    if set(names) != set(_HOLE_CIRCLE_NAMES) or not all(names.values()) or len(set(names.values())) != 3:
+        return result(False, "names takes pitch, hole and angle as three different, non-empty names.", names=names)
+    sketch = doc.SketchManager.ActiveSketch
+    if sketch is None:
+        return result(False, "No sketch is open. Call create_sketch first; draw_hole_circle drew nothing.")
+    try:
+        existing = as_list(value(sketch, "GetSketchSegments"))
+    except Exception as exc:
+        return result(False, f"The segments of the open sketch cannot be read ({type(exc).__name__}: {exc}); "
+                             "draw_hole_circle drew nothing.", sketch_status=sketch_status(sketch))
+    if existing:
+        return result(False, "The open sketch is not empty; draw_hole_circle needs an empty one and drew nothing.",
+                      sketch_status=sketch_status(sketch))
+
+    phi, quadrant = _hole_circle_angle(angle_in)
+    mode = "dimension" if quadrant is None else ("horizontal" if quadrant in (0, 2) else "vertical")
+    r = to_m(pitch_mm) / 2
+    hx, hy = r * math.cos(math.radians(phi)), r * math.sin(math.radians(phi))
+    created: dict[str, Any] = {"segments": [], "relations": [], "dimensions": []}
+    entities: dict[str, Any] = {}
+    current = ["geometry"]   # the step under way, for a COM error that is no _HoleCircleStop
+    try:
+        manager = sketch_manager(doc)
+        geometry = [("pitch", "CreateCircleByRadius", (0.0, 0.0, 0.0, r)),
+                    ("hole", "CreateCircleByRadius", (hx, hy, 0.0, to_m(hole_mm) / 2)),
+                    ("radius", "CreateLine", (0.0, 0.0, 0.0, hx, hy, 0.0))]
+        if quadrant is None:
+            geometry.append(("reference", "CreateLine", (0.0, 0.0, 0.0, r, 0.0, 0.0)))
+        with _direct_to_db(manager):
+            # Each segment is checked and recorded before the next is drawn, so `created` lists what is in the sketch.
+            for key, member, coordinates in geometry:
+                segment = getattr(manager, member)(*coordinates)
+                if segment is None:
+                    raise _HoleCircleStop("geometry", f"SOLIDWORKS did not create the {key} segment")
+                entities[key] = segment
+                created["segments"].append(key)
+        for key in ("pitch", "radius", "reference"):
+            if key in entities:
+                entities[key].ConstructionGeometry = True
+                if safe(entities[key], "ConstructionGeometry") is not True:
+                    raise _HoleCircleStop("geometry", f"the {key} segment did not become construction geometry")
+
+        centre = value(entities["pitch"], "GetCenterPoint2")
+        hole_centre = value(entities["hole"], "GetCenterPoint2")
+        # A line end drawn on exactly the coordinates of a circle centre shares that sketch point (measured on 2016
+        # SP3, ClauSW#78 probe B1): a coincident relation between them adds nothing, the shared point ID is the proof.
+        shared = [("radius_start_on_centre", value(entities["radius"], "GetStartPoint2"), centre),
+                  ("radius_end_on_hole_centre", value(entities["radius"], "GetEndPoint2"), hole_centre)]
+        if quadrant is None:
+            shared.append(("reference_start_on_centre", value(entities["reference"], "GetStartPoint2"), centre))
+        for step, a, b in shared:
+            current[0] = step
+            ids = _entity_id(a), _entity_id(b)
+            if ids[0] is None or ids[0] != ids[1]:
+                raise _HoleCircleStop(step, f"the two points are not one sketch point (IDs {ids[0]} and {ids[1]})")
+            created["relations"].append(step)
+
+        current[0] = "centre_on_origin"
+        relations = flag_methods(value(sketch, "RelationManager"), "AddRelation", "GetRelationsCount")
+        steps = [("centre_on_origin", [centre, origin_sketch_point(doc)], RELATIONS["coincident"]),
+                 ("hole_centre_on_pitch_circle", [hole_centre, entities["pitch"]], RELATIONS["coincident"])]
+        if quadrant is None:
+            steps += [("reference_horizontal", [entities["reference"]], RELATIONS["horizontal"]),
+                      ("reference_end_on_pitch_circle", [value(entities["reference"], "GetEndPoint2"),
+                                                         entities["pitch"]], RELATIONS["coincident"])]
+        else:
+            steps.append((f"radius_{mode}", [entities["radius"]], RELATIONS[mode]))
+        for step, objects, code in steps:
+            current[0] = step
+            before = int(relations.GetRelationsCount(0))
+            relations.AddRelation(dispatch_array(objects), code)
+            after = int(relations.GetRelationsCount(0))
+            if after <= before:
+                raise _HoleCircleStop(step, f"SOLIDWORKS did not add the relation (relation count {before} -> {after})")
+            created["relations"].append(step)
+
+        current[0] = "pitch_dimension"
+        hole_r = to_m(hole_mm) / 2
+        specs = [("pitch", [entities["pitch"]], "AddDiameterDimension2", (-0.7 * r, 1.25 * r), to_m(pitch_mm),
+                  _DIAMETER_TYPE),
+                 ("hole", [entities["hole"]], "AddDiameterDimension2",
+                  (hx + hole_r + 0.25 * r, hy + hole_r + 0.25 * r), to_m(hole_mm), _DIAMETER_TYPE)]
+        if quadrant is None:
+            # The text on the bisector of the smaller angle between the two lines makes that angle the dimension.
+            half = math.radians(phi / 2 if phi <= 180.0 else (phi + 360.0) / 2)
+            specs.append(("angle", [entities["reference"], entities["radius"]], "AddDimension2",
+                          (0.5 * r * math.cos(half), 0.5 * r * math.sin(half)),
+                          to_rad(phi if phi <= 180.0 else 360.0 - phi), _ANGULAR_TYPE))
+        for key, objects, member, text, target, kind in specs:
+            current[0] = f"{key}_dimension"
+            created["dimensions"].append(_hole_circle_dimension(app, doc, names[key], f"{key}_dimension", objects,
+                                                                member, text, target, kind))
+
+        current[0] = "dimension_count"
+        count = _sketch_dimension_count(sketch)
+        if count != len(specs):
+            raise _HoleCircleStop("dimension_count", f"the sketch carries {count} dimensions, not {len(specs)}")
+        current[0] = "sketch_status"
+        status = sketch_status(sketch)
+        if status != "fully_defined":
+            raise _HoleCircleStop("sketch_status", f"the sketch reads {status}, not fully_defined")
+    except _HoleCircleStop as exc:
+        clear_selection(doc)
+        return result(False, f"draw_hole_circle stopped at {exc.step}: {exc}. The sketch stays open as it is.",
+                      step=exc.step, sketch_status=_sketch_status(doc), angle_mode=mode, created=created, **exc.data)
+    except Exception as exc:
+        clear_selection(doc)
+        return result(False, f"draw_hole_circle stopped at {current[0]}: SOLIDWORKS raised {type(exc).__name__}: "
+                             f"{exc}. The sketch stays open as it is.",
+                      step=current[0], sketch_status=_sketch_status(doc), angle_mode=mode, created=created)
+
+    measured = next((d["value_deg"] for d in created["dimensions"] if "value_deg" in d), None)
+    return result(True, f"Drew the hole circle with {len(specs)} named driving dimensions; the sketch is fully defined.",
+                  sketch_status=status, angle_mode=mode, angle_measured_deg=measured,
+                  dimensions=created["dimensions"], segments=_hole_circle_indices(sketch, entities))
+
+
+def _hole_circle_dimension(app: Any, doc: Any, name: str, step: str, objects: list[Any], member: str,
+                           text: tuple[float, float], target: float, kind: int) -> dict[str, Any]:
+    """One dimension of draw_hole_circle: add, set, name, read back; stops at the first check that does not hold."""
+    clear_selection(doc)
+    for index, obj in enumerate(objects):
+        if not select_object(doc, obj, 0, index > 0):
+            raise _HoleCircleStop(step, f"could not select entity {index} for the {name} dimension")
+    flag_methods(doc, member)
+    with dimension_dialog_suppressed(app):
+        display = getattr(doc, member)(text[0], text[1], 0.0)
+    clear_selection(doc)
+    if display is None:
+        raise _HoleCircleStop(step, f"SOLIDWORKS did not create the {name} dimension")
+    try:
+        dimension = flag_methods(display, "GetDimension2").GetDimension2(0)
+    except Exception:
+        dimension = None
+    if dimension is None:
+        raise _HoleCircleStop(step, f"SOLIDWORKS created the {name} dimension but did not hand it back")
+
+    def stop(why: str) -> None:
+        raise _HoleCircleStop(step, why, failed_dimension=str(safe(dimension, "FullName", "") or ""))
+
+    try:
+        return _hole_circle_check(dimension, display, name, target, kind, stop)
+    except _HoleCircleStop:
+        raise
+    except Exception as exc:   # the dimension exists: a COM error while checking it still names it
+        stop(f"SOLIDWORKS raised {type(exc).__name__}: {exc} while checking the {name} dimension")
+        raise
+
+
+def _hole_circle_check(dimension: Any, display: Any, name: str, target: float, kind: int,
+                       stop: Callable[[str], None]) -> dict[str, Any]:
+    """Set, name and read back one created draw_hole_circle dimension; `stop` ends the call at a failed check."""
+    actual_kind = safe(display, "Type2")
+    if actual_kind != kind:
+        stop(f"the {name} dimension is of type {actual_kind}, not {kind}")
+    flag_methods(dimension, "SetSystemValue3")
+    dimension.SetSystemValue3(target, 2, empty_variant())   # swSetValue_InAllConfigurations
+    actual = _system_value(dimension)
+    if actual is None or abs(actual - target) > 1e-9:
+        stop(f"the {name} dimension reads {actual}, not {target} (SI units)")
+    try:
+        dimension.Name = name
+    except Exception:
+        logger.info("Could not rename the %s dimension.", name)
+    full_name = str(safe(dimension, "FullName", "") or "")
+    if not full_name.startswith(name + "@"):
+        stop(f"the dimension was not renamed to {name} (full name '{full_name}')")
+    driven = _driven(_driven_state(dimension))
+    if driven is not False:
+        stop(f"the {name} dimension is not confirmed driving (driven {driven})")
+    entry: dict[str, Any] = {"name": name, "full_name": full_name, "driven": False}
+    if kind == _ANGULAR_TYPE:
+        entry.update(kind="angle", value_deg=round(to_deg(actual), 9))
+    else:
+        entry.update(kind="diameter", value_mm=round(to_mm(actual), 9))
+    return entry
+
+
+def _hole_circle_indices(sketch: Any, entities: dict[str, Any]) -> dict[str, int | None]:
+    """Index of each created segment in the open sketch, as list_sketch_segments numbers them (matched by ID)."""
+    ids = [_entity_id(segment) for segment in as_list(safe(sketch, "GetSketchSegments"))]
+    out: dict[str, int | None] = {}
+    for key, segment in entities.items():
+        own = _entity_id(segment)
+        out[key] = ids.index(own) if own is not None and own in ids else None
+    return out
 
 
 # swAutodimScheme_e

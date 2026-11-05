@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-121 tools: sketching with real relations and driving dimensions, the solid
+122 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -157,6 +157,21 @@ Editing: `sketch_fillet`, `sketch_chamfer`, `sketch_trim`, `sketch_offset`,
 `sketch_mirror`, `convert_entities`, `set_construction_geometry`.
 
 Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`.
+
+`draw_hole_circle` draws the seed of a centred bolt-hole pattern in the open,
+empty sketch in one call: a construction pitch circle around the origin, one
+hole on it at `start_angle_deg`, a construction radius line and, off the
+quadrants, a construction reference line along +x, with the relations and the
+named diameter dimensions (`Lochkreis`, `Bohrung`) and, off the quadrants, an
+angle dimension (`Startwinkel`). The angle dimension is unsigned: above 180
+degrees it reads 360 minus the angle, and the hole stays where asked (measured
+on 2016 SP3 for 15, 105, 195, 285 and 330 degrees, with changes of the angle
+and the pitch in the open and the closed sketch). Line ends drawn on a circle
+centre share its sketch point, so those coincidences are checked by point ID,
+not by a relation. The call is `ok` only when every relation and dimension is
+confirmed, the sketch carries exactly these driving dimensions and is
+`fully_defined`; otherwise it stops at the failed `step` and leaves the sketch
+open as it is. Pattern the cut with `circular_pattern`.
 
 ### Features
 `boss_extrude`, `cut_extrude`, `revolve`, `fillet`, `chamfer`, `shell`, `draft`,

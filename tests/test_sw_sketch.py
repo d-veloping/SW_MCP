@@ -1040,5 +1040,421 @@ class SketchStatusTests(unittest.TestCase):
         self.assertEqual(unsolved, [{"sketch": "3DSkizze1", "sketch_status": "no_solution"}])
 
 
+class FakeHolePoint:
+    """An ISketchPoint: GetID [type, id] and its coordinates."""
+
+    def __init__(self, ident: int, x: float, y: float) -> None:
+        self.ident, self.X, self.Y = ident, x, y
+
+    def GetID(self):  # noqa: N802 - COM member name
+        return [1, self.ident]
+
+
+class FakeHoleSegment:
+    """A sketch circle or line; `refuses_construction` keeps ConstructionGeometry false."""
+
+    def __init__(self, ident: int, points: dict[str, FakeHolePoint], refuses_construction: bool = False) -> None:
+        self.ident, self._points, self._refuses = ident, points, refuses_construction
+        self._construction = False
+
+    @property
+    def ConstructionGeometry(self) -> bool:  # noqa: N802 - COM member name
+        return self._construction
+
+    @ConstructionGeometry.setter
+    def ConstructionGeometry(self, flag: bool) -> None:  # noqa: N802 - COM member name
+        if not self._refuses:
+            self._construction = bool(flag)
+
+    def GetID(self):  # noqa: N802 - COM member name
+        return [2, self.ident]
+
+    def GetCenterPoint2(self):  # noqa: N802 - COM member name
+        return self._points["centre"]
+
+    def GetStartPoint2(self):  # noqa: N802 - COM member name
+        return self._points["start"]
+
+    def GetEndPoint2(self):  # noqa: N802 - COM member name
+        return self._points["end"]
+
+
+class FakeHoleRelations:
+    """ISketchRelationManager: AddRelation counts one relation unless its code is in `refuses`."""
+
+    def __init__(self, refuses: set[int]) -> None:
+        self.count, self._refuses = 0, refuses
+        self.added: list[tuple[int, int]] = []
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def GetRelationsCount(self, kind: int) -> int:  # noqa: N802 - COM member name
+        return self.count
+
+    def AddRelation(self, entities, code: int) -> bool:  # noqa: N802 - COM member name
+        self.added.append((code, len(entities)))
+        if code not in self._refuses:
+            self.count += 1
+        return True
+
+
+class FakeHoleSketch:
+    """The open ISketch and its ISketchManager in one: Create* merge a point drawn on an existing point's exact
+    coordinates into that point (measured on 2016 SP3, ClauSW#78 probe B1) unless `merges` is false."""
+
+    def __init__(self, status: int = FULLY, merges: bool = True, missing: str = "", refuses: set[int] = frozenset(),
+                 refuses_construction: bool = False, segments: list | None = None) -> None:
+        self.code, self._merges, self._missing = status, merges, missing
+        self._refuses_construction = refuses_construction
+        self.segments: list[FakeHoleSegment] = list(segments or [])
+        self.points: list[FakeHolePoint] = []
+        self.RelationManager = FakeHoleRelations(set(refuses))
+        self.AddToDB = False
+        self.created: list[str] = []
+
+    # ISketchManager
+    ActiveSketch = property(lambda self: self)
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def _point(self, x: float, y: float) -> FakeHolePoint:
+        for point in self.points:
+            if self._merges and point.X == x and point.Y == y:
+                return point
+        point = FakeHolePoint(len(self.points) + 1, x, y)
+        self.points.append(point)
+        return point
+
+    def _segment(self, what: str, points: dict[str, FakeHolePoint]) -> FakeHoleSegment | None:
+        self.created.append(what)
+        if self._missing == what:
+            return None
+        segment = FakeHoleSegment(len(self.segments) + 1, points, self._refuses_construction)
+        self.segments.append(segment)
+        return segment
+
+    def CreateCircleByRadius(self, x, y, z, radius):  # noqa: N802 - COM member name
+        return self._segment("circle", {"centre": self._point(x, y)})
+
+    def CreateLine(self, x1, y1, z1, x2, y2, z2):  # noqa: N802 - COM member name
+        return self._segment("line", {"start": self._point(x1, y1), "end": self._point(x2, y2)})
+
+    # ISketch
+    def GetSketchSegments(self):  # noqa: N802 - COM member name
+        return list(self.segments)
+
+    def GetConstrainedStatus(self) -> int:  # noqa: N802 - COM member name
+        if isinstance(self.code, Exception):
+            raise self.code
+        return self.code
+
+
+class FakeHoleDimension:
+    """IDimension of a new dimension; `rejects`, `renames`, `driven_state` model the failures under test."""
+
+    def __init__(self, number: int, rejects: bool = False, renames: bool = True, driven_state: object = 2) -> None:
+        self.Name, self._rejects, self._renames, self._driven_state = f"D{number}", rejects, renames, driven_state
+        self.SystemValue = 0.001
+        self.set_calls: list[float] = []
+
+    def __setattr__(self, key, value) -> None:
+        if key == "Name" and getattr(self, "_renames", True) is False and "Name" in self.__dict__:
+            return
+        object.__setattr__(self, key, value)
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    @property
+    def FullName(self) -> str:  # noqa: N802 - COM member name
+        return f"{self.Name}@Loecher_Skizze@Part1.Part"
+
+    @property
+    def DrivenState(self) -> object:  # noqa: N802 - COM member name
+        if isinstance(self._driven_state, Exception):
+            raise self._driven_state
+        return self._driven_state
+
+    def SetSystemValue3(self, target: float, scope: int, config) -> int:  # noqa: N802 - COM member name
+        self.set_calls.append(target)
+        if not self._rejects:
+            self.SystemValue = target
+        return 0
+
+
+class FakeHoleDisplay:
+    def __init__(self, dimension: FakeHoleDimension | None, type2: int) -> None:
+        self._dimension, self.Type2 = dimension, type2
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def GetDimension2(self, index: int):  # noqa: N802 - COM member name
+        return self._dimension
+
+
+class FakeHoleDoc:
+    """IModelDoc2 for draw_hole_circle. `faults` maps a dimension (pitch, hole, angle) to what goes wrong with it:
+    no_display, no_dimension, wrong_type, rejects, no_rename, driven, driven_unreadable."""
+
+    def __init__(self, sketch: FakeHoleSketch | None, faults: dict[str, str] | None = None) -> None:
+        self.SketchManager = sketch if sketch is not None else FakeSketchManager(None)
+        self._faults = faults or {}
+        self.dimensions: list[FakeHoleDimension] = []
+        self.order = ["pitch", "hole", "angle"]
+
+    def _FlagAsMethod(self, *names: str) -> None:
+        pass
+
+    def ClearSelection2(self, all_: bool) -> bool:  # noqa: N802 - COM member name
+        return True
+
+    def _add(self, x: float, y: float, z: float, type2: int):
+        key = self.order[len(self.dimensions)] if len(self.dimensions) < 3 else "extra"
+        fault = self._faults.get(key, "")
+        if fault == "no_display":
+            return None
+        dimension = FakeHoleDimension(len(self.dimensions) + 1, rejects=fault == "rejects",
+                                      renames=fault != "no_rename",
+                                      driven_state={"driven": 1, "driven_unreadable": RuntimeError("COM")}.get(fault, 2))
+        self.dimensions.append(dimension)
+        if fault == "wrong_type":
+            type2 = 2
+        return FakeHoleDisplay(None if fault == "no_dimension" else dimension, type2)
+
+    def AddDiameterDimension2(self, x, y, z):  # noqa: N802 - COM member name
+        return self._add(x, y, z, 6)
+
+    def AddDimension2(self, x, y, z):  # noqa: N802 - COM member name
+        return self._add(x, y, z, 3)
+
+
+class DrawHoleCircleTests(unittest.TestCase):
+    """draw_hole_circle (ClauSW#78): one call, fail-closed at the first step that does not hold."""
+
+    def call(self, doc: FakeHoleDoc, extra_dimensions: int | None = 0, selects: bool = True, **args) -> dict:
+        """extra_dimensions None makes the dimension count unreadable."""
+        origin = FakeHolePoint(0, 0.0, 0.0)
+        counted = lambda sketch: None if extra_dimensions is None else len(doc.dimensions) + extra_dimensions  # noqa: E731
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_sketch, "origin_sketch_point", return_value=origin), \
+                unittest.mock.patch.object(sw_sketch, "select_object", return_value=selects), \
+                unittest.mock.patch.object(sw_sketch, "dispatch_array", side_effect=list), \
+                unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None), \
+                unittest.mock.patch.object(sw_sketch, "_sketch_dimension_count", side_effect=counted):
+            return sw_sketch.draw_hole_circle({"pitch_diameter_mm": 108, "hole_diameter_mm": 14.5, **args})
+
+    def test_angle_normalisation_and_quadrants(self) -> None:
+        for given, wanted in ((-30, (330.0, None)), (360, (0.0, 0)), (450, (90.0, 1)), (270, (270.0, 3)),
+                              (15, (15.0, None)), (90 - 1e-10, (90 - 1e-10, 1)), (195, (195.0, None))):
+            with self.subTest(angle=given):
+                phi, quadrant = sw_sketch._hole_circle_angle(given)
+                self.assertAlmostEqual(phi, wanted[0])
+                self.assertEqual(quadrant, wanted[1])
+
+    def test_quadrant_angle_takes_a_relation_and_two_named_diameters(self) -> None:
+        for angle, mode, code in ((90, "vertical", 5), (0, "horizontal", 4), (180, "horizontal", 4),
+                                  (270, "vertical", 5), (450, "vertical", 5)):
+            with self.subTest(angle=angle):
+                sketch = FakeHoleSketch()
+                doc = FakeHoleDoc(sketch)
+                answer = self.call(doc, start_angle_deg=angle)
+                self.assertTrue(answer["ok"], answer)
+                data = answer["data"]
+                self.assertEqual(data["angle_mode"], mode)
+                self.assertIsNone(data["angle_measured_deg"])
+                self.assertEqual(data["sketch_status"], "fully_defined")
+                self.assertEqual([(d["full_name"], d["kind"], d["value_mm"], d["driven"]) for d in data["dimensions"]],
+                                 [("Lochkreis@Loecher_Skizze@Part1.Part", "diameter", 108.0, False),
+                                  ("Bohrung@Loecher_Skizze@Part1.Part", "diameter", 14.5, False)])
+                self.assertEqual(sketch.created, ["circle", "circle", "line"])
+                self.assertEqual(sketch.RelationManager.added, [(9, 2), (9, 2), (code, 1)])
+                self.assertEqual(data["segments"], {"pitch": 0, "hole": 1, "radius": 2})
+                self.assertEqual([s.ConstructionGeometry for s in sketch.segments], [True, False, True])
+                self.assertEqual(len(sketch.points), 2)   # centre and hole centre, line ends merged
+
+    def test_off_quadrant_angle_takes_an_angle_dimension_with_360_minus_phi_above_180(self) -> None:
+        for angle, measured in ((15, 15.0), (105, 105.0), (195, 165.0), (285, 75.0), (-30, 30.0)):
+            with self.subTest(angle=angle):
+                sketch = FakeHoleSketch()
+                doc = FakeHoleDoc(sketch)
+                answer = self.call(doc, start_angle_deg=angle, names={"angle": "Winkel"})
+                self.assertTrue(answer["ok"], answer)
+                data = answer["data"]
+                self.assertEqual(data["angle_mode"], "dimension")
+                self.assertAlmostEqual(data["angle_measured_deg"], measured, places=9)
+                self.assertEqual([d["name"] for d in data["dimensions"]], ["Lochkreis", "Bohrung", "Winkel"])
+                self.assertEqual(data["dimensions"][2]["kind"], "angle")
+                self.assertAlmostEqual(doc.dimensions[2].set_calls[0], math.radians(measured))
+                self.assertEqual(sketch.created, ["circle", "circle", "line", "line"])
+                self.assertEqual(sketch.RelationManager.added, [(9, 2), (9, 2), (4, 1), (9, 2)])
+                self.assertEqual(data["segments"], {"pitch": 0, "hole": 1, "radius": 2, "reference": 3})
+                self.assertEqual([s.ConstructionGeometry for s in sketch.segments], [True, False, True, True])
+                self.assertEqual(len(sketch.points), 3)
+
+    def assert_stopped(self, answer: dict, step: str) -> dict:
+        self.assertFalse(answer["ok"], answer)
+        data = answer["data"]
+        self.assertEqual(data["step"], step)
+        self.assertIn(f"stopped at {step}", answer["message"])
+        self.assertIn("stays open", answer["message"])
+        return data
+
+    def test_missing_segment_stops_before_the_next_segment(self) -> None:
+        for missing, drawn, recorded in (("circle", ["circle"], []),
+                                         ("line", ["circle", "circle", "line"], ["pitch", "hole"])):
+            with self.subTest(missing=missing):
+                sketch = FakeHoleSketch(missing=missing)
+                data = self.assert_stopped(self.call(FakeHoleDoc(sketch), start_angle_deg=15), "geometry")
+                self.assertEqual(sketch.created, drawn)   # no Create* call after the one that returned nothing
+                self.assertEqual(data["created"]["segments"], recorded)
+                self.assertEqual(sketch.RelationManager.added, [])
+                self.assertEqual(data["created"]["dimensions"], [])
+
+    def test_construction_flag_not_taken_stops(self) -> None:
+        sketch = FakeHoleSketch(refuses_construction=True)
+        self.assert_stopped(self.call(FakeHoleDoc(sketch)), "geometry")
+        self.assertEqual(sketch.RelationManager.added, [])
+
+    def test_line_end_not_merged_with_the_centre_stops(self) -> None:
+        sketch = FakeHoleSketch(merges=False)
+        data = self.assert_stopped(self.call(FakeHoleDoc(sketch)), "radius_start_on_centre")
+        self.assertEqual(data["created"]["segments"], ["pitch", "hole", "radius"])
+        self.assertEqual(sketch.RelationManager.added, [])
+
+    def test_relation_not_counted_stops_before_the_dimensions(self) -> None:
+        for refused, angle, step in ((9, 15, "centre_on_origin"), (4, 15, "reference_horizontal"),
+                                     (5, 90, "radius_vertical")):
+            with self.subTest(step=step):
+                doc = FakeHoleDoc(FakeHoleSketch(refuses={refused}))
+                data = self.assert_stopped(self.call(doc, start_angle_deg=angle), step)
+                self.assertEqual(doc.dimensions, [])
+                self.assertEqual(data["created"]["dimensions"], [])
+
+    def test_each_dimension_fault_stops_at_that_dimension(self) -> None:
+        cases = [("pitch", "no_display", "pitch_dimension", "did not create"),
+                 ("hole", "no_dimension", "hole_dimension", "did not hand it back"),
+                 ("angle", "wrong_type", "angle_dimension", "of type 2, not 3"),
+                 ("pitch", "rejects", "pitch_dimension", "reads 0.001"),
+                 ("hole", "no_rename", "hole_dimension", "not renamed to Bohrung"),
+                 ("angle", "driven", "angle_dimension", "driven True"),
+                 ("pitch", "driven_unreadable", "pitch_dimension", "driven None")]
+        for key, fault, step, why in cases:
+            with self.subTest(fault=fault, dimension=key):
+                doc = FakeHoleDoc(FakeHoleSketch(), {key: fault})
+                answer = self.call(doc, start_angle_deg=15)
+                data = self.assert_stopped(answer, step)
+                self.assertIn(why, answer["message"])
+                self.assertEqual(len(data["created"]["dimensions"]), doc.order.index(key))
+                self.assertEqual(len(doc.dimensions), doc.order.index(key) + (fault != "no_display"))
+                if fault not in ("no_display", "no_dimension"):
+                    self.assertTrue(data["failed_dimension"].endswith("@Loecher_Skizze@Part1.Part"), data)
+
+    def test_com_error_mid_call_reports_the_step_and_what_was_created(self) -> None:
+        def boom(*args):
+            raise RuntimeError("COM error")
+
+        cases = [("create", "geometry", 0), ("relation", "hole_centre_on_pitch_circle", 0),
+                 ("diameter", "hole_dimension", 1), ("angle", "angle_dimension", 2)]
+        for where, step, dims in cases:
+            with self.subTest(where=where):
+                sketch = FakeHoleSketch()
+                doc = FakeHoleDoc(sketch)
+                if where == "create":
+                    sketch.CreateLine = boom
+                elif where == "relation":
+                    real = sketch.RelationManager.AddRelation
+                    sketch.RelationManager.AddRelation = (
+                        lambda entities, code: boom() if sketch.RelationManager.count == 1 else real(entities, code))
+                elif where == "diameter":
+                    real_add = doc.AddDiameterDimension2
+                    doc.AddDiameterDimension2 = lambda x, y, z: boom() if doc.dimensions else real_add(x, y, z)
+                else:
+                    doc.AddDimension2 = boom
+                answer = self.call(doc, start_angle_deg=15)
+                data = self.assert_stopped(answer, step)
+                self.assertIn("raised RuntimeError: COM error", answer["message"])
+                self.assertEqual(len(data["created"]["dimensions"]), dims)
+                self.assertEqual(data["sketch_status"], "fully_defined")
+                if where == "create":   # both circles are in the sketch and reported, no segment after the error
+                    self.assertEqual(data["created"]["segments"], ["pitch", "hole"])
+                    self.assertEqual(sketch.created, ["circle", "circle"])
+                if where in ("diameter", "angle"):
+                    self.assertEqual(len(data["created"]["relations"]), 7)
+
+    def test_com_error_while_checking_a_created_dimension_names_it(self) -> None:
+        def boom(*args):
+            raise RuntimeError("COM error")
+
+        doc = FakeHoleDoc(FakeHoleSketch())
+        real_add = doc.AddDiameterDimension2
+
+        def add_then_fail(x, y, z):
+            display = real_add(x, y, z)
+            if len(doc.dimensions) == 2:
+                doc.dimensions[1].SetSystemValue3 = boom
+            return display
+
+        doc.AddDiameterDimension2 = add_then_fail
+        answer = self.call(doc, start_angle_deg=15)
+        data = self.assert_stopped(answer, "hole_dimension")
+        self.assertIn("raised RuntimeError: COM error while checking the Bohrung dimension", answer["message"])
+        self.assertEqual(data["failed_dimension"], "D2@Loecher_Skizze@Part1.Part")
+        self.assertEqual(len(data["created"]["dimensions"]), 1)
+
+    def test_unreadable_segments_draw_nothing(self) -> None:
+        sketch = FakeHoleSketch()
+
+        def unreadable():
+            raise RuntimeError("COM")
+        sketch.GetSketchSegments = unreadable
+        answer = self.call(FakeHoleDoc(sketch))
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn("cannot be read", answer["message"])
+        self.assertEqual(sketch.created, [])
+
+    def test_unselectable_entity_stops(self) -> None:
+        doc = FakeHoleDoc(FakeHoleSketch())
+        self.assert_stopped(self.call(doc, selects=False), "pitch_dimension")
+        self.assertEqual(doc.dimensions, [])
+
+    def test_extra_or_unreadable_dimension_count_stops(self) -> None:
+        for extra in (1, -1, None):
+            with self.subTest(extra=extra):
+                answer = self.call(FakeHoleDoc(FakeHoleSketch()), extra_dimensions=extra, start_angle_deg=15)
+                data = self.assert_stopped(answer, "dimension_count")
+                self.assertEqual(len(data["created"]["dimensions"]), 3)
+
+    def test_sketch_not_fully_defined_stops(self) -> None:
+        for code, name in ((UNDER, "under_defined"), (1, "unknown"), (OVER, "over_defined"),
+                           (RuntimeError("COM"), "unknown")):
+            with self.subTest(status=name):
+                answer = self.call(FakeHoleDoc(FakeHoleSketch(status=code)))
+                data = self.assert_stopped(answer, "sketch_status")
+                self.assertIn(name, answer["message"])
+                self.assertEqual(data["sketch_status"], name)
+
+    def test_no_sketch_or_a_sketch_with_segments_draws_nothing(self) -> None:
+        answer = self.call(FakeHoleDoc(None))
+        self.assertFalse(answer["ok"])
+        self.assertIn("No sketch is open", answer["message"])
+        busy = FakeHoleSketch(segments=[FakeHoleSegment(9, {})])
+        answer = self.call(FakeHoleDoc(busy))
+        self.assertFalse(answer["ok"])
+        self.assertIn("not empty", answer["message"])
+        self.assertEqual(busy.created, [])
+
+    def test_bad_input_draws_nothing(self) -> None:
+        for args in ({"names": {"pitch": "X", "hole": "X"}}, {"names": {"angle": ""}}, {"start_angle_deg": math.nan},
+                     {"hole_diameter_mm": 0}, {"pitch_diameter_mm": -5}, {"names": {"depth": "T"}}):
+            with self.subTest(args=args):
+                sketch = FakeHoleSketch()
+                answer = self.call(FakeHoleDoc(sketch), **args)
+                self.assertFalse(answer["ok"], answer)
+                self.assertEqual(sketch.created, [])
+
+
 if __name__ == "__main__":
     unittest.main()

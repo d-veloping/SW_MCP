@@ -44,6 +44,7 @@ $LiveTests = @(
     "live_list_dimensions.py",
     "live_set_dimension.py",
     "live_add_dimension.py",
+    "live_hole_circle.py",
     "live_sheet_metal.py",
     "live_weldment.py",
     "live_dimension_attachments.py",
