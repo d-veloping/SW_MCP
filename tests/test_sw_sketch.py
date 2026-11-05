@@ -958,6 +958,199 @@ class SetDimensionDiametricTests(unittest.TestCase):
         self.assertEqual(dimension.set_calls, [0.050])
 
 
+class FakeStyleDisplay(FakeDiametricDisplay):
+    """FakeDiametricDisplay plus ShowParenthesis as measured on 2016 SP3 (ClauSW#156): the write takes and the same
+    object reads the new state at once.  `p_takes` false ignores the write; `p_set_error` / `p_read_error` make the
+    write or the read raise; `p_reads` replaces the value read back.  `p_writes` counts the writes."""
+
+    def __init__(self, parentheses: bool = False, p_takes: bool = True, p_set_error: Exception | None = None,
+                 p_read_error: Exception | None = None, p_reads: object = ..., **diametric) -> None:
+        super().__init__(None, **diametric)
+        self._p_state, self._p_takes = parentheses, p_takes
+        self._p_set_error, self._p_read_error, self._p_reads = p_set_error, p_read_error, p_reads
+        self.p_writes = 0
+
+    @property
+    def ShowParenthesis(self) -> object:  # noqa: N802 - COM member name
+        if self._p_read_error is not None:
+            raise self._p_read_error
+        return self._p_state if self._p_reads is ... else self._p_reads
+
+    @ShowParenthesis.setter
+    def ShowParenthesis(self, wanted: bool) -> None:  # noqa: N802 - COM member name
+        self.p_writes += 1
+        if self._p_set_error is not None:
+            raise self._p_set_error
+        if self._p_takes:
+            self._p_state = bool(wanted)
+
+
+class SetDimensionParenthesesTests(unittest.TestCase):
+    """set_dimension with parentheses: set and read back on the display dimension, value and driven state reported
+    before and after, a refused or unreadable state is ok false and nothing else is written (ClauSW#156)."""
+
+    NAME = SetDimensionTests.NAME
+
+    def call(self, doc: FakeDoc, display: FakeStyleDisplay | None, **args) -> dict:
+        with unittest.mock.patch.object(sw_sketch, "active_document", return_value=(None, doc)), \
+                unittest.mock.patch.object(sw_sketch, "empty_variant", return_value=None), \
+                unittest.mock.patch.object(sw_sketch, "_display_dimension", return_value=display):
+            return sw_sketch.set_dimension({"full_name": self.NAME, **args})
+
+    def case(self, active: bool = False, value: float = 0.025) -> tuple[FakeDoc, FakeDimension]:
+        sketch = FakeSketch(FULLY)
+        dimension = FakeDimension(value, FakeOwner("P_Skizze", sw_core.SKETCH_2D_TYPE, sketch))
+        dimension.DrivenState = 2   # swDimensionDrivenState_e: driving
+        return FakeDoc(dimension, active_sketch=sketch if active else None), dimension
+
+    def assert_unchanged(self, data: dict) -> None:
+        self.assertEqual((data["previous_driven"], data["driven"]), (False, False))
+        self.assertEqual((data["previous_value_mm"], data["actual_value_mm"]), (25.0, 25.0))
+
+    def test_parentheses_on_alone_reads_back_and_changes_nothing_else(self) -> None:
+        for active in (False, True):
+            with self.subTest(sketch_open=active):
+                doc, dimension = self.case(active)
+                display = FakeStyleDisplay()
+                answer = self.call(doc, display, parentheses=True)
+                self.assertTrue(answer["ok"], answer)
+                self.assertEqual(dimension.set_calls, [])
+                self.assertEqual(doc.rebuilds, 0 if active else 1)
+                self.assertIs(display.ShowParenthesis, True)
+                data = answer["data"]
+                self.assertEqual((data["previous_parentheses"], data["parentheses"]), (False, True))
+                self.assert_unchanged(data)
+                self.assertNotIn("diametric", data)
+                self.assertIn("parentheses on", answer["message"])
+
+    def test_parentheses_off_alone(self) -> None:
+        doc, _ = self.case()
+        display = FakeStyleDisplay(parentheses=True)
+        answer = self.call(doc, display, parentheses=False)
+        self.assertTrue(answer["ok"], answer)
+        self.assertIs(display.ShowParenthesis, False)
+        self.assertEqual((answer["data"]["previous_parentheses"], answer["data"]["parentheses"]), (True, False))
+        self.assert_unchanged(answer["data"])
+        self.assertIn("parentheses off", answer["message"])
+
+    def test_angular_dimension_reports_degrees(self) -> None:
+        doc, dimension = self.case(value=math.radians(30))
+        dimension.GetType = lambda: 1   # swDimensionParamType_e: angular
+        answer = self.call(doc, FakeStyleDisplay(), parentheses=True)
+        self.assertTrue(answer["ok"], answer)
+        self.assertAlmostEqual(answer["data"]["previous_value_deg"], 30.0)
+        self.assertAlmostEqual(answer["data"]["actual_value_deg"], 30.0)
+        self.assertNotIn("actual_value_mm", answer["data"])
+
+    def test_refused_parentheses_fail_and_leave_the_dimension_as_it_was(self) -> None:
+        doc, dimension = self.case()
+        display = FakeStyleDisplay(p_takes=False)
+        answer = self.call(doc, display, parentheses=True)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(dimension.set_calls, [])
+        self.assertEqual(doc.rebuilds, 0)
+        self.assertEqual(display.p_writes, 1)
+        data = answer["data"]
+        self.assertIs(data["parentheses"], False)
+        self.assertIs(data["previous_parentheses"], False)
+        self.assertEqual(data["previous_value_mm"], 25.0)
+        self.assertNotIn("removed", data)
+        self.assertIn("did not set the parentheses", answer["message"])
+        self.assertIn("ShowParenthesis reads False, not True", answer["message"])
+
+    def test_unreadable_parentheses_are_not_a_success(self) -> None:
+        doc, _ = self.case()
+        answer = self.call(doc, FakeStyleDisplay(p_read_error=RuntimeError("COM")), parentheses=True)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(doc.rebuilds, 0)
+        self.assertIsNone(answer["data"]["parentheses"])
+        self.assertIn("ShowParenthesis cannot be read back", answer["message"])
+
+    def test_non_bool_readback_is_not_a_success(self) -> None:
+        doc, _ = self.case()
+        answer = self.call(doc, FakeStyleDisplay(p_reads=1), parentheses=True)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIsNone(answer["data"]["parentheses"])
+        self.assertIn("ShowParenthesis reads 1", answer["message"])
+
+    def test_raising_write_is_not_a_success(self) -> None:
+        doc, _ = self.case()
+        answer = self.call(doc, FakeStyleDisplay(p_set_error=RuntimeError("COM")), parentheses=False)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["parentheses"], False)
+        self.assertIn("did not clear the parentheses", answer["message"])
+        self.assertIn("setting ShowParenthesis raised RuntimeError", answer["message"])
+
+    def test_dimension_without_a_display_dimension(self) -> None:
+        doc, dimension = self.case()
+        answer = self.call(doc, None, parentheses=True, value_mm=50)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(dimension.set_calls, [])
+        self.assertIn("No display dimension", answer["message"])
+
+    def test_parentheses_with_a_value_set_both(self) -> None:
+        doc, dimension = self.case()
+        display = FakeStyleDisplay()
+        answer = self.call(doc, display, parentheses=True, value_mm=50)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(dimension.set_calls, [0.050])
+        self.assertIs(display.ShowParenthesis, True)
+        data = answer["data"]
+        self.assertEqual((data["previous_parentheses"], data["parentheses"]), (False, True))
+        self.assertEqual((data["previous_driven"], data["driven"]), (False, False))
+        self.assertEqual((data["previous_value_mm"], data["actual_value_mm"]), (25.0, 50.0))
+
+    def test_refused_parentheses_write_no_value(self) -> None:
+        doc, dimension = self.case()
+        answer = self.call(doc, FakeStyleDisplay(p_takes=False), parentheses=True, value_mm=50)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(dimension.set_calls, [])
+        self.assertEqual(doc.rebuilds, 0)
+        self.assertIn("50.0 mm was not set", answer["message"])
+
+    def test_refused_value_after_the_parentheses_reports_them(self) -> None:
+        doc, dimension = self.case()
+        doc._on_rebuild = during_rebuild(dimension, 0.025)   # an equation drives the value back
+        display = FakeStyleDisplay()
+        answer = self.call(doc, display, parentheses=True, value_mm=50)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn("did not apply", answer["message"])
+        self.assertIs(answer["data"]["parentheses"], True)
+        self.assertIs(display.ShowParenthesis, True)
+        self.assertEqual(answer["data"]["actual_value_mm"], 25.0)
+
+    def test_refused_diametric_leaves_the_parentheses_untouched(self) -> None:
+        doc, _ = self.case()
+        display = FakeStyleDisplay(takes=False)
+        answer = self.call(doc, display, diametric=True, parentheses=True)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(display.p_writes, 0)
+        self.assertIn("did not switch", answer["message"])
+
+    def test_refused_parentheses_after_diametric_say_the_display_stays(self) -> None:
+        doc, _ = self.case()
+        display = FakeStyleDisplay(p_takes=False)
+        answer = self.call(doc, display, diametric=True, parentheses=True)
+        self.assertFalse(answer["ok"], answer)
+        self.assertIs(answer["data"]["diametric"], True)
+        self.assertIn("diameter display was set before and stays", answer["message"])
+
+    def test_diametric_and_parentheses_together(self) -> None:
+        doc, _ = self.case()
+        answer = self.call(doc, FakeStyleDisplay(), diametric=True, parentheses=True)
+        self.assertTrue(answer["ok"], answer)
+        self.assertIs(answer["data"]["diametric"], True)
+        self.assertIs(answer["data"]["parentheses"], True)
+        self.assertEqual(answer["data"]["value_mm"], 25.0)
+        self.assertIn("diametric display and parentheses on", answer["message"])
+
+    def test_nothing_to_set_names_parentheses(self) -> None:
+        doc, _ = self.case()
+        answer = self.call(doc, FakeStyleDisplay())
+        self.assertFalse(answer["ok"])
+        self.assertIn("diametric, or parentheses", answer["message"])
+
+
 class FakeLine:
     """A sketch line for _anchor_sketch: GetType 0 (swSketchLINE) and its ends in metres."""
 
