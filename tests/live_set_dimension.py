@@ -36,6 +36,11 @@ extrude 10 mm (40 000 mm³), where changes do apply.  Checks:
     centerline.  set_dimension with diametric true alone, in the open sketch and again after close_sketch, and with
     diametric true and value_mm 50 in the open sketch, each answers either ok false with the line still at 25 and the
     dimension still 25, or ok true with diametric true and the line still at 25 (a real diameter);
+(k) parentheses (ClauSW#156): part K again.  parentheses true alone on the width 80 answers ok true with
+    previous_parentheses false, parentheses true, driven false before and after and the value 80 before and after;
+    the width then reads ShowParenthesis true and the height 50 false, volume 40 000.  The same on the extrude depth
+    (a feature dimension).  value_mm 60 with parentheses true on the height applies both, volume 48 000.  parentheses
+    false on the width answers ok true and the width reads false again, still 80 and driving, volume 48 000;
 (h) recorded, not asserted: F's recovery edit_sketch → set_dimension 5 → close_sketch, then the sketch state and the
     volume; and the time of every set_dimension call.
 
@@ -44,7 +49,7 @@ Run this only on a workstation with SOLIDWORKS already running and nothing else 
     ..\\.venv\\Scripts\\python.exe tests\\live_set_dimension.py
 
 Every part is closed without saving.  The output is one JSON object, also when a step raises; exit code 0 when (a)
-to (g), (i) and (j) hold.
+to (g) and (i) to (k) hold.
 """
 
 from __future__ import annotations
@@ -60,7 +65,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import solidworks_mcp.server  # noqa: E402,F401  (registers every tool)
-from solidworks_mcp.sw_core import HANDLERS  # noqa: E402
+from solidworks_mcp.sw_core import HANDLERS, active_document  # noqa: E402
+from solidworks_mcp.sw_sketch import _display_dimension, _display_flag  # noqa: E402
 
 CORNERS = [(0, 0, 5), (90, 0, 8), (70, 50, 5), (10, 40, 8)]
 F_VOLUME = 33505.8996
@@ -264,6 +270,61 @@ def part_l(run: Run) -> None:
         run.close_part("l", title)
 
 
+def parentheses_now(name: str) -> bool | None:
+    """ShowParenthesis of the model dimension as SOLIDWORKS reads it now, found afresh through the feature tree."""
+    _, doc = active_document()
+    display = _display_dimension(doc, name)
+    return None if display is None else _display_flag(display, "ShowParenthesis")
+
+
+def part_p(run: Run) -> None:
+    """(k)"""
+    checks, recorded = run.report["checks"], run.report["recorded"]
+    title = run.new_part()
+    try:
+        extrude = run.build_k()
+        checks["k_p_built"] = close_to(run.volume(), 40000)
+        width, height, depth = run.dimension("K_Skizze", 80), run.dimension("K_Skizze", 50), run.dimension(extrude, 10)
+
+        def unchanged(answer: dict[str, Any], before: bool, after: bool, value_mm: float) -> bool:
+            return (answer.get("ok") is True
+                    and (data(answer, "previous_parentheses"), data(answer, "parentheses")) == (before, after)
+                    and (data(answer, "previous_driven"), data(answer, "driven")) == (False, False)
+                    and close_to(data(answer, "previous_value_mm"), value_mm, 1e-6)
+                    and close_to(data(answer, "actual_value_mm"), value_mm, 1e-6))
+
+        on = run.call("set_dimension", {"full_name": width, "parentheses": True})
+        recorded["k_on"] = on
+        states = {"width": parentheses_now(width), "height": parentheses_now(height)}
+        recorded["k_on_states"] = states
+        checks["k_parentheses_on"] = (unchanged(on, False, True, 80) and states == {"width": True, "height": False}
+                                      and close_to(run.volume(), 40000))
+
+        feature = run.call("set_dimension", {"full_name": depth, "parentheses": True})
+        recorded["k_feature"] = feature
+        checks["k_feature_dimension"] = (unchanged(feature, False, True, 10) and parentheses_now(depth) is True
+                                         and close_to(run.volume(), 40000))
+
+        both = run.call("set_dimension", {"full_name": height, "value_mm": 60, "parentheses": True})
+        recorded["k_value_and_parentheses"] = both
+        checks["k_value_and_parentheses"] = (both.get("ok") is True and data(both, "parentheses") is True
+                                             and close_to(data(both, "actual_value_mm"), 60, 1e-6)
+                                             and data(both, "driven") is False and parentheses_now(height) is True
+                                             and close_to(run.volume(), 48000))
+
+        off = run.call("set_dimension", {"full_name": width, "parentheses": False})
+        recorded["k_off"] = off
+        rows = data(run.call("list_dimensions", {"feature_name": "K_Skizze"}), "dimensions", []) or []
+        recorded["k_rows_after"] = rows
+        width_row = next((r for r in rows if r.get("full_name") == width), {})
+        checks["k_parentheses_off"] = (unchanged(off, True, False, 80) and parentheses_now(width) is False
+                                       and width_row.get("driven") is False
+                                       and close_to(width_row.get("value_mm"), 80, 1e-6)
+                                       and close_to(run.volume(), 48000))
+    finally:
+        run.close_part("p", title)
+
+
 def main() -> int:
     run = Run()
     try:
@@ -271,6 +332,7 @@ def main() -> int:
         part_k(run)
         part_f_open(run)
         part_l(run)
+        part_p(run)
     finally:
         print(json.dumps(run.report, indent=2, default=str))
     checks = run.report["checks"]

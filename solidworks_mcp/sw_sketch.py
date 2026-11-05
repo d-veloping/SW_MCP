@@ -996,7 +996,7 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
         # diameter in the UI, does nothing through AddDimension2; the display
         # dimension's Diametric property is the switch.  Set it before the
         # value, so the value is applied as a diameter.
-        why = _switch_diametric(display, True)
+        why = _switch_display(display, "Diametric", True)
         if why:
             # A value set now would be applied as the plain distance and move the geometry (#75), so none is set
             # and the new dimension goes again.
@@ -1121,19 +1121,30 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Added a dimension.", **data)
 
 
-def _switch_diametric(display: Any, wanted: bool) -> str:
-    """Set ``IDisplayDimension.Diametric`` and read it back; the reason it did not take, empty when it did."""
+def _switch_display(display: Any, prop: str, wanted: bool) -> str:
+    """Set a boolean IDisplayDimension property (``Diametric``, ``ShowParenthesis``) and read it back from the same
+    object; the reason it did not take, empty when it did.  Anything but a real bool equal to ``wanted`` counts as
+    not taken."""
     try:
-        display.Diametric = wanted
+        setattr(display, prop, wanted)
     except Exception as exc:
-        return f"setting Diametric raised {type(exc).__name__}: {exc}"
+        return f"setting {prop} raised {type(exc).__name__}: {exc}"
     try:
-        actual = display.Diametric
+        actual = getattr(display, prop)
     except Exception as exc:
-        return f"Diametric cannot be read back ({type(exc).__name__}: {exc})"
+        return f"{prop} cannot be read back ({type(exc).__name__}: {exc})"
     if not isinstance(actual, bool) or actual is not wanted:
-        return f"Diametric reads {actual!r}, not {wanted}"
+        return f"{prop} reads {actual!r}, not {wanted}"
     return ""
+
+
+def _display_flag(display: Any, prop: str) -> bool | None:
+    """A boolean IDisplayDimension property as read now, None when it cannot be read or is no bool."""
+    try:
+        actual = getattr(display, prop)
+    except Exception:
+        return None
+    return actual if isinstance(actual, bool) else None
 
 
 def _diametric_refused(doc: Any, display: Any, dimension: Any, why: str, **data: Any) -> dict[str, Any]:
@@ -1229,7 +1240,18 @@ def _same_sketch(open_sketch: Any, owner_sketch: Any | None) -> bool:
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
     "find names. Linear values are millimetres, angular values are degrees. diametric switches a "
     "dimension measured to a centerline between radius and diameter display; when Diametric does not read back "
-    "the requested state, ok is false and no value is written. A value change is "
+    "the requested state, ok is false and no value is written. parentheses shows the dimension's value in "
+    "parentheses (true) or without them (false); it may come alone or with a value or diametric. The display "
+    "changes come first, diametric before parentheses, each read back from the display dimension right after the "
+    "write: one that does not read back is ok false, nothing after it is written, and a change made before it stays "
+    "(the answer reports it). A later value change that fails leaves the parentheses as the answer reports them. With "
+    "parentheses the answer carries previous_parentheses and previous_driven as read just before the parentheses "
+    "change, then parentheses (the readback) and driven; without a value also previous_ and actual_ value_mm, "
+    "value_deg or value (keyed as in list_dimensions), with a value the fields of a value change. When the "
+    "parentheses do not take, the answer carries the previous_ fields and parentheses as read then. Value and driven "
+    "are reported, only parentheses is judged. "
+    "A drawing copies the parentheses when insert_model_annotations brings in the model dimensions and does not follow "
+    "a later change in the model, so set them before the drawing is made. A value change is "
     "rebuilt (unless its own sketch is open), read back, and judged by the owning sketch's solve "
     "state: ok is false when the value did not stick or the sketch is left over_defined, no_solution "
     "or invalid_solution, because the geometry then did not move; a sketch state that cannot be read "
@@ -1239,6 +1261,7 @@ def _same_sketch(open_sketch: Any, owner_sketch: Any | None) -> bool:
         "value_mm": {"type": "number"},
         "value_deg": {"type": "number"},
         "diametric": {"type": "boolean", "description": "Show the dimension as a diameter (true) or as the plain distance (false)."},
+        "parentheses": {"type": "boolean", "description": "Show the value in parentheses (true) or without them (false)."},
     },
     ["full_name"],
 )
@@ -1248,16 +1271,17 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
     dimension = doc.Parameter(name)
     if dimension is None:
         return result(False, f"No dimension named '{name}' exists. Call list_dimensions to see valid names.")
+    restyle = args.get("diametric") is not None or args.get("parentheses") is not None
     if args.get("value_mm") is not None:
         target, unit, convert = to_m(args["value_mm"]), "mm", to_mm
         applied: dict[str, Any] = {"value_mm": float(args["value_mm"])}
     elif args.get("value_deg") is not None:
         target, unit, convert = to_rad(args["value_deg"]), "deg", to_deg
         applied = {"value_deg": float(args["value_deg"])}
-    elif args.get("diametric") is not None:
+    elif restyle:
         target, unit, convert, applied = None, "", to_mm, {}
     else:
-        return result(False, "Pass value_mm, value_deg, or diametric.")
+        return result(False, "Pass value_mm, value_deg, diametric, or parentheses.")
 
     owner, owner_sketch = "", None
     if target is not None:
@@ -1275,37 +1299,59 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
                 **applied,
             )
 
-    if args.get("diametric") is not None:
+    display = None
+    if restyle:
         display = _display_dimension(doc, name)
         if display is None:
             return result(False, f"No display dimension named '{name}' was found to restyle.")
+    not_set = f" {applied[f'value_{unit}']} {unit} was not set." if target is not None else ""
+    if args.get("diametric") is not None:
         wanted = bool(args["diametric"])
-        why = _switch_diametric(display, wanted)
+        why = _switch_display(display, "Diametric", wanted)
         if why:
             # A value written now would land as the other measure (distance instead of diameter or back) and move
             # the geometry (#75), so nothing is written.
             mode = "diameter" if wanted else "plain distance"
-            not_set = f" {applied[f'value_{unit}']} {unit} was not set." if target is not None else ""
             return result(False, f"SOLIDWORKS did not switch {name} to the {mode} display ({why}).{not_set}",
                           diametric=safe(display, "Diametric"), owner=owner, **applied)
         applied["diametric"] = wanted
+    before: dict[str, Any] = {}
+    if args.get("parentheses") is not None:
+        # Parentheses change neither value nor driven state (ClauSW#156, measured on 2016 SP3); the answer reports
+        # both before and after so the caller can see it.
+        wanted = bool(args["parentheses"])
+        before = {"previous_parentheses": _display_flag(display, "ShowParenthesis"),
+                  "previous_driven": _driven(_driven_state(dimension))}
+        if target is None:
+            before.update(_value_reading(dimension, "previous_"))
+        why = _switch_display(display, "ShowParenthesis", wanted)
+        if why:
+            kept = (f" The {'diameter' if applied['diametric'] else 'plain distance'} display was set before and stays."
+                    if "diametric" in applied else "")
+            return result(False, f"SOLIDWORKS did not {'set' if wanted else 'clear'} the parentheses on {name} "
+                          f"({why}).{not_set}{kept}",
+                          parentheses=_display_flag(display, "ShowParenthesis"), owner=owner, **before, **applied)
+        applied["parentheses"] = wanted
     if target is None:
         if doc.SketchManager.ActiveSketch is None:
             rebuild(doc)
-        actual = float(safe(dimension, "SystemValue", 0.0) or 0.0)
-        return result(
-            True,
-            f"Set {name} to {'diametric' if applied['diametric'] else 'linear'} display.",
-            value_mm=round(to_mm(actual), 6),
-            **applied,
-        )
+        done = []
+        if "diametric" in applied:
+            done.append(f"{'diametric' if applied['diametric'] else 'linear'} display")
+            applied["value_mm"] = round(to_mm(float(safe(dimension, "SystemValue", 0.0) or 0.0)), 6)
+        if "parentheses" in applied:
+            done.append(f"parentheses {'on' if applied['parentheses'] else 'off'}")
+            applied.update(before, driven=_driven(_driven_state(dimension)), **_value_reading(dimension, "actual_"))
+        return result(True, f"Set {name} to {' and '.join(done)}.", **applied)
 
     previous = _system_value(dimension)
     status_before = sketch_status(owner_sketch) if owner_sketch is not None else None
     flag_methods(dimension, "SetSystemValue3")
     code = int(dimension.SetSystemValue3(target, 2, empty_variant()))
     actual = _system_value(dimension)
-    data: dict[str, Any] = {**applied, "owner": owner}
+    data: dict[str, Any] = {**applied, **before, "owner": owner}
+    if "parentheses" in applied:
+        data["driven"] = _driven(_driven_state(dimension))
     if owner_sketch is not None:
         data["sketch_status_before"] = status_before
     requested = data[f"value_{unit}"]
@@ -1337,6 +1383,8 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
         # After the rebuild SystemValue reads the stored value again: the old one
         # when the solver rejected the change (measured 2026-10-09 on 2016 SP3).
         actual = _system_value(dimension)
+        if "parentheses" in applied:
+            data["driven"] = _driven(_driven_state(dimension))
     status_after = sketch_status(owner_sketch) if owner_sketch is not None else None
     data[f"actual_value_{unit}"] = _rounded(convert, actual)
     if owner_sketch is not None:
@@ -1381,6 +1429,18 @@ def _system_value(dimension: Any) -> float | None:
 
 def _rounded(convert: Any, raw: float | None) -> float | None:
     return round(convert(raw), 6) if raw is not None else None
+
+
+def _value_reading(dimension: Any, prefix: str) -> dict[str, Any]:
+    """``IDimension.SystemValue`` under ``prefix`` plus the key its kind asks for (value_mm, value_deg or value, as in
+    list_dimensions), None when the value cannot be read."""
+    raw = _system_value(dimension)
+    try:
+        kind = int(safe(dimension, "GetType", 0) or 0)
+    except (TypeError, ValueError):
+        kind = 0
+    ((key, reading),) = dimension_value(kind, raw if raw is not None else 0.0).items()
+    return {prefix + key: reading if raw is not None else None}
 
 
 # swDimensionDrivenState_e

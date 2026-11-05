@@ -158,6 +158,17 @@ Editing: `sketch_fillet`, `sketch_chamfer`, `sketch_trim`, `sketch_offset`,
 
 Parametrics: `add_relation`, `add_dimension`, `set_dimension`, `list_dimensions`.
 
+`set_dimension` with `parentheses` shows a model dimension's value in
+parentheses (`true`) or clears them (`false`), alone or together with a value
+or `diametric`. It sets `IDisplayDimension.ShowParenthesis` and counts only
+what the same object reads back: a refused, raising or unreadable state is
+`ok: false`, nothing after it is written, and the dimension keeps its value.
+Its answer reports the parentheses, `driven` and the value before and after
+the change; only the parentheses decide `ok`.
+A drawing copies the parentheses when `insert_model_annotations` brings in the
+model dimensions and keeps them when the model changes afterwards (measured on
+2016 SP3, d-veloping/ClauSW#156), so set them before the drawing is made.
+
 `draw_hole_circle` draws the seed of a centred bolt-hole pattern in the open,
 empty sketch in one call: a construction pitch circle around the origin, one
 hole on it at `start_angle_deg`, a construction radius line and, off the
