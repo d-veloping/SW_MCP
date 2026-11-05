@@ -18,8 +18,8 @@ Run this only on a workstation with SOLIDWORKS already running:
 
     ..\\.venv\\Scripts\\python.exe tests\\live_template_path.py [--template C:\\path\\to\\Other.prtdot]
 
-Without `--template` the part template configured in SOLIDWORKS is copied under another name into a temporary
-folder, so the named template is a file SOLIDWORKS does not have as its default. The script creates a part from it
+Without `--template` the default part template set in SOLIDWORKS (swDefaultTemplatePart = 8) is copied under another
+name into a temporary folder, so the named template is a file SOLIDWORKS does not have as its default. The script creates a part from it
 and checks that the answer names exactly that file as `argument` and that the new part is the active document; then
 it checks that a relative path, a missing file and an assembly template create nothing (the list of open documents
 stays the same). The SOLIDWORKS settings are only read, never changed. The part it created is closed without saving.
@@ -60,7 +60,7 @@ def main() -> int:
         if not condition:
             failures.append(text)
 
-    default = str(running_app().GetUserPreferenceStringValue(1) or "")
+    default = str(running_app().GetUserPreferenceStringValue(8) or "")   # swDefaultTemplatePart
     print(f"SOLIDWORKS default part template: {default!r}")
     with tempfile.TemporaryDirectory() as folder:
         if args.template:

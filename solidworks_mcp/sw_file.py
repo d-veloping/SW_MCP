@@ -162,8 +162,9 @@ def _identity(doc: Any) -> tuple[str, str] | None:
 @tool(
     "create_new_document",
     "Create a new SOLIDWORKS part, assembly, or drawing and wait until SOLIDWORKS reports it as the active document. "
-    "Without `template_path` the template is the default configured in SOLIDWORKS (Tools > Options > File "
-    "Locations), or one found on disk when none is configured. With `template_path` it is exactly that file: an "
+    "Without `template_path` the template is chosen as before: the file SOLIDWORKS returns for user preference "
+    "1/2/3 (part/assembly/drawing), or one found on disk when that is no file (#36: these are not the default-"
+    "template preferences). With `template_path` it is exactly that file: an "
     "absolute path to an existing template whose extension fits `kind` (.prtdot, .asmdot, .drwdot); any other value "
     "fails before a document is created, never falling back to the default. The answer names the file handed to "
     "SOLIDWORKS in `template` and where it came from in `template_source` (argument, preference, discovered). Fails "
