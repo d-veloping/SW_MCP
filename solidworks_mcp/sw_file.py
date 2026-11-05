@@ -50,6 +50,7 @@ from .sw_core import (
     selected_objects,
     sketch_features,
     discover_template,
+    TEMPLATE_SUFFIXES,
     tool,
     value,
     whats_wrong,
@@ -160,37 +161,72 @@ def _identity(doc: Any) -> tuple[str, str] | None:
 
 @tool(
     "create_new_document",
-    "Create a new SOLIDWORKS part, assembly, or drawing from the configured default template and wait until "
-    "SOLIDWORKS reports it as the active document. Fails (with the new document in `document`) if another document "
-    "becomes active or the new one is not active within a few seconds; it never activates a document itself.",
-    {"kind": {"type": "string", "enum": ["part", "assembly", "drawing"]}},
+    "Create a new SOLIDWORKS part, assembly, or drawing and wait until SOLIDWORKS reports it as the active document. "
+    "Without `template_path` the template is the default configured in SOLIDWORKS (Tools > Options > File "
+    "Locations), or one found on disk when none is configured. With `template_path` it is exactly that file: an "
+    "absolute path to an existing template whose extension fits `kind` (.prtdot, .asmdot, .drwdot); any other value "
+    "fails before a document is created, never falling back to the default. The answer names the file handed to "
+    "SOLIDWORKS in `template` and where it came from in `template_source` (argument, preference, discovered). Fails "
+    "(with the new document in `document`) if another document becomes active or the new one is not active within a "
+    "few seconds; it never activates a document itself.",
+    {
+        "kind": {"type": "string", "enum": ["part", "assembly", "drawing"]},
+        "template_path": {
+            "type": "string",
+            "description": "Absolute path of the template to use instead of the SOLIDWORKS default.",
+        },
+    },
     ["kind"],
 )
 def create_new_document(args: dict[str, Any]) -> dict[str, Any]:
-    return new_document(str(args["kind"]))
+    return new_document(str(args["kind"]), args.get("template_path"))
 
 
-def new_document(kind: str) -> dict[str, Any]:
-    return _new_document(kind)[0]
+def new_document(kind: str, template_path: Any = None) -> dict[str, Any]:
+    return _new_document(kind, template_path)[0]
 
 
-def _new_document(kind: str) -> tuple[dict[str, Any], Any]:
+def _requested_template(kind: str, template_path: Any) -> tuple[str | None, str | None]:
+    """The template a caller named, as (path, None), or (None, why it cannot be used). Only an absolute path to an
+    existing file with the template extension of `kind` counts; nothing is resolved or searched."""
+    if not isinstance(template_path, str) or not template_path.strip():
+        return None, f"template_path must be a non-empty string, got {template_path!r}."
+    path = Path(template_path)
+    if not path.is_absolute():
+        return None, f"template_path must be an absolute path, got {template_path!r}."
+    suffix = TEMPLATE_SUFFIXES[kind]
+    if path.suffix.lower() != suffix:
+        return None, f"template_path for a {kind} must end in {suffix}, got {template_path!r}."
+    if not path.is_file():
+        return None, f"template_path {template_path!r} is not an existing file."
+    return str(path), None
+
+
+def _new_document(kind: str, template_path: Any = None) -> tuple[dict[str, Any], Any]:
     """new_document plus the COM object of the new document (None when none was created), for callers that go on
     working on exactly this document instead of whatever ActiveDoc reports."""
     app = running_app()
     preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
     if preference is None:
         return result(False, "kind must be part, assembly, or drawing."), None
-    template = app.GetUserPreferenceStringValue(preference)
-    if not template or not Path(str(template)).is_file():
-        fallback = discover_template(kind)
-        if fallback is None:
-            return result(
-                False,
-                f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
-                "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
-            ), None
-        template = str(fallback)
+    if template_path is not None:
+        template, problem = _requested_template(kind, template_path)
+        if template is None:
+            return result(False, f"No {kind} document created: {problem}"), None
+        source = "argument"
+    else:
+        template, source = app.GetUserPreferenceStringValue(preference), "preference"
+        if not template or not Path(str(template)).is_file():
+            fallback = discover_template(kind)
+            if fallback is None:
+                return result(
+                    False,
+                    f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
+                    "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
+                ), None
+            template, source = str(fallback), "discovered"
+        template = str(template)
+    used = {"template": template, "template_source": source}
     previous = _identity(app.ActiveDoc)
     doc = app.NewDocument(template, 0, 0.0, 0.0)
     if doc is None:
@@ -204,14 +240,15 @@ def _new_document(kind: str) -> tuple[dict[str, Any], Any]:
         identity = _identity(active)
         waited = round((time.monotonic() - started) * 1000)
         if identity == own:
-            return result(True, f"Created new {kind} document.", document=created, activated=True, wait_ms=waited), doc
+            return result(True, f"Created new {kind} document.", document=created, activated=True, wait_ms=waited,
+                          **used), doc
         if identity != previous:
             return result(
                 False,
                 f"Created new {kind} document '{own[0]}', but SOLIDWORKS made another document active "
                 f"('{identity[0] if identity else 'none'}'); nothing should be done in either.",
                 document=created, activated=False, wait_ms=waited,
-                active_document=None if active is None else document_info(active),
+                active_document=None if active is None else document_info(active), **used,
             ), doc
         if time.monotonic() - started >= NEW_DOCUMENT_ACTIVATION_S:
             return result(
@@ -219,7 +256,7 @@ def _new_document(kind: str) -> tuple[dict[str, Any], Any]:
                 f"Created new {kind} document '{own[0]}', but SOLIDWORKS still reports the previous document "
                 f"('{identity[0] if identity else 'none'}') as active after {waited} ms.",
                 document=created, activated=False, wait_ms=waited,
-                active_document=None if active is None else document_info(active),
+                active_document=None if active is None else document_info(active), **used,
             ), doc
         time.sleep(NEW_DOCUMENT_POLL_S)
 

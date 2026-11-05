@@ -132,7 +132,7 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | --- | --- |
 | `solidworks_status` | Verify the connection; report version and active document. |
 | `get_active_document_info` | Title, path, type, unsaved state (`dirty`, null when it cannot be read). |
-| `create_new_document` | New part / assembly / drawing from the default template. |
+| `create_new_document` | New part / assembly / drawing from the default template, or with `template_path` from exactly that template (absolute path, existing file, extension fitting the kind; anything else creates nothing). Reports the file handed to SOLIDWORKS as `template` and `template_source` (`argument`, `preference`, `discovered`). |
 | `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw` and wait until it is the active document; reports the opened document and `already_open` (was the file open before the call). |
 | `list_open_documents` / `close_document` | Every open document with title and path; close one without saving, with `only_if_clean` only if it has no unsaved changes. |
 | `activate_document` | Activate the open document with exactly this title and wait until it is active; for a caller that created the document itself and lost the focus. Activates nothing for an unknown, duplicate or unreadable title. |

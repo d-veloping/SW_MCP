@@ -24,6 +24,7 @@ a switch someone made by hand.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -62,12 +63,17 @@ class FakeApp:
         self.new = new
         self.created = False
         self.reads_after = 0
+        self.preference = __file__   # any existing file stands in for the configured template
+        self.preference_reads = 0
+        self.templates: list[str] = []
 
     def GetUserPreferenceStringValue(self, preference: int) -> str:  # noqa: N802 - COM member name
-        return __file__   # any existing file stands in for the template
+        self.preference_reads += 1
+        return self.preference
 
     def NewDocument(self, template, size, width, height):  # noqa: N802 - COM member name
         self.created = True
+        self.templates.append(template)
         return self.new
 
     @property
@@ -117,6 +123,8 @@ class NewDocumentActivationTests(unittest.TestCase):
         self.assertTrue(answer["data"]["activated"])
         self.assertEqual(answer["data"]["wait_ms"], 0)
         self.assertEqual(clock.sleeps, 0)
+        self.assertEqual(answer["data"]["template"], __file__)
+        self.assertEqual(answer["data"]["template_source"], "preference")
 
     def test_waits_while_exactly_the_previous_document_is_active(self) -> None:
         answer, clock = self.create(FakeApp(PREVIOUS, [PREVIOUS, PREVIOUS, FakeDoc("Part1"), NEW], NEW))
@@ -140,6 +148,7 @@ class NewDocumentActivationTests(unittest.TestCase):
                 self.assertEqual(data["document"]["title"], "Part2")
                 self.assertFalse(data["activated"])
                 self.assertIn("wait_ms", data)
+                self.assertEqual((data["template"], data["template_source"]), (__file__, "preference"))
                 third = next(d for d in after if d is not PREVIOUS)
                 self.assertEqual(data["active_document"], None if third is None else sw_file.document_info(third))
                 self.assertEqual(app.reads_after, after.index(third) + 1)   # no read after the third one
@@ -154,11 +163,93 @@ class NewDocumentActivationTests(unittest.TestCase):
         self.assertLessEqual(data["wait_ms"], (sw_file.NEW_DOCUMENT_ACTIVATION_S + sw_file.NEW_DOCUMENT_POLL_S) * 1000)
         self.assertEqual(data["active_document"]["title"], "Part1")
         self.assertIn("previous", answer["message"])
+        self.assertEqual((data["template"], data["template_source"]), (__file__, "preference"))
 
     def test_no_document_from_new_document_is_a_plain_failure(self) -> None:
         answer, _ = self.create(FakeApp(PREVIOUS, [PREVIOUS], None))
         self.assertFalse(answer["ok"])
         self.assertNotIn("data", answer)
+
+
+class TemplatePathTests(unittest.TestCase):
+    """template_path names exactly the template; a value that cannot be used creates no document and never falls
+    back to the SOLIDWORKS default."""
+
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        self.part = self.folder / "Standard Part.prtdot"
+        self.drawing = self.folder / "Standard Drawing.DRWDOT"
+        for template in (self.part, self.drawing):
+            template.write_bytes(b"")
+
+    def create(self, app: FakeApp, kind: str = "part", **extra) -> dict:
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app),                 unittest.mock.patch.object(sw_file, "discover_template", side_effect=AssertionError("no search")):
+            return sw_file.create_new_document({"kind": kind, **extra})
+
+    def test_named_template_is_handed_to_solidworks_and_reported(self) -> None:
+        app = FakeApp(PREVIOUS, [NEW], NEW)
+        answer = self.create(app, template_path=str(self.part))
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(app.templates, [str(self.part)])
+        self.assertEqual(app.preference_reads, 0)
+        self.assertEqual(answer["data"]["template"], str(self.part))
+        self.assertEqual(answer["data"]["template_source"], "argument")
+
+    def test_extension_is_matched_without_case_and_per_kind(self) -> None:
+        app = FakeApp(PREVIOUS, [NEW], NEW)
+        answer = self.create(app, "drawing", template_path=str(self.drawing))
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(app.templates, [str(self.drawing)])
+
+    def test_named_template_is_reported_on_a_failed_activation(self) -> None:
+        clock = Clock()
+        with unittest.mock.patch.object(sw_file.time, "monotonic", clock.monotonic),                 unittest.mock.patch.object(sw_file.time, "sleep", clock.sleep):
+            answer = self.create(FakeApp(PREVIOUS, [THIRD], NEW), template_path=str(self.part))
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(answer["data"]["document"]["title"], "Part2")
+        self.assertEqual((answer["data"]["template"], answer["data"]["template_source"]), (str(self.part), "argument"))
+
+    def test_unusable_template_path_creates_nothing(self) -> None:
+        cases = {
+            "relative": "Standard Part.prtdot",
+            "drive relative": "C:Standard Part.prtdot",
+            "missing file": str(self.folder / "Fehlt.prtdot"),
+            "folder": str(self.folder / "Ordner.prtdot"),
+            "assembly template for a part": str(self.part.with_suffix(".asmdot")),
+            "drawing template for a part": str(self.drawing),
+            "empty": "",
+            "blank": "   ",
+            "not a string": 12,
+        }
+        (self.folder / "Ordner.prtdot").mkdir()
+        self.part.with_suffix(".asmdot").write_bytes(b"")
+        for name, template_path in cases.items():
+            with self.subTest(name):
+                app = FakeApp(PREVIOUS, [NEW], NEW)
+                answer = self.create(app, template_path=template_path)
+                self.assertFalse(answer["ok"], answer)
+                self.assertIn("template_path", answer["message"])
+                self.assertNotIn("data", answer)
+                self.assertFalse(app.created)
+                self.assertEqual(app.preference_reads, 0)
+
+    def test_part_template_for_a_drawing_creates_nothing(self) -> None:
+        app = FakeApp(PREVIOUS, [NEW], NEW)
+        answer = self.create(app, "drawing", template_path=str(self.part))
+        self.assertFalse(answer["ok"], answer)
+        self.assertIn(".drwdot", answer["message"])
+        self.assertFalse(app.created)
+
+    def test_without_template_path_a_discovered_template_is_reported_as_such(self) -> None:
+        app = FakeApp(PREVIOUS, [NEW], NEW)
+        app.preference = ""
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app),                 unittest.mock.patch.object(sw_file, "discover_template", return_value=self.part):
+            answer = sw_file.create_new_document({"kind": "part"})
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(app.templates, [str(self.part)])
+        self.assertEqual((answer["data"]["template"], answer["data"]["template_source"]), (str(self.part), "discovered"))
 
 
 if __name__ == "__main__":
