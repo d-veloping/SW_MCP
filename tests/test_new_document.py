@@ -185,7 +185,8 @@ class TemplatePathTests(unittest.TestCase):
             template.write_bytes(b"")
 
     def create(self, app: FakeApp, kind: str = "part", **extra) -> dict:
-        with unittest.mock.patch.object(sw_file, "running_app", return_value=app),                 unittest.mock.patch.object(sw_file, "discover_template", side_effect=AssertionError("no search")):
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app), \
+                unittest.mock.patch.object(sw_file, "discover_template", side_effect=AssertionError("no search")):
             return sw_file.create_new_document({"kind": kind, **extra})
 
     def test_named_template_is_handed_to_solidworks_and_reported(self) -> None:
@@ -205,7 +206,8 @@ class TemplatePathTests(unittest.TestCase):
 
     def test_named_template_is_reported_on_a_failed_activation(self) -> None:
         clock = Clock()
-        with unittest.mock.patch.object(sw_file.time, "monotonic", clock.monotonic),                 unittest.mock.patch.object(sw_file.time, "sleep", clock.sleep):
+        with unittest.mock.patch.object(sw_file.time, "monotonic", clock.monotonic), \
+                unittest.mock.patch.object(sw_file.time, "sleep", clock.sleep):
             answer = self.create(FakeApp(PREVIOUS, [THIRD], NEW), template_path=str(self.part))
         self.assertFalse(answer["ok"], answer)
         self.assertEqual(answer["data"]["document"]["title"], "Part2")
@@ -245,7 +247,8 @@ class TemplatePathTests(unittest.TestCase):
     def test_without_template_path_a_discovered_template_is_reported_as_such(self) -> None:
         app = FakeApp(PREVIOUS, [NEW], NEW)
         app.preference = ""
-        with unittest.mock.patch.object(sw_file, "running_app", return_value=app),                 unittest.mock.patch.object(sw_file, "discover_template", return_value=self.part):
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app), \
+                unittest.mock.patch.object(sw_file, "discover_template", return_value=self.part):
             answer = sw_file.create_new_document({"kind": "part"})
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(app.templates, [str(self.part)])
