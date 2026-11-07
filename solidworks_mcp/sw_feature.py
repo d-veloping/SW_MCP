@@ -56,7 +56,9 @@ from .sw_core import (
     selectable,
     SELECTION_SCHEMA,
     select_sketch_for_feature,
+    THIN_SIDES,
     tool,
+    ToolFailure,
     to_m,
     to_rad,
     value,
@@ -102,6 +104,75 @@ def _two_direction_end_conditions(condition: int) -> tuple[bool, int, int]:
     return True, condition, 0
 
 
+_THIN_SCHEMA = {
+    "thin_mm": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Wall thickness in millimetres. Makes a thin feature: a wall of constant thickness along the "
+        "sketch contour, which may be open (an L, a U, a line) or closed (a tube). Use it instead of a solid "
+        "feature followed by a cut of the same contour offset by the wall thickness.",
+    },
+    "thin_side": {
+        "type": "string",
+        "enum": sorted(THIN_SIDES),
+        "default": "one_side",
+        "description": "Where the wall grows from the contour: one_side, reverse (the other side), mid_plane "
+        "(half the thickness on each side), or two_side (thin_mm on one side, thin_mm_2 on the other).",
+    },
+    "thin_mm_2": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Second wall thickness in millimetres, only with thin_side two_side.",
+    },
+}
+
+
+def _number(args: dict[str, Any], key: str) -> float:
+    raw = args[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw <= 0:
+        raise ToolFailure(f"{key} must be a finite number greater than 0, got {raw!r}.")
+    return float(raw)
+
+
+def _thin_args(args: dict[str, Any]) -> tuple[int, float, float] | None:
+    """The thin-wall type and both thicknesses in metres, or None for a solid feature.
+
+    Checks every thin argument before the handler touches SOLIDWORKS: a thin side or a second thickness without
+    thin_mm, a second thickness without two_side, two_side without one, and a draft on a thin extrusion are refused.
+    """
+    has_thin = args.get("thin_mm") is not None
+    side_given = args.get("thin_side") is not None
+    second_given = args.get("thin_mm_2") is not None
+    if not has_thin:
+        if side_given or second_given:
+            raise ToolFailure("thin_side and thin_mm_2 need thin_mm.")
+        return None
+    thickness = _number(args, "thin_mm")
+    side = str(args.get("thin_side") or "one_side")
+    if side not in THIN_SIDES:
+        raise ToolFailure(f"thin_side must be one of {', '.join(sorted(THIN_SIDES))}, got {side!r}.")
+    second = 0.0
+    if side == "two_side":
+        if not second_given:
+            raise ToolFailure("thin_side two_side needs thin_mm_2.")
+        second = _number(args, "thin_mm_2")
+    elif second_given:
+        raise ToolFailure("thin_mm_2 only applies to thin_side two_side.")
+    if abs(float(args.get("draft_deg", 0) or 0)) > 1e-12:
+        raise ToolFailure("A thin feature takes no draft_deg.")
+    return THIN_SIDES[side], to_m(thickness), to_m(second)
+
+
+def _thin_data(args: dict[str, Any], thin: tuple[int, float, float] | None) -> dict[str, Any]:
+    """The thin arguments as the answer reports them; empty for a solid feature."""
+    if thin is None:
+        return {}
+    data: dict[str, Any] = {"thin_mm": args["thin_mm"], "thin_side": str(args.get("thin_side") or "one_side")}
+    if args.get("thin_mm_2") is not None:
+        data["thin_mm_2"] = args["thin_mm_2"]
+    return data
+
+
 # --------------------------------------------------------------------------
 # Extrude and cut
 # --------------------------------------------------------------------------
@@ -109,7 +180,9 @@ def _two_direction_end_conditions(condition: int) -> tuple[bool, int, int]:
 
 @tool(
     "boss_extrude",
-    "Extrude a sketch into a solid boss. Depth is millimetres, draft is degrees.",
+    "Extrude a sketch into a solid boss. Depth is millimetres, draft is degrees. With thin_mm the boss is a "
+    "thin feature: a wall of constant thickness along an open or closed contour, in one feature instead of a "
+    "solid boss plus a cut of the offset contour.",
     {
         "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10},
         "sketch_name": _SKETCH_ARG,
@@ -119,9 +192,11 @@ def _two_direction_end_conditions(condition: int) -> tuple[bool, int, int]:
         "draft_outward": {"type": "boolean", "default": False},
         "merge": {"type": "boolean", "default": True, "description": "Merge with existing solid bodies."},
         "name": {"type": "string", "description": "Rename the resulting feature."},
+        **_THIN_SCHEMA,
     },
 )
 def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
+    thin = _thin_args(args)
     _, doc = require_part()
     sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
     condition = END_CONDITIONS[str(args.get("end_condition", "blind"))]
@@ -130,22 +205,41 @@ def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
     draft = to_rad(args.get("draft_deg", 0))
     has_draft = abs(draft) > 1e-12
 
-    feature = feature_manager(doc).FeatureExtrusion3(
-        single_direction, False, bool(args.get("reverse", False)),
-        condition_1, condition_2, depth, depth,
-        has_draft, False, bool(args.get("draft_outward", False)), False,
-        draft, 0.0,
-        False, False, False, False,
-        bool(args.get("merge", True)), True, True,
-        0, 0.0, False,
-    )
+    if thin is None:
+        feature = feature_manager(doc).FeatureExtrusion3(
+            single_direction, False, bool(args.get("reverse", False)),
+            condition_1, condition_2, depth, depth,
+            has_draft, False, bool(args.get("draft_outward", False)), False,
+            draft, 0.0,
+            False, False, False, False,
+            bool(args.get("merge", True)), True, True,
+            0, 0.0, False,
+        )
+    else:
+        thin_type, thickness_1, thickness_2 = thin
+        # After Merge: Thk1, Thk2, EndThk, RevThinDir (swThinWallType_e), CapEnds, AddBends, BendRad.
+        feature = feature_manager(doc).FeatureExtrusionThin2(
+            single_direction, False, bool(args.get("reverse", False)),
+            condition_1, condition_2, depth, depth,
+            False, False, False, False,
+            0.0, 0.0,
+            False, False, False, False,
+            bool(args.get("merge", True)),
+            thickness_1, thickness_2, 0.0, thin_type, False, False, 0.0,
+            True, True,
+            0, 0.0, False,
+        )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "boss extrusion", sketch=sketch, depth_mm=args.get("depth_mm", 10))
+    action = "thin boss extrusion" if thin else "boss extrusion"
+    return feature_result(
+        doc, feature, action, sketch=sketch, depth_mm=args.get("depth_mm", 10), **_thin_data(args, thin)
+    )
 
 
 @tool(
     "cut_extrude",
-    "Cut material using a sketch profile. Depth is millimetres, draft is degrees.",
+    "Cut material using a sketch profile. Depth is millimetres, draft is degrees. With thin_mm the cut is a "
+    "thin feature: it removes a wall of constant thickness along an open or closed contour, such as a groove.",
     {
         "depth_mm": {"type": "number", "exclusiveMinimum": 0, "default": 10},
         "sketch_name": _SKETCH_ARG,
@@ -154,9 +248,11 @@ def boss_extrude(args: dict[str, Any]) -> dict[str, Any]:
         "flip_side": {"type": "boolean", "default": False, "description": "Cut everything outside the profile instead."},
         "draft_deg": {"type": "number", "default": 0},
         "name": {"type": "string"},
+        **_THIN_SCHEMA,
     },
 )
 def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
+    thin = _thin_args(args)
     _, doc = require_part()
     condition = END_CONDITIONS[str(args.get("end_condition", "blind"))]
     single_direction, condition_1, condition_2 = _two_direction_end_conditions(condition)
@@ -167,6 +263,24 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
 
     def attempt(reverse: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
+        if thin is not None:
+            thin_type, thickness_1, thickness_2 = thin
+            thin_args = (
+                single_direction, bool(args.get("flip_side", False)), reverse,
+                condition_1, condition_2, depth, depth,
+                False, False, False, False,
+                0.0, 0.0,
+                False, False, False, False,
+                thickness_1, thickness_2, 0.0, thin_type, False, False, 0.0,
+                True, True,
+                0, 0.0, False,
+            )
+            # FeatureCutThin (2014-2016 builds) takes the same list without the start-condition triple.
+            return name, call_versioned(
+                feature_manager(doc),
+                ("FeatureCutThin2", thin_args),
+                ("FeatureCutThin", thin_args[:26]),
+            )
         cut_args = (
             single_direction, bool(args.get("flip_side", False)), reverse,
             condition_1, condition_2, depth, depth,
@@ -195,7 +309,10 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
         reversed_automatically = feature is not None
 
     rename_feature(feature, args.get("name"))
-    payload = feature_result(doc, feature, "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10))
+    payload = feature_result(
+        doc, feature, "thin cut" if thin else "cut", sketch=sketch, depth_mm=args.get("depth_mm", 10),
+        **_thin_data(args, thin),
+    )
     if reversed_automatically:
         payload["data"]["reversed_automatically"] = True
         payload["message"] += " The requested direction removed nothing, so it was cut the other way."
@@ -210,7 +327,8 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
     "revolve",
     "Revolve a sketch profile about an axis. If the sketch contains exactly one centerline "
     "SOLIDWORKS uses it automatically; otherwise pass axis_selection (a sketch_segments index for "
-    "the centerline, or an axes name). Angle is degrees.",
+    "the centerline, or an axes name). Angle is degrees. With thin_mm the revolve is a thin feature: a wall of "
+    "constant thickness along an open or closed profile, such as a sleeve from a single line.",
     {
         "angle_deg": {"type": "number", "default": 360, "exclusiveMinimum": 0, "maximum": 360},
         "sketch_name": _SKETCH_ARG,
@@ -220,9 +338,11 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
         "mid_plane": {"type": "boolean", "default": False, "description": "Revolve symmetrically about the sketch plane."},
         "merge": {"type": "boolean", "default": True},
         "name": {"type": "string"},
+        **_THIN_SCHEMA,
     },
 )
 def revolve(args: dict[str, Any]) -> dict[str, Any]:
+    thin = _thin_args(args)
     _, doc = require_part()
     sketch = select_sketch_for_feature(doc, args.get("sketch_name"))
     axis_spec = args.get("axis_selection")
@@ -236,16 +356,21 @@ def revolve(args: dict[str, Any]) -> dict[str, Any]:
     single_direction = not mid_plane
     direction_type = 4 if mid_plane else 0  # swRevolveType_e: 4 = mid plane
 
+    thin_type, thickness_1, thickness_2 = thin if thin is not None else (0, 0.0, 0.0)
+    # IsSolid stays true for a thin revolve; IsThin, ThinType and the two thicknesses make the wall.
     feature = feature_manager(doc).FeatureRevolve2(
-        single_direction, True, False, bool(args.get("cut", False)),
+        single_direction, True, thin is not None, bool(args.get("cut", False)),
         bool(args.get("reverse", False)), False,
         direction_type, 0, angle, 0.0,
         False, False, 0.0, 0.0,
-        0, 0.0, 0.0,
+        thin_type, thickness_1, thickness_2,
         bool(args.get("merge", True)), True, True,
     )
     rename_feature(feature, args.get("name"))
-    return feature_result(doc, feature, "revolve", sketch=sketch, angle_deg=args.get("angle_deg", 360))
+    return feature_result(
+        doc, feature, "thin revolve" if thin else "revolve", sketch=sketch, angle_deg=args.get("angle_deg", 360),
+        **_thin_data(args, thin),
+    )
 
 
 # --------------------------------------------------------------------------

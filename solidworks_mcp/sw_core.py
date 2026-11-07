@@ -76,6 +76,14 @@ END_CONDITIONS = {
     "through_all_both": 9,
 }
 
+# swThinWallType_e: the side of the sketch contour a thin feature's wall grows to.
+THIN_SIDES = {
+    "one_side": 0,
+    "reverse": 1,
+    "mid_plane": 2,
+    "two_side": 3,
+}
+
 # swSurfaceTypes_e
 SURFACE_TYPES = {
     4001: "plane", 4002: "cylinder", 4003: "cone", 4004: "sphere",
@@ -388,10 +396,11 @@ _FEATURE_MANAGER_METHODS = (
     "InsertFeatureChamfer", "InsertRib", "InsertMultiFaceDraft", "SimpleHole2",
     "InsertProtrusionSwept4", "InsertCutSwept5", "InsertProtrusionBlend2", "InsertCutBlend",
     "FeatureLinearPattern5", "FeatureCircularPattern5", "InsertMirrorFeature2", "InsertRefPlane",
+    "FeatureExtrusionThin2", "FeatureCutThin2",
     # Older variants that call_versioned falls back to on builds without the
     # newer names above (SOLIDWORKS 2016 has FeatureCut3 but no FeatureCut4).
     # Newer builds keep the old names, so flagging them costs nothing there.
-    "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
+    "FeatureCut3", "FeatureCutThin", "InsertProtrusionSwept3", "InsertCutSwept4",
     "FeatureLinearPattern4", "FeatureCircularPattern4",
     # Sheet metal
     "InsertSheetMetalEdgeFlange2", "InsertSheetMetalMiterFlange",
