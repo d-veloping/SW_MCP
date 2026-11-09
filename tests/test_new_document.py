@@ -65,10 +65,12 @@ class FakeApp:
         self.reads_after = 0
         self.preference = __file__   # any existing file stands in for the configured template
         self.preference_reads = 0
+        self.preference_keys: list[int] = []
         self.templates: list[str] = []
 
     def GetUserPreferenceStringValue(self, preference: int) -> str:  # noqa: N802 - COM member name
         self.preference_reads += 1
+        self.preference_keys.append(preference)
         return self.preference
 
     def NewDocument(self, template, size, width, height):  # noqa: N802 - COM member name
@@ -253,6 +255,70 @@ class TemplatePathTests(unittest.TestCase):
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(app.templates, [str(self.part)])
         self.assertEqual((answer["data"]["template"], answer["data"]["template_source"]), (str(self.part), "discovered"))
+
+
+class DefaultTemplateTests(unittest.TestCase):
+    """Without template_path the default template set in SOLIDWORKS for the kind is used: exactly
+    swUserPreferenceStringValue_e swDefaultTemplatePart/Assembly/Drawing (8/9/10) is read, and only when it names no
+    existing file is a template searched on disk."""
+
+    # swUserPreferenceStringValue_e as read from the 2016 SP3 type library; literal on purpose, so a wrong constant in
+    # sw_file turns these tests red instead of being compared with itself.
+    EXPECTED = {"part": 8, "assembly": 9, "drawing": 10}
+
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        self.configured = {kind: self.folder / f"Configured{suffix}" for kind, suffix in sw_file.TEMPLATE_SUFFIXES.items()}
+        self.found = {kind: self.folder / f"Found{suffix}" for kind, suffix in sw_file.TEMPLATE_SUFFIXES.items()}
+        for template in (*self.configured.values(), *self.found.values()):
+            template.write_bytes(b"")
+
+    def create(self, kind: str, preference, discovered=None) -> tuple[FakeApp, dict, list[str]]:
+        app = FakeApp(PREVIOUS, [NEW], NEW)
+        app.preference = preference
+        searched: list[str] = []
+
+        def discover(searched_kind: str):
+            searched.append(searched_kind)
+            return discovered
+
+        with unittest.mock.patch.object(sw_file, "running_app", return_value=app),                 unittest.mock.patch.object(sw_file, "discover_template", side_effect=discover):
+            return app, sw_file.create_new_document({"kind": kind}), searched
+
+    def test_configured_default_template_is_used_per_kind(self) -> None:
+        for kind, key in self.EXPECTED.items():
+            with self.subTest(kind):
+                app, answer, searched = self.create(kind, str(self.configured[kind]))
+                self.assertTrue(answer["ok"], answer)
+                self.assertEqual(app.preference_keys, [key])
+                self.assertEqual(searched, [])
+                self.assertEqual(app.templates, [str(self.configured[kind])])
+                self.assertEqual((answer["data"]["template"], answer["data"]["template_source"]),
+                                 (str(self.configured[kind]), "preference"))
+
+    def test_no_usable_default_template_searches_the_disk_per_kind(self) -> None:
+        for kind, key in self.EXPECTED.items():
+            for name, preference in (("empty", ""), ("none", None), ("missing file", str(self.folder / "Fehlt.prtdot")),
+                                     ("folder", str(self.folder))):
+                with self.subTest(kind=kind, answer=name):
+                    app, answer, searched = self.create(kind, preference, self.found[kind])
+                    self.assertTrue(answer["ok"], answer)
+                    self.assertEqual(app.preference_keys, [key])
+                    self.assertEqual(searched, [kind])
+                    self.assertEqual(app.templates, [str(self.found[kind])])
+                    self.assertEqual((answer["data"]["template"], answer["data"]["template_source"]),
+                                     (str(self.found[kind]), "discovered"))
+
+    def test_nothing_configured_and_nothing_found_creates_nothing(self) -> None:
+        for kind, key in self.EXPECTED.items():
+            with self.subTest(kind):
+                app, answer, searched = self.create(kind, "", None)
+                self.assertFalse(answer["ok"], answer)
+                self.assertIn("Default Templates", answer["message"])
+                self.assertNotIn("data", answer)
+                self.assertEqual((app.preference_keys, searched, app.created), ([key], [kind], False))
 
 
 if __name__ == "__main__":

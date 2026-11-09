@@ -132,7 +132,7 @@ late-bound Python cannot QueryInterface a `Face2` to `IEntity`.
 | --- | --- |
 | `solidworks_status` | Verify the connection; report version and active document. |
 | `get_active_document_info` | Title, path, type, unsaved state (`dirty`, null when it cannot be read). |
-| `create_new_document` | New part / assembly / drawing from the template chosen as before (see #36), or with `template_path` from exactly that template (absolute path, existing file, extension fitting the kind; anything else creates nothing). Reports the file handed to SOLIDWORKS as `template` and `template_source` (`argument`, `preference`, `discovered`). |
+| `create_new_document` | New part / assembly / drawing. Without `template_path` from the default template set in SOLIDWORKS for the kind (Tools > Options > Default Templates), or, when none is set or it names no existing file, from one found on disk (`SW_MCP_TEMPLATE_DIR` first, then the usual SOLIDWORKS template folders); with `template_path` from exactly that template (absolute path, existing file, extension fitting the kind; anything else creates nothing). Reports the file handed to SOLIDWORKS as `template` and `template_source` (`argument`, `preference`, `discovered`). |
 | `open_document` | Open a `.sldprt` / `.sldasm` / `.slddrw` and wait until it is the active document; reports the opened document and `already_open` (was the file open before the call). |
 | `list_open_documents` / `close_document` | Every open document with title and path; close one without saving, with `only_if_clean` only if it has no unsaved changes. |
 | `activate_document` | Activate the open document with exactly this title and wait until it is active; for a caller that created the document itself and lost the focus. Activates nothing for an unknown, duplicate or unreadable title. |
@@ -615,6 +615,11 @@ ratio inset and chamfer (volume), and inset by distance and inward (the
 plate ends flush inside, the recut member is reported), are checked by
 readback and geometry (41 checks). A third sheet metal part checks an edge flange and a miter flange
 with every option off its default by readback and reach.
+
+`tests\live_template_path.py` checks the template `create_new_document` uses: exactly the file named in
+`template_path`, unusable paths creating nothing, and without `template_path` a part, an assembly and a drawing
+each from the default template set in SOLIDWORKS for its kind (`swDefaultTemplatePart/Assembly/Drawing` = 8/9/10),
+reported as `preference` (2026-11-09, 2016 SP3: all three from the configured default templates, 28 checks).
 
 Every tool except the 16 sheet metal and weldment tools, `activate_document` and
 `set_sheet_format`, `set_dimension_style`, `move_dimension_text` and `list_view_arcs`

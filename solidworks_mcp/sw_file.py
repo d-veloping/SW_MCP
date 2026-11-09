@@ -62,6 +62,16 @@ from .sw_core import (
 # without the overwrite confirmation.
 SW_SAVE_AS_SILENT = 1
 
+# swUserPreferenceStringValue_e: the default template set in SOLIDWORKS per document kind.
+SW_DEFAULT_TEMPLATE_PART = 8
+SW_DEFAULT_TEMPLATE_ASSEMBLY = 9
+SW_DEFAULT_TEMPLATE_DRAWING = 10
+DEFAULT_TEMPLATE_PREFERENCES = {
+    "part": SW_DEFAULT_TEMPLATE_PART,
+    "assembly": SW_DEFAULT_TEMPLATE_ASSEMBLY,
+    "drawing": SW_DEFAULT_TEMPLATE_DRAWING,
+}
+
 
 def validated_output_path(path: str, allowed_extensions: set[str], allow_overwrite: bool = False) -> Path:
     candidate = Path(path).expanduser()
@@ -162,9 +172,9 @@ def _identity(doc: Any) -> tuple[str, str] | None:
 @tool(
     "create_new_document",
     "Create a new SOLIDWORKS part, assembly, or drawing and wait until SOLIDWORKS reports it as the active document. "
-    "Without `template_path` the template is chosen as before: the file SOLIDWORKS returns for user preference "
-    "1/2/3 (part/assembly/drawing), or one found on disk when that is no file (#36: these are not the default-"
-    "template preferences). With `template_path` it is exactly that file: an "
+    "Without `template_path` it is the default template set in SOLIDWORKS for `kind` (Tools > Options > Default "
+    "Templates), or one found on disk when none is set or the setting names no existing file. With `template_path` "
+    "it is exactly that file: an "
     "absolute path to an existing template whose extension fits `kind` (.prtdot, .asmdot, .drwdot); any other value "
     "fails before a document is created, never falling back to the default. The answer names the file handed to "
     "SOLIDWORKS in `template` and where it came from in `template_source` (argument, preference, discovered). Fails "
@@ -207,7 +217,7 @@ def _new_document(kind: str, template_path: Any = None) -> tuple[dict[str, Any],
     """new_document plus the COM object of the new document (None when none was created), for callers that go on
     working on exactly this document instead of whatever ActiveDoc reports."""
     app = running_app()
-    preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
+    preference = DEFAULT_TEMPLATE_PREFERENCES.get(kind)
     if preference is None:
         return result(False, "kind must be part, assembly, or drawing."), None
     if template_path is not None:
@@ -223,7 +233,7 @@ def _new_document(kind: str, template_path: Any = None) -> tuple[dict[str, Any],
                 return result(
                     False,
                     f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
-                    "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
+                    "Set one under Tools > Options > Default Templates, or point SW_MCP_TEMPLATE_DIR at your templates.",
                 ), None
             template, source = str(fallback), "discovered"
         template = str(template)
