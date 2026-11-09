@@ -388,10 +388,12 @@ class _App:
         self.before, self.after, self.new = before, after, new
         self.created = False
         self.reads_after = 0
+        self.preference_keys: list[int] = []
         if new is not None:
             new.app = self
 
     def GetUserPreferenceStringValue(self, preference: int) -> str:  # noqa: N802 - COM member name
+        self.preference_keys.append(preference)
         return __file__
 
     def NewDocument(self, *args):  # noqa: N802 - COM member name
@@ -421,6 +423,7 @@ class CreateDrawingActivationTests(unittest.TestCase):
         from test_new_document import Clock
 
         app = _App(self.part, after, self.drawing)
+        self.app = app
         clock = Clock()
         with unittest.mock.patch.object(sw_file, "running_app", return_value=app), \
                 unittest.mock.patch.object(sw_drawing, "running_app", return_value=app), \
@@ -435,6 +438,7 @@ class CreateDrawingActivationTests(unittest.TestCase):
         self.assertEqual(answer["data"]["document"]["title"], "Draw7 - Blatt1")
         self.assertEqual((answer["data"]["activated"], answer["data"]["sheets"]), (True, ["Blatt1"]))
         self.assertEqual(len(self.drawing.setups), 1)
+        self.assertEqual(self.app.preference_keys, [10])   # swDefaultTemplateDrawing
 
     def test_part_active_again_before_the_final_check_is_ok_false_with_the_drawing(self) -> None:
         """Case A: new_document saw the drawing, the final check sees the part again."""

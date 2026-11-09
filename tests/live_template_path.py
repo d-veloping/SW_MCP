@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Live check: create_new_document with template_path (ClauSW#265).
+"""Live check: the template create_new_document uses, named with template_path or the SOLIDWORKS default.
 
 Run this only on a workstation with SOLIDWORKS already running:
 
@@ -22,7 +22,10 @@ Without `--template` the default part template set in SOLIDWORKS (swDefaultTempl
 name into a temporary folder, so the named template is a file SOLIDWORKS does not have as its default. The script creates a part from it
 and checks that the answer names exactly that file as `argument` and that the new part is the active document; then
 it checks that a relative path, a missing file and an assembly template create nothing (the list of open documents
-stays the same). The SOLIDWORKS settings are only read, never changed. The part it created is closed without saving.
+stays the same). Then it creates a part, an assembly and a drawing without `template_path` and checks that each comes
+from the default template set in SOLIDWORKS for its kind (swDefaultTemplatePart/Assembly/Drawing = 8/9/10) as
+`preference`, or, where that setting names no existing file, from a template found on disk as `discovered`. The
+SOLIDWORKS settings are only read, never changed. Every document it created is closed without saving.
 """
 
 from __future__ import annotations
@@ -96,6 +99,27 @@ def main() -> int:
             refused = create_new_document({"kind": "part", "template_path": path})
             check(not refused.get("ok") and "data" not in refused, f"{name} path refused: {refused.get('message')}")
             check(open_documents() == before, f"{name} path created no document")
+
+    for kind, preference in (("part", 8), ("assembly", 9), ("drawing", 10)):   # swDefaultTemplatePart/Assembly/Drawing
+        configured = str(running_app().GetUserPreferenceStringValue(preference) or "")
+        expected = "preference" if Path(configured).is_file() else "discovered"
+        print(f"SOLIDWORKS default {kind} template ({preference}): {configured!r}")
+        before = open_documents()
+        answer = create_new_document({"kind": kind})
+        data = answer.get("data") or {}
+        title = str((data.get("document") or {}).get("title") or "")
+        try:
+            check(bool(answer.get("ok")), f"{kind} without template_path ok: {answer.get('message')}")
+            check(data.get("template_source") == expected, f"{kind} template_source: {data.get('template_source')!r}")
+            if expected == "preference":
+                check(data.get("template") == configured, f"{kind} template is the default: {data.get('template')!r}")
+            else:
+                check(Path(str(data.get("template"))).is_file(), f"{kind} template found on disk: {data.get('template')!r}")
+        finally:
+            if title:
+                closed = close_document({"title": title})
+                check(bool(closed.get("ok")), f"own {kind} {title!r} closed: {closed.get('message')}")
+        check(open_documents() == before, f"open documents as before the {kind}")
 
     print("LIVE TEMPLATE PATH " + ("OK" if not failures else f"FAILED ({len(failures)})"))
     return 0 if not failures else 1
