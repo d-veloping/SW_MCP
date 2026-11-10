@@ -50,7 +50,8 @@ $LiveTests = @(
     "live_dimension_attachments.py",
     "live_drawing_layout.py",
     "live_template_path.py",
-    "live_thin_features.py"
+    "live_thin_features.py",
+    "live_hole_wizard.py"
 )
 $NotRun = [ordered]@{
     "live_activation.py"         = "measurement, always exits 0"

@@ -15,7 +15,7 @@ It does not launch SOLIDWORKS, register an add-in, execute arbitrary code, or
 touch the network. It attaches to a session you already have open and calls the
 documented API — so if a tool can't do something, neither could a macro.
 
-122 tools: sketching with real relations and driving dimensions, the solid
+123 tools: sketching with real relations and driving dimensions, the solid
 features you actually reach for, sheet metal with its flat pattern and DXF export,
 weldments from 3D sketches, reference geometry, assemblies and mates, and —
 importantly — a feedback channel, including screenshots returned as images so
@@ -186,8 +186,71 @@ open as it is. Pattern the cut with `circular_pattern`.
 
 ### Features
 `boss_extrude`, `cut_extrude`, `revolve`, `fillet`, `chamfer`, `shell`, `draft`,
-`rib`, `simple_hole`, `sweep`, `loft`, `linear_pattern`, `circular_pattern`,
+`rib`, `simple_hole`, `hole_wizard`, `sweep`, `loft`, `linear_pattern`, `circular_pattern`,
 `mirror_feature`, `delete_feature`, `rename_feature`, `set_feature_suppression`.
+
+`hole_wizard` drills standard holes with the Hole Wizard
+(`IFeatureManager.HoleWizard5`), one feature for one or more holes on one planar
+face:
+
+- **Inputs:** `kind` (`clearance`, `tapped`, `counterbore`, `countersink`),
+  `standard` (`iso`, `din`, `ansi_metric`, …), `fastener` (the Toolbox table name
+  as the Hole Wizard lists it: `Screw Clearances`, `Tapped hole`,
+  `Hex Socket Head ISO 4762`, `Hex Socket CTSK Head ISO 10642`, …), `size` as the
+  table lists it (`M6`, not `M6x1.0`), `end_condition` (`through_all`, or `blind`
+  with `depth_mm` to the drill shoulder), `fit` (`close`, `normal`, `loose`;
+  default `normal`; not for tapped holes), for tapped holes `thread_depth_mm`
+  and `cosmetic` (default `true`), the face as `face_index` (from `list_faces`)
+  or `face_point_mm`, `points` (hole centres in model millimetres on the face's
+  plane, at least one) and an optional `name`.
+- **Checks before anything is built:** the fastener table must exist in the
+  Toolbox database for that standard, offer that kind of hole and list that
+  size; otherwise the answer names the tables or sizes that do exist. This
+  matters: HoleWizard5 builds a feature for a size the table does not offer
+  rather than refusing it. Every point must lie on the face's plane.
+- **Outputs (`ok: true`):** `feature` (the name HoleWizard5 returned, never one
+  guessed from the tree), `position_sketch`, `type` (`swWzdHoleTypes_e` value and
+  name), `hole_data` (the kind's `IWizardHoleFeatureData2` fields in mm and
+  degrees, e.g. `ThruHoleDiameter_mm`, `TapDrillDepth_mm`, `ThreadDepth_mm`,
+  `CosmeticThreadType`, `CounterBoreDepth_mm`, `CounterSinkDiameter_mm`,
+  `CounterSinkAngle_deg`, `HoleFit`), `points_mm` (read back from the feature),
+  `volume_before_mm3`, `volume_after_mm3`, `removed_mm3`, `bodies` and the
+  `subfeatures` (a cosmetic thread shows up as `CosmeticThread`).
+- **`ok` only after the readback:** the feature's own data must report the
+  requested fastener, size, end condition, blind depth, fit or thread depth and
+  cosmetic type, one hole per requested point, no rebuild errors, a smaller solid volume
+  and the same body count. HoleWizard5 never says why it failed (it returns
+  nothing), so every failure is judged from the model: the answer is
+  `ok: false` with the reason, and every feature the call added is deleted
+  again (`deleted`, `left_behind`).
+
+Limits, measured on SOLIDWORKS 2016 SP3 (d-veloping/SW_MCP#40,
+d-veloping/ClauSW#253):
+
+- Only the standards and sizes of this machine's Toolbox database
+  (`swbrowser.sldedb` in the Hole Wizard/Toolbox folder configured in
+  SOLIDWORKS; 2016 SP3 reports `C:\SOLIDWORKS Data\lang\english`). Values come
+  from that table and may differ from what you expect (ISO 4762 M6:
+  counterbore depth 6.4, not 6.5); the tool reports what SOLIDWORKS built.
+  Only ISO is checked live.
+- Threads are cosmetic or absent (`cosmetic: false`), never cut; the volume is
+  the tap drill only.
+- Feature names are English and built from the table (`M6 Clearance Hole1`,
+  `CBORE for M6 Hex Socket Head Cap Screw1`); rename with `name`.
+- **The position sketch stays.** The tool draws the hole centres as points in a
+  sketch on the face (no inference snapping) and preselects them; the Hole
+  Wizard copies them into its own sub-sketches (`3DSketchN`, `SketchN`), but
+  the hole stays tied to the position sketch, which remains in the tree in front
+  of it. Deleting that sketch leaves the hole feature in the tree cutting
+  nothing, without a rebuild error.
+- A blind clearance hole, counterbore or countersink reads back in
+  `HoleDiameter`/`HoleDepth` (the depth to the drill shoulder), a through one in
+  `ThruHoleDiameter`/`ThruHoleDepth`; a blind tapped hole in `TapDrillDepth`.
+  The clearance hole's drill angle is passed as -1 (the
+  standard's 118 degrees): 0 builds a 0-degree tip that removes far too much
+  material, again without any error.
+- No hole callouts: `insert_model_annotations` with `hole_callouts` places them
+  in a drawing.
 
 ### Sheet metal
 | Tool | Purpose |

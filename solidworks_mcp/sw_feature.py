@@ -23,18 +23,25 @@ selection set or about which mark a given API expects.
 from __future__ import annotations
 
 import math
+import re
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 from .sw_core import (
     feature_names,
     active_document,
     apply_selection,
+    apply_transform,
+    as_list,
+    body_volume_mm3,
     call_versioned,
     CHAMFER_ANGLE_DISTANCE,
     CHAMFER_DISTANCE_DISTANCE,
     CHAMFER_EQUAL_DISTANCE,
     CHAMFER_TANGENT_PROPAGATION,
     clear_selection,
+    delete_features,
     empty_variant,
     END_CONDITIONS,
     exit_active_sketch,
@@ -42,24 +49,38 @@ from .sw_core import (
     feature_manager,
     feature_property,
     feature_result,
+    features_added,
     FILLET_PROPAGATE,
     FILLET_TYPE_SIMPLE,
     FILLET_UNIFORM_RADIUS,
     find_feature,
+    flag_methods,
+    iter_body_context,
+    iter_face_objects,
     iter_feature_objects,
     logger,
+    nothing,
+    open_sketch_name,
+    read_member,
     rebuild,
     rename_feature,
     require_part,
     require_selection,
     result,
+    safe,
+    select_at_point,
+    select_object,
     selectable,
+    selected_objects,
     SELECTION_SCHEMA,
     select_sketch_for_feature,
+    sketch_manager,
     THIN_SIDES,
     tool,
     ToolFailure,
+    to_deg,
     to_m,
+    to_mm,
     to_rad,
     value,
     whats_wrong,
@@ -608,6 +629,540 @@ def simple_hole(args: dict[str, Any]) -> dict[str, Any]:
     )
     rename_feature(feature, args.get("name"))
     return feature_result(doc, feature, "hole", diameter_mm=args["diameter_mm"])
+
+
+# --------------------------------------------------------------------------
+# Hole Wizard (IFeatureManager.HoleWizard5)
+# --------------------------------------------------------------------------
+
+# kind -> (swWzdGeneralHoleTypes_e, the bit the Toolbox database sets in ValidHoleTypes for it)
+HOLE_KINDS = {"counterbore": (0, 1), "countersink": (1, 2), "clearance": (2, 4), "tapped": (4, 8)}
+# standard -> (swWzdHoleStandards_e, table prefix in the Toolbox database)
+HOLE_STANDARDS = {
+    "ansi_inch": (0, "AI"), "ansi_metric": (1, "AM"), "bsi": (2, "BSI"), "din": (4, "DIN"), "iso": (8, "ISO"),
+    "jis": (9, "JIS"), "gb": (13, "GB"), "ks": (14, "KS"),
+}
+HOLE_FITS = {"close": 0, "normal": 1, "loose": 2}            # swWzdHoleScrewClearanceTypes_e
+HOLE_END_CONDITIONS = {"blind": 0, "through_all": 1}         # swEndConditions_e
+SW_HOLE_WIZARD_TOOLBOX_FOLDER = 52                           # swUserPreferenceStringValue_e.swHoleWizardToolBoxFolder
+_COSMETIC_THREAD_WITH_CALLOUT, _COSMETIC_THREAD_NONE = 1, 0  # swWzdHoleCosmeticThreadTypes_e
+_THREAD_END_BLIND = 0                                        # swWzdHoleThreadEndCondition_e
+_IGNORED = -1.0                                              # "SOLIDWORKS ignores parameters set to -1" (API help)
+_REMOVED_MIN_MM3 = 1e-3
+_POINT_TOLERANCE_MM = 1e-3
+
+# swWzdHoleTypes_e, values 0..79 in order, then 90.
+_HOLE_TYPE_NAMES = dict(enumerate((
+    "swSimple swTapered swCounterBored swCounterSunk swCounterDrilled swSimpleDrilled swTaperedDrilled "
+    "swCounterBoredDrilled swCounterSunkDrilled swCounterDrilledDrilled swCounterBoreBlind "
+    "swCounterBoreBlindCounterSinkMiddle swCounterBoreBlindCounterSinkTop swCounterBoreBlindCounterSinkTopmiddle "
+    "swCounterBoreThru swCounterBoreThruCounterSinkBottom swCounterBoreThruCounterSinkMiddle "
+    "swCounterBoreThruCounterSinkMiddleBottom swCounterBoreThruCounterSinkTop swCounterBoreThruCounterSinkTopBottom "
+    "swCounterBoreThruCounterSinkTopMiddle swCounterBoreThruCounterSinkTopMiddleBottom swHoleBlind "
+    "swHoleBlindCounterSinkTop swCounterSinkBlind swHoleThru swHoleThruCounterSinkBottom swHoleThruCounterSinkTop "
+    "swHoleThruCounterSinkTopBottom swCounterSinkThru swCounterSinkThruCounterSinkBottom swTapBlind "
+    "swTapBlindCounterSinkTop swTapThru swTapThruCounterSinkBottom swTapThruCounterSinkTop "
+    "swTapThruCounterSinkTopBottom swPipeTapBlind swPipeTapBlindCounterSinkTop swPipeTapThru "
+    "swPipeTapThruCounterSinkBottom swPipeTapThruCounterSinkTop swPipeTapThruCounterSinkTopBottom "
+    "swCounterSinkBlindWithoutHeadClearance swCounterSinkThruWithoutHeadClearance "
+    "swCounterSinkThruCounterSinkBottomWithoutHeadClearance swTapBlindCosmeticThread "
+    "swTapBlindCosmeticThreadCounterSinkTop swTapThruCosmeticThread swTapThruCosmeticThreadCounterSinkTop "
+    "swTapThruCosmeticThreadCounterSinkBottom swTapThruCosmeticThreadCounterSinkTopBottom swTapThruThreadThru "
+    "swTapThruThreadThruCounterSinkTop swTapThruThreadThruCounterSinkBottom swTapThruThreadThruCountersinkTopBottom "
+    "swTapBlindRemoveThread swCounterBoreSlotBlind swCounterBoreSlotBlindCounterSinkMiddle "
+    "swCounterBoreSlotBlindCounterSinkTop swCounterBoreSlotBlindCounterSinkTopMiddle swCounterBoreSlotThru "
+    "swCounterBoreSlotThruCounterSinkBottom swCounterBoreSlotThruCounterSinkMiddle "
+    "swCounterBoreSlotThruCounterSinkMiddleBottom swCounterBoreSlotThruCounterSinkTop "
+    "swCounterBoreSlotThruCounterSinkTopBottom swCounterBoreSlotThruCounterSinkTopMiddle "
+    "swCounterBoreSlotThruCounterSinkTopMiddleBottom swSlotBlind swSlotBlindCounterSinkTop swCounterSinkSlotBlind "
+    "swSlotThru swSlotThruCounterSinkBottom swSlotThruCounterSinkTop swSlotThruCounterSinkTopBottom "
+    "swCounterSinkSlotThru swCounterSinkSlotThruCounterSinkBottom swCounterSinkSlotBlindWithoutHeadClearance "
+    "swCounterSinkSlotThruWithoutHeadClearance"
+).split()))
+_HOLE_TYPE_NAMES[90] = "swCounterSinkSlotThruCounterSinkBottomWithoutHeadClearance"
+
+# IWizardHoleFeatureData2 fields reported per kind. The values sit in the kind-specific fields; a blind clearance hole,
+# counterbore or countersink carries them in HoleDiameter/HoleDepth, a through one in ThruHoleDiameter/ThruHoleDepth
+# (measured on 2016 SP3).
+_HOLE_FIELDS = {
+    "clearance": ("ThruHoleDiameter", "ThruHoleDepth", "HoleDiameter", "HoleDepth", "DrillAngle", "HoleFit"),
+    "tapped": ("TapDrillDiameter", "TapDrillDepth", "ThruTapDrillDiameter", "ThruTapDrillDepth", "ThreadDiameter",
+               "ThreadDepth", "CosmeticThreadType", "ThreadEndCondition", "DrillAngle"),
+    "counterbore": ("ThruHoleDiameter", "ThruHoleDepth", "HoleDiameter", "HoleDepth", "CounterBoreDiameter",
+                    "CounterBoreDepth", "HeadClearance", "HoleFit"),
+    "countersink": ("ThruHoleDiameter", "ThruHoleDepth", "HoleDiameter", "HoleDepth", "CounterSinkDiameter",
+                    "CounterSinkAngle", "HeadClearance", "HeadClearanceType", "HoleFit"),
+}
+# Where a blind hole reads back its drilled depth (to the drill shoulder), measured on 2016 SP3.
+_BLIND_DEPTH_FIELDS = {"clearance": "HoleDepth_mm", "counterbore": "HoleDepth_mm", "countersink": "HoleDepth_mm",
+                       "tapped": "TapDrillDepth_mm"}
+_HOLE_INTEGER_FIELDS = frozenset({"HoleFit", "CosmeticThreadType", "ThreadEndCondition", "HeadClearanceType"})
+_HOLE_ANGLE_FIELDS = frozenset({"DrillAngle", "CounterSinkAngle"})
+_SQL_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+
+_POINT_SCHEMA = {
+    "type": "object",
+    "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}, "z_mm": {"type": "number"}},
+    "required": ["x_mm", "y_mm", "z_mm"],
+}
+
+
+def _hole_wizard_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Check every argument before SOLIDWORKS is touched; the checked request, lengths still in millimetres."""
+    kind = str(args.get("kind") or "")
+    if kind not in HOLE_KINDS:
+        raise ToolFailure(f"kind must be one of {', '.join(sorted(HOLE_KINDS))}, got {args.get('kind')!r}.")
+    standard = str(args.get("standard") or "").lower()
+    if standard not in HOLE_STANDARDS:
+        raise ToolFailure(f"standard must be one of {', '.join(sorted(HOLE_STANDARDS))}, got {args.get('standard')!r}.")
+    fastener, size = str(args.get("fastener") or "").strip(), str(args.get("size") or "").strip()
+    if not fastener or not size:
+        raise ToolFailure("fastener and size are required: the Toolbox table name and the size, e.g. 'Screw "
+                          "Clearances' and 'M6'.")
+    end = str(args.get("end_condition") or "")
+    if end not in HOLE_END_CONDITIONS:
+        raise ToolFailure(f"end_condition must be blind or through_all, got {args.get('end_condition')!r}.")
+    depth = None
+    if end == "blind":
+        if args.get("depth_mm") is None:
+            raise ToolFailure("end_condition blind needs depth_mm.")
+        depth = _number(args, "depth_mm")
+    elif args.get("depth_mm") is not None:
+        raise ToolFailure("depth_mm only applies to end_condition blind.")
+    request: dict[str, Any] = {"kind": kind, "standard": standard, "fastener": fastener, "size": size,
+                               "end_condition": end, "depth_mm": depth}
+    if kind == "tapped":
+        if args.get("fit") is not None:
+            raise ToolFailure("fit does not apply to a tapped hole.")
+        if args.get("thread_depth_mm") is None:
+            raise ToolFailure("A tapped hole needs thread_depth_mm.")
+        request["thread_depth_mm"] = _number(args, "thread_depth_mm")
+        if depth is not None and request["thread_depth_mm"] > depth:
+            raise ToolFailure("thread_depth_mm cannot be deeper than the drilled depth_mm.")
+        cosmetic = args.get("cosmetic", True)
+        if not isinstance(cosmetic, bool):
+            raise ToolFailure(f"cosmetic must be true or false, got {cosmetic!r}.")
+        request["cosmetic"] = cosmetic
+    else:
+        if args.get("thread_depth_mm") is not None or args.get("cosmetic") is not None:
+            raise ToolFailure("thread_depth_mm and cosmetic only apply to a tapped hole.")
+        fit = str(args.get("fit") or "normal")
+        if fit not in HOLE_FITS:
+            raise ToolFailure(f"fit must be one of {', '.join(sorted(HOLE_FITS))}, got {args.get('fit')!r}.")
+        request["fit"] = fit
+    has_index, has_point = args.get("face_index") is not None, args.get("face_point_mm") is not None
+    if has_index == has_point:
+        raise ToolFailure("Pass exactly one of face_index (from list_faces) and face_point_mm.")
+    if has_index:
+        raw = args["face_index"]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ToolFailure(f"face_index must be a non-negative integer, got {raw!r}.")
+        request["face_index"] = raw
+    else:
+        request["face_point_mm"] = _xyz(args["face_point_mm"], "face_point_mm")
+    points = args.get("points")
+    if not isinstance(points, list) or not points:
+        raise ToolFailure("points needs at least one hole centre {x_mm, y_mm, z_mm} in model coordinates.")
+    request["points_mm"] = [_xyz(p, f"points[{i}]") for i, p in enumerate(points)]
+    if args.get("name") is not None:
+        request["name"] = str(args["name"])
+    return request
+
+
+def _xyz(raw: Any, label: str) -> list[float]:
+    """A model point in millimetres from {x_mm, y_mm, z_mm} or [x, y, z]."""
+    if isinstance(raw, dict):
+        raw = [raw.get("x_mm"), raw.get("y_mm"), raw.get("z_mm")]
+    if (not isinstance(raw, (list, tuple)) or len(raw) != 3
+            or any(isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) for c in raw)):
+        raise ToolFailure(f"{label} must be three finite numbers x_mm, y_mm, z_mm, got {raw!r}.")
+    return [float(c) for c in raw]
+
+
+def _toolbox_database(app: Any) -> Path:
+    """The Toolbox database the Hole Wizard reads its standards from, swbrowser.sldedb in the folder SOLIDWORKS is
+    configured with (Tools > Options > Hole Wizard/Toolbox). 2016 SP3 reports the language folder itself
+    (C:/SOLIDWORKS Data/lang/english, measured); a Toolbox root is searched under lang/, English first."""
+    try:
+        folder = str(app.GetUserPreferenceStringValue(SW_HOLE_WIZARD_TOOLBOX_FOLDER) or "")
+    except Exception as exc:
+        raise ToolFailure(f"The Hole Wizard/Toolbox folder cannot be read from SOLIDWORKS ({exc}).") from exc
+    if not folder:
+        raise ToolFailure("SOLIDWORKS has no Hole Wizard/Toolbox folder configured (Tools > Options > Hole "
+                          "Wizard/Toolbox); hole_wizard needs its standards database.")
+    lang = Path(folder) / "lang"
+    candidates = [Path(folder) / "swbrowser.sldedb", lang / "english" / "swbrowser.sldedb",
+                  *sorted(lang.glob("*/swbrowser.sldedb"))]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise ToolFailure(f"No Toolbox database swbrowser.sldedb in {folder} or under {lang}.", toolbox_folder=folder)
+
+
+def _toolbox_lookup(database: Path, standard: str, fastener: str, size: str, kind: str) -> int:
+    """The swWzdHoleStandardFastenerTypes_e value for this fastener table, after checking that the table exists in
+    the Toolbox database, offers this kind of hole and lists this size. Read-only; every refusal names what exists."""
+    prefix = HOLE_STANDARDS[standard][1]
+    try:
+        connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise ToolFailure(f"The Toolbox database {database} cannot be opened ({exc}).") from exc
+    try:
+        try:
+            tables = [str(row[0]) for row in connection.execute(
+                f"SELECT DISTINCT CategoryID FROM [{prefix}_Types] WHERE HasHoles <> 0")]
+        except sqlite3.Error as exc:
+            raise ToolFailure(f"The Toolbox database {database} has no hole tables for {standard} ({exc}).") from exc
+        known: dict[str, tuple[str, str, int, int]] = {}
+        for table in tables:
+            if not _SQL_NAME.match(table):
+                continue
+            try:
+                rows = connection.execute(
+                    f"SELECT Title, DataTable, SWConst_Enum_Value, ValidHoleTypes FROM [{table}] "
+                    "WHERE HasHoles <> 0 AND enabled <> 0").fetchall()
+            except sqlite3.Error:
+                continue
+            for title, data_table, enum_value, valid in rows:
+                if title and enum_value is not None:
+                    known.setdefault(str(title).casefold(), (str(title), str(data_table or ""), int(enum_value),
+                                                             int(valid or 0)))
+        entry = known.get(fastener.casefold())
+        bit = HOLE_KINDS[kind][1]
+        if entry is None:
+            offered = sorted(t for t, _, _, v in known.values() if v & bit)
+            raise ToolFailure(f"No fastener table '{fastener}' for {standard} in the Toolbox database.",
+                              fasteners_for_kind=offered)
+        title, data_table, enum_value, valid = entry
+        if not valid & bit:
+            offered = sorted(t for t, _, _, v in known.values() if v & bit)
+            raise ToolFailure(f"'{title}' offers no {kind} hole.", fasteners_for_kind=offered)
+        table = f"{prefix}_{data_table[1:]}" if data_table.startswith("+") else data_table
+        if not _SQL_NAME.match(table):
+            raise ToolFailure(f"'{title}' names no readable size table ({data_table!r}).")
+        try:
+            columns = {str(row[1]).casefold() for row in connection.execute(f"PRAGMA table_info([{table}])")}
+            enabled = " WHERE enabled <> 0" if "enabled" in columns else ""
+            sizes = [str(row[0]) for row in connection.execute(f"SELECT SIZE FROM [{table}]{enabled}")]
+        except sqlite3.Error as exc:
+            raise ToolFailure(f"The sizes of '{title}' cannot be read from {table} ({exc}).") from exc
+        if size not in sizes:
+            raise ToolFailure(f"Unknown size '{size}' for '{title}' ({standard}).", sizes=sizes)
+        return enum_value
+    finally:
+        connection.close()
+
+
+def _hole_wizard_call(request: dict[str, Any], fastener_index: int) -> list[Any]:
+    """The 27 HoleWizard5 arguments (SOLIDWORKS 2016 SP3 type library), metres and radians.
+
+    Value1..Value12 mean something different per kind (API help, IFeatureManager::HoleWizard5); -1 leaves a value to
+    the standard. Measured on 2016 SP3: a clearance hole refuses -1 for Diameter/Depth/Length (None, no exception) and
+    takes 0 for the table value; its drill angle must be -1, since 0 builds a blind hole with a 0-degree tip that
+    removes far too much without any error. Tapped holes, counterbores and countersinks take -1.
+    """
+    kind = request["kind"]
+    blind = request["end_condition"] == "blind"
+    depth = to_m(request["depth_mm"]) if blind else None
+    if kind == "clearance":
+        # Screw fit, drill angle, near csink dia/angle, far csink dia/angle, offset
+        sizes = (0.0, depth if blind else 0.0, 0.0)
+        values = [HOLE_FITS[request["fit"]], _IGNORED] + [0.0] * 10
+    elif kind == "tapped":
+        # Thread depth, near csink dia/angle, far csink dia/angle, drill angle, cosmetic thread, thread end,
+        # helicoil tap type, offset; the tap drill diameter and depth are Diameter and Depth.
+        sizes = (_IGNORED, depth if blind else _IGNORED, _IGNORED)
+        cosmetic = _COSMETIC_THREAD_WITH_CALLOUT if request["cosmetic"] else _COSMETIC_THREAD_NONE
+        values = [to_m(request["thread_depth_mm"]), _IGNORED, _IGNORED, _IGNORED, _IGNORED, _IGNORED, cosmetic,
+                  _THREAD_END_BLIND, _IGNORED, _IGNORED, _IGNORED, _IGNORED]
+    else:
+        # Counterbore: cbore dia, cbore depth, head clearance, screw fit, drill angle, csinks, offset.
+        # Countersink: near csink dia, near csink angle, head clearance, screw fit, drill angle, far csink, offset,
+        # head clearance type.
+        sizes = (_IGNORED, depth if blind else _IGNORED, _IGNORED)
+        values = [_IGNORED, _IGNORED, 0.0, HOLE_FITS[request["fit"]]] + [_IGNORED] * 8
+    return [
+        HOLE_KINDS[kind][0], HOLE_STANDARDS[request["standard"]][0], fastener_index, request["size"],
+        HOLE_END_CONDITIONS[request["end_condition"]], *(float(v) for v in sizes), *(float(v) for v in values),
+        "", False, True, True, True, True, False,
+    ]
+
+
+def _solid_state(doc: Any) -> tuple[float | None, int]:
+    """Total volume of the solid bodies in mm3 (None when one cannot be measured) and how many there are."""
+    bodies = [body for body, _, _ in iter_body_context(doc)]
+    volumes = [body_volume_mm3(body) for body in bodies]
+    if not bodies or any(v is None for v in volumes):
+        return None, len(bodies)
+    return round(sum(v for v in volumes if v is not None), 4), len(bodies)
+
+
+def _hole_face(doc: Any, request: dict[str, Any]) -> tuple[Any, list[float], list[float]]:
+    """The face to drill, its unit plane normal and a point of its plane (metres); refuses a face that is not
+    planar or cannot be found."""
+    if "face_index" in request:
+        faces = iter_face_objects(doc)
+        index = request["face_index"]
+        if index >= len(faces):
+            raise ToolFailure(f"face_index {index} is out of range (0..{len(faces) - 1}).")
+        face = faces[index][0]
+        label = f"face {index}"
+    else:
+        point = request["face_point_mm"]
+        clear_selection(doc)
+        selected = select_at_point(doc, "FACE", [to_m(c) for c in point], 0, False)
+        found = selected_objects(doc) if selected else []
+        clear_selection(doc)
+        if len(found) != 1:
+            raise ToolFailure(f"No face could be selected at {point} mm.")
+        face = found[0]
+        label = f"the face at {point} mm"
+    surface = safe(face, "GetSurface")
+    if surface is None or safe(surface, "Identity") != 4001:
+        raise ToolFailure(f"{label} is not planar; the Hole Wizard needs a planar face.")
+    params = [float(v) for v in safe(surface, "PlaneParams") or []]
+    if len(params) < 6 or not math.isclose(math.sqrt(sum(c * c for c in params[:3])), 1.0, abs_tol=1e-6):
+        raise ToolFailure(f"The plane of {label} cannot be read.")
+    return face, params[:3], params[3:6]
+
+
+def _place_points(doc: Any, face: Any, points_mm: list[list[float]]) -> tuple[str, list[Any]]:
+    """A sketch on the face with one point per hole centre, closed; its name and its sketch points.
+
+    The Hole Wizard copies preselected points into its own position sketches, but the hole stays tied to this sketch:
+    deleting it leaves the hole in the tree cutting nothing, without a rebuild error (measured on 2016 SP3). So the
+    sketch stays, and the answer names it.
+    """
+    clear_selection(doc)
+    if not select_object(doc, face, 0, False):
+        raise ToolFailure("SOLIDWORKS refused to select the face.")
+    manager = sketch_manager(doc)
+    manager.InsertSketch(True)
+    sketch = doc.SketchManager.ActiveSketch
+    if sketch is None:
+        raise ToolFailure("SOLIDWORKS did not open a sketch on the face.")
+    try:
+        to_sketch = [float(v) for v in value(value(sketch, "ModelToSketchTransform"), "ArrayData")]
+        created = 0
+        previous = bool(manager.AddToDB)
+        manager.AddToDB = True
+        try:
+            for point in points_mm:
+                local = apply_transform([to_m(c) for c in point], to_sketch)
+                if manager.CreatePoint(local[0], local[1], 0.0) is not None:
+                    created += 1
+        finally:
+            manager.AddToDB = previous
+        name = open_sketch_name(doc, sketch)
+    finally:
+        exit_active_sketch(doc)
+    feature = find_feature(doc, name)
+    sketch_points = as_list(safe(safe(feature, "GetSpecificFeature2"), "GetSketchPoints2")) if feature else []
+    if created != len(points_mm) or len(sketch_points) != len(points_mm):
+        raise ToolFailure(f"The position sketch holds {len(sketch_points)} points instead of {len(points_mm)}.",
+                          position_sketch=name)
+    return name, sketch_points
+
+
+def _select_points(doc: Any, sketch_points: list[Any]) -> None:
+    """Preselect every hole centre and nothing else; the Hole Wizard puts one hole on each."""
+    clear_selection(doc)
+    accepted = sum(bool(flag_methods(p, "Select4").Select4(True, nothing())) for p in sketch_points)
+    selected = len(selected_objects(doc))
+    if accepted != len(sketch_points) or selected != len(sketch_points):
+        raise ToolFailure(f"Only {selected} of {len(sketch_points)} hole centres could be selected.")
+
+
+def _hole_readback(feature: Any, kind: str) -> tuple[dict[str, Any], dict[str, Any], list[list[float]]]:
+    """IWizardHoleFeatureData2 of the feature: the identity fields, the kind's fields (mm, deg) and the hole centres
+    in model millimetres. A field SOLIDWORKS refuses makes the feature unreadable."""
+    definition = safe(feature, "GetDefinition")
+    if definition is None:
+        raise ToolFailure("SOLIDWORKS returned no definition (IWizardHoleFeatureData2) for the new hole.")
+    identity: dict[str, Any] = {}
+    for field in ("Type", "Standard", "Standard2", "FastenerType", "FastenerType2", "FastenerSize", "EndCondition"):
+        identity[field] = read_member(definition, field)
+    data: dict[str, Any] = {}
+    for field in _HOLE_FIELDS[kind]:
+        raw = read_member(definition, field)
+        if raw is None:
+            data[field] = None
+        elif field in _HOLE_INTEGER_FIELDS:
+            data[field] = int(raw)
+        elif field in _HOLE_ANGLE_FIELDS:
+            data[f"{field}_deg"] = round(to_deg(float(raw)), 6)
+        else:
+            data[f"{field}_mm"] = round(to_mm(float(raw)), 6)
+    unreadable = [k for k, v in {**identity, **data}.items() if v is None]
+    if unreadable:
+        raise ToolFailure(f"The new hole's data cannot be read: {', '.join(unreadable)}.")
+    try:
+        centres = [[round(to_mm(float(value(p, axis))), 6) for axis in ("X", "Y", "Z")]
+                   for p in as_list(value(definition, "GetSketchPoints"))]
+    except Exception as exc:
+        raise ToolFailure(f"The new hole's sketch points cannot be read ({exc}).") from exc
+    return identity, data, centres
+
+
+def _readback_problems(request: dict[str, Any], fastener_index: int, identity: dict[str, Any],
+                       data: dict[str, Any], centres: list[list[float]]) -> list[str]:
+    """Where the hole SOLIDWORKS built differs from the request, judged by its own data."""
+    problems = []
+    if identity["FastenerType2"] != fastener_index:
+        problems.append(f"fastener type {identity['FastenerType2']} instead of {fastener_index}")
+    if str(identity["FastenerSize"]) != request["size"]:
+        problems.append(f"size {identity['FastenerSize']!r} instead of {request['size']!r}")
+    if identity["EndCondition"] != HOLE_END_CONDITIONS[request["end_condition"]]:
+        problems.append(f"end condition {identity['EndCondition']} instead of {request['end_condition']}")
+    if request["depth_mm"] is not None:
+        field = _BLIND_DEPTH_FIELDS[request["kind"]]
+        if abs(data[field] - request["depth_mm"]) > _POINT_TOLERANCE_MM:
+            problems.append(f"drilled depth {data[field]} mm instead of {request['depth_mm']}")
+    if "fit" in request and data.get("HoleFit") != HOLE_FITS[request["fit"]]:
+        problems.append(f"fit {data.get('HoleFit')} instead of {request['fit']}")
+    if request["kind"] == "tapped":
+        if abs(data["ThreadDepth_mm"] - request["thread_depth_mm"]) > _POINT_TOLERANCE_MM:
+            problems.append(f"thread depth {data['ThreadDepth_mm']} mm instead of {request['thread_depth_mm']}")
+        cosmetic = _COSMETIC_THREAD_WITH_CALLOUT if request["cosmetic"] else _COSMETIC_THREAD_NONE
+        if data["CosmeticThreadType"] != cosmetic:
+            problems.append(f"cosmetic thread type {data['CosmeticThreadType']} instead of {cosmetic}")
+    unmatched = [list(c) for c in centres]
+    for point in request["points_mm"]:
+        match = next((c for c in unmatched if all(abs(a - b) <= _POINT_TOLERANCE_MM for a, b in zip(c, point))), None)
+        if match is None:
+            problems.append(f"no hole at {point} mm")
+        else:
+            unmatched.remove(match)
+    if unmatched:
+        problems.append(f"holes nobody asked for at {unmatched} mm")
+    return problems
+
+
+@tool(
+    "hole_wizard",
+    "Drill standard holes with the Hole Wizard (IFeatureManager.HoleWizard5): clearance, tapped (cosmetic thread), "
+    "counterbore or countersink, sized from the Toolbox standard, fastener table and size, on one planar face at one "
+    "or more points in one feature. The fastener is the Toolbox table name as the Hole Wizard lists it, e.g. 'Screw "
+    "Clearances', 'Tapped hole', 'Hex Socket Head ISO 4762', 'Hex Socket CTSK Head ISO 10642'; size e.g. 'M6'. "
+    "Points are model coordinates in millimetres on the face's plane. The tool draws the hole centres in a position "
+    "sketch on the face that stays in the tree in front of the hole: deleting it silently removes the hole's cut. "
+    "ok is true only after SOLIDWORKS' own hole data (IWizardHoleFeatureData2) reads back the requested fastener, size, "
+    "end condition, blind depth, fit or thread and one hole per point, no new rebuild error, the solid volume dropped "
+    "and the body count stayed. On any failure the new features are deleted again and the answer says whether the "
+    "tree is as before.",
+    {
+        "kind": {"type": "string", "enum": sorted(HOLE_KINDS)},
+        "standard": {"type": "string", "enum": sorted(HOLE_STANDARDS),
+                     "description": "Hole standard; checked live on 2016 SP3 with iso only."},
+        "fastener": {"type": "string", "description": "Toolbox fastener table name (Title), e.g. 'Screw Clearances'."},
+        "size": {"type": "string", "description": "Size as the table lists it, e.g. 'M6' (not 'M6x1.0')."},
+        "fit": {"type": "string", "enum": sorted(HOLE_FITS), "default": "normal",
+                "description": "Screw fit for clearance, counterbore and countersink holes."},
+        "end_condition": {"type": "string", "enum": sorted(HOLE_END_CONDITIONS)},
+        "depth_mm": {"type": "number", "exclusiveMinimum": 0,
+                     "description": "Drilled depth for blind holes (to the drill shoulder; the 118-degree tip adds)."},
+        "thread_depth_mm": {"type": "number", "exclusiveMinimum": 0, "description": "Thread depth, tapped holes only."},
+        "cosmetic": {"type": "boolean", "default": True,
+                     "description": "Tapped holes: cosmetic thread with callout (true) or none (false). Threads are "
+                     "never cut physically."},
+        "face_index": {"type": "integer", "description": "Planar face from list_faces."},
+        "face_point_mm": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                          "description": "A point on the face, instead of face_index."},
+        "points": {"type": "array", "minItems": 1, "items": _POINT_SCHEMA,
+                   "description": "Hole centres in model coordinates on the face's plane."},
+        "name": {"type": "string", "description": "Rename the hole feature."},
+    },
+    ["kind", "standard", "fastener", "size", "end_condition", "points"],
+)
+def hole_wizard(args: dict[str, Any]) -> dict[str, Any]:
+    request = _hole_wizard_args(args)
+    app, doc = require_part()
+    fastener_index = _toolbox_lookup(_toolbox_database(app), request["standard"], request["fastener"],
+                                     request["size"], request["kind"])
+    exit_active_sketch(doc)
+    face, normal, root = _hole_face(doc, request)
+    off_plane = [p for p in request["points_mm"]
+                 if abs(sum(n * (to_m(c) - r) for n, c, r in zip(normal, p, root))) > to_m(_POINT_TOLERANCE_MM)]
+    if off_plane:
+        return result(False, f"Points off the face's plane: {off_plane}. Nothing was created.")
+    volume_before, bodies_before = _solid_state(doc)
+    if volume_before is None:
+        return result(False, "The solid volume cannot be measured before drilling. Nothing was created.")
+    before = feature_names(doc)
+    problems_before = whats_wrong(doc)
+    reported = {"kind": request["kind"], "standard": request["standard"], "fastener": request["fastener"],
+                "fastener_index": fastener_index, "size": request["size"], "end_condition": request["end_condition"],
+                "volume_before_mm3": volume_before}
+
+    def failed(why: str, **data: Any) -> dict[str, Any]:
+        """Delete everything this call added; the answer says whether the tree is back to what it was."""
+        added = features_added(doc, before)
+        names = [str(feature_property(f, "Name", "")) for f in added]
+        clean = delete_features(doc, added) if added else True
+        rebuild(doc)
+        left = [n for n in feature_names(doc) if n not in set(before)]
+        tail = (" The new features were deleted again." if added and clean and not left else
+                " Nothing was left behind." if not added else f" Left behind: {left}.")
+        return result(False, why + tail, **reported, **data, deleted=[n for n in names if n not in left],
+                      left_behind=left)
+
+    try:
+        sketch_name, sketch_points = _place_points(doc, face, request["points_mm"])
+        _select_points(doc, sketch_points)
+        call = _hole_wizard_call(request, fastener_index)
+        feature = feature_manager(doc).HoleWizard5(*call)
+        clear_selection(doc)
+        if feature is None:
+            return failed("HoleWizard5 returned no feature.")
+        name = str(feature_property(feature, "Name", ""))
+        if name not in {str(feature_property(f, "Name", "")) for f in features_added(doc, before)}:
+            return failed(f"HoleWizard5 returned '{name}', which is not a new feature in the tree.")
+        rebuild(doc)
+        problems = [p for p in whats_wrong(doc) if p not in problems_before]
+        if problems:
+            return failed(f"'{name}' has rebuild errors.", problems=problems)
+        identity, data, centres = _hole_readback(feature, request["kind"])
+        mismatches = _readback_problems(request, fastener_index, identity, data, centres)
+        if mismatches:
+            return failed(f"'{name}' is not the requested hole: {'; '.join(mismatches)}.", hole_data=data,
+                          points_mm=centres)
+        volume_after, bodies_after = _solid_state(doc)
+        if volume_after is None:
+            return failed(f"The solid volume cannot be measured after '{name}'.")
+        if volume_before - volume_after < _REMOVED_MIN_MM3:
+            return failed(f"'{name}' removed no material ({volume_before} -> {volume_after} mm3).",
+                          volume_after_mm3=volume_after)
+        if bodies_after != bodies_before:
+            return failed(f"'{name}' changed the body count from {bodies_before} to {bodies_after}.",
+                          volume_after_mm3=volume_after)
+    except ToolFailure as exc:
+        return failed(str(exc), **exc.data)
+    except Exception as exc:
+        logger.exception("hole_wizard failed")
+        return failed(f"SOLIDWORKS COM error: {exc}")
+
+    renamed = rename_feature(feature, request.get("name"))
+    if renamed:
+        name = renamed
+    subfeatures = []
+    sub = safe(feature, "GetFirstSubFeature")
+    while sub is not None and len(subfeatures) < 20:
+        subfeatures.append({"name": str(feature_property(sub, "Name", "")),
+                            "type": str(feature_property(sub, "GetTypeName2", ""))})
+        sub = safe(sub, "GetNextSubFeature")
+    hole_type = identity["Type"]
+    return result(
+        True,
+        f"Created '{name}' with {len(centres)} hole(s); position sketch '{sketch_name}' stays in front of it.",
+        feature=name, position_sketch=sketch_name, **reported,
+        type={"value": hole_type, "name": _HOLE_TYPE_NAMES.get(int(hole_type), "unknown")},
+        fastener_readback=identity["FastenerType"], hole_data=data, points_mm=centres,
+        volume_after_mm3=volume_after, removed_mm3=round(volume_before - volume_after, 4), bodies=bodies_after,
+        subfeatures=subfeatures, **({"fit": request["fit"]} if "fit" in request else {}),
+        **({"depth_mm": request["depth_mm"]} if request["depth_mm"] is not None else {}),
+        **({"thread_depth_mm": request["thread_depth_mm"], "cosmetic": request["cosmetic"]}
+           if request["kind"] == "tapped" else {}),
+    )
 
 
 # --------------------------------------------------------------------------
