@@ -396,7 +396,7 @@ _FEATURE_MANAGER_METHODS = (
     "InsertFeatureChamfer", "InsertRib", "InsertMultiFaceDraft", "SimpleHole2",
     "InsertProtrusionSwept4", "InsertCutSwept5", "InsertProtrusionBlend2", "InsertCutBlend",
     "FeatureLinearPattern5", "FeatureCircularPattern5", "InsertMirrorFeature2", "InsertRefPlane",
-    "FeatureExtrusionThin2", "FeatureCutThin2",
+    "FeatureExtrusionThin2", "FeatureCutThin2", "HoleWizard5",
     # Older variants that call_versioned falls back to on builds without the
     # newer names above (SOLIDWORKS 2016 has FeatureCut3 but no FeatureCut4).
     # Newer builds keep the old names, so flagging them costs nothing there.
