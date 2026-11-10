@@ -681,8 +681,9 @@ _HOLE_TYPE_NAMES = dict(enumerate((
 ).split()))
 _HOLE_TYPE_NAMES[90] = "swCounterSinkSlotThruCounterSinkBottomWithoutHeadClearance"
 
-# IWizardHoleFeatureData2 fields reported per kind. The values sit in the kind-specific fields; a blind clearance
-# hole carries them in HoleDiameter/HoleDepth, a through one in ThruHoleDiameter/ThruHoleDepth (measured on 2016 SP3).
+# IWizardHoleFeatureData2 fields reported per kind. The values sit in the kind-specific fields; a blind clearance hole,
+# counterbore or countersink carries them in HoleDiameter/HoleDepth, a through one in ThruHoleDiameter/ThruHoleDepth
+# (measured on 2016 SP3).
 _HOLE_FIELDS = {
     "clearance": ("ThruHoleDiameter", "ThruHoleDepth", "HoleDiameter", "HoleDepth", "DrillAngle", "HoleFit"),
     "tapped": ("TapDrillDiameter", "TapDrillDepth", "ThruTapDrillDiameter", "ThruTapDrillDepth", "ThreadDiameter",
@@ -692,6 +693,9 @@ _HOLE_FIELDS = {
     "countersink": ("ThruHoleDiameter", "ThruHoleDepth", "HoleDiameter", "HoleDepth", "CounterSinkDiameter",
                     "CounterSinkAngle", "HeadClearance", "HeadClearanceType", "HoleFit"),
 }
+# Where a blind hole reads back its drilled depth (to the drill shoulder), measured on 2016 SP3.
+_BLIND_DEPTH_FIELDS = {"clearance": "HoleDepth_mm", "counterbore": "HoleDepth_mm", "countersink": "HoleDepth_mm",
+                       "tapped": "TapDrillDepth_mm"}
 _HOLE_INTEGER_FIELDS = frozenset({"HoleFit", "CosmeticThreadType", "ThreadEndCondition", "HeadClearanceType"})
 _HOLE_ANGLE_FIELDS = frozenset({"DrillAngle", "CounterSinkAngle"})
 _SQL_NAME = re.compile(r"^[A-Za-z0-9_]+$")
@@ -1010,6 +1014,10 @@ def _readback_problems(request: dict[str, Any], fastener_index: int, identity: d
         problems.append(f"size {identity['FastenerSize']!r} instead of {request['size']!r}")
     if identity["EndCondition"] != HOLE_END_CONDITIONS[request["end_condition"]]:
         problems.append(f"end condition {identity['EndCondition']} instead of {request['end_condition']}")
+    if request["depth_mm"] is not None:
+        field = _BLIND_DEPTH_FIELDS[request["kind"]]
+        if abs(data[field] - request["depth_mm"]) > _POINT_TOLERANCE_MM:
+            problems.append(f"drilled depth {data[field]} mm instead of {request['depth_mm']}")
     if "fit" in request and data.get("HoleFit") != HOLE_FITS[request["fit"]]:
         problems.append(f"fit {data.get('HoleFit')} instead of {request['fit']}")
     if request["kind"] == "tapped":
@@ -1039,9 +1047,9 @@ def _readback_problems(request: dict[str, Any], fastener_index: int, identity: d
     "Points are model coordinates in millimetres on the face's plane. The tool draws the hole centres in a position "
     "sketch on the face that stays in the tree in front of the hole: deleting it silently removes the hole's cut. "
     "ok is true only after SOLIDWORKS' own hole data (IWizardHoleFeatureData2) reads back the requested fastener, size, "
-    "end condition, fit or thread and one hole per point, no new rebuild error, the solid volume dropped and the body "
-    "count stayed. On any "
-    "failure the new features are deleted again and the answer says whether the tree is as before.",
+    "end condition, blind depth, fit or thread and one hole per point, no new rebuild error, the solid volume dropped "
+    "and the body count stayed. On any failure the new features are deleted again and the answer says whether the "
+    "tree is as before.",
     {
         "kind": {"type": "string", "enum": sorted(HOLE_KINDS)},
         "standard": {"type": "string", "enum": sorted(HOLE_STANDARDS),

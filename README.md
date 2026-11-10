@@ -217,8 +217,8 @@ face:
   `volume_before_mm3`, `volume_after_mm3`, `removed_mm3`, `bodies` and the
   `subfeatures` (a cosmetic thread shows up as `CosmeticThread`).
 - **`ok` only after the readback:** the feature's own data must report the
-  requested fastener, size, end condition, fit or thread depth and cosmetic
-  type, one hole per requested point, no rebuild errors, a smaller solid volume
+  requested fastener, size, end condition, blind depth, fit or thread depth and
+  cosmetic type, one hole per requested point, no rebuild errors, a smaller solid volume
   and the same body count. HoleWizard5 never says why it failed (it returns
   nothing), so every failure is judged from the model: the answer is
   `ok: false` with the reason, and every feature the call added is deleted
@@ -243,8 +243,10 @@ d-veloping/ClauSW#253):
   the hole stays tied to the position sketch, which remains in the tree in front
   of it. Deleting that sketch leaves the hole feature in the tree cutting
   nothing, without a rebuild error.
-- A blind clearance hole reads back in `HoleDiameter`/`HoleDepth`, a through one
-  in `ThruHoleDiameter`/`ThruHoleDepth`. Its drill angle is passed as -1 (the
+- A blind clearance hole, counterbore or countersink reads back in
+  `HoleDiameter`/`HoleDepth` (the depth to the drill shoulder), a through one in
+  `ThruHoleDiameter`/`ThruHoleDepth`; a blind tapped hole in `TapDrillDepth`.
+  The clearance hole's drill angle is passed as -1 (the
   standard's 118 degrees): 0 builds a 0-degree tip that removes far too much
   material, again without any error.
 - No hole callouts: `insert_model_annotations` with `hole_callouts` places them

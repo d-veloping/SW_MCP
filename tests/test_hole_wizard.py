@@ -533,6 +533,43 @@ class ReadbackTests(HoleWizardHarness):
                 self.model.hole = {"fields": fields}
                 self.assert_clean_failure(self.drill("tapped"), phrase)
 
+    # blind 15 mm as measured on 2016 SP3 (Codex P2 on #41): clearance, counterbore and countersink read the drilled
+    # depth back in HoleDepth, a tapped hole in TapDrillDepth
+    BLIND = {
+        "clearance": ({"EndCondition": 0, "HoleDiameter": 0.0066, "HoleDepth": 0.015, "ThruHoleDiameter": 0.0,
+                       "ThruHoleDepth": 0.0}, "HoleDepth"),
+        "counterbore": ({"Type": 10, "EndCondition": 0, "HoleDiameter": 0.0066, "HoleDepth": 0.015,
+                         "ThruHoleDiameter": 0.0, "ThruHoleDepth": 0.0}, "HoleDepth"),
+        "countersink": ({"Type": 43, "EndCondition": 0, "HoleDiameter": 0.0066, "HoleDepth": 0.015,
+                         "ThruHoleDiameter": 0.0, "ThruHoleDepth": 0.0}, "HoleDepth"),
+        "tapped": ({"TapDrillDepth": 0.015}, "TapDrillDepth"),
+    }
+
+    def blind(self, kind: str) -> dict[str, Any]:
+        extra: dict[str, Any] = {"end_condition": "blind", "depth_mm": 15}
+        if kind == "tapped":
+            extra["thread_depth_mm"] = 15
+        return self.drill(kind, **extra)
+
+    def test_blind_depth_read_back(self) -> None:
+        for kind, (fields, depth_field) in self.BLIND.items():
+            with self.subTest(kind=kind):
+                self.model.names, self.model.volume, self.model.calls = list(TREE), PLATE_MM3, []
+                self.model.hole = {"fields": fields}
+                answer = self.blind(kind)
+                self.assertTrue(answer["ok"], answer)
+                self.assertEqual(answer["data"]["hole_data"][f"{depth_field}_mm"], 15.0)
+                self.assertEqual(answer["data"]["depth_mm"], 15.0)
+                self.assertAlmostEqual(self.model.calls[0][6], 0.015)     # Depth argument
+
+    def test_blind_depth_mismatch(self) -> None:
+        for kind, (fields, depth_field) in self.BLIND.items():
+            with self.subTest(kind=kind):
+                self.model.names, self.model.volume = list(TREE), PLATE_MM3
+                self.model.hole = {"fields": {**fields, depth_field: 0.002}}
+                answer = self.blind(kind)
+                self.assert_clean_failure(answer, "drilled depth 2.0 mm instead of 15.0")
+
     def test_points_mismatch(self) -> None:
         self.model.hole = {"points_mm": [[0.0, 25.0, 0.0], [9.0, 25.0, 0.0]]}
         self.assert_clean_failure(self.drill("clearance"), "holes nobody asked for at [[9.0, 25.0, 0.0]] mm")

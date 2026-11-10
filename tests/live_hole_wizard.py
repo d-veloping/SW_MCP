@@ -27,6 +27,9 @@ standard geometry (Toolbox values of SOLIDWORKS 2016 SP3) and the body count wit
     diameter in the table) to 6.6 over 3.42, then 6.6 x 21.58 = 1018.4478 mm3.
 (e) hole pattern: clearance M6 normal, blind 10, at (-18, 25, 12) and (18, 25, 12) in one call: twice 6.6 x 10 plus the
     118-degree tip = 729.4634 mm3, one feature, two points read back.
+(e2) blind counterbore and countersink, depth 15 to the drill shoulder (#41 review): counterbore 4762 M6 at
+    (-18, 25, -12): 11 x 6.4 + 6.6 x 8.6 plus the 118-degree tip = 925.0473 mm3; countersink 10642 M6 at (-6, 25, 12):
+    the cone above, 6.6 x 11.58 plus the tip = 698.9407 mm3; both read the depth back in HoleDepth.
 (f) a request whose point lies on the face's plane but off the body is refused (ok false), the tree and the volume
     stay as they were.
 (g) after saving, closing and reopening: the same features, total volume, body count, no rebuild errors, and every
@@ -110,6 +113,16 @@ CASES: list[dict[str, Any]] = [
               "end_condition": "blind", "depth_mm": 10, "points": [[-18.0, 25.0, 12.0], [18.0, 25.0, 12.0]],
               "name": "Lochbild M6"},
      "data": {"HoleDiameter_mm": 6.6, "HoleDepth_mm": 10.0, "DrillAngle_deg": 118.0, "HoleFit": 1}, "type": 22},
+    {"label": "e2_counterbore_blind", "removed": cylinder(11.0, 6.4) + cylinder(6.6, 15.0 - 6.4) + tip(6.6),
+     "args": {"kind": "counterbore", "standard": "iso", "fastener": "Hex Socket Head ISO 4762", "size": "M6",
+              "end_condition": "blind", "depth_mm": 15, "points": [[-18.0, 25.0, -12.0]]},
+     "data": {"HoleDiameter_mm": 6.6, "HoleDepth_mm": 15.0, "CounterBoreDiameter_mm": 11.0,
+              "CounterBoreDepth_mm": 6.4}, "type": None},
+    {"label": "e2_countersink_blind", "removed": CSK_VOLUME + cylinder(6.6, 15.0 - CSK_HEIGHT) + tip(6.6),
+     "args": {"kind": "countersink", "standard": "iso", "fastener": "Hex Socket CTSK Head ISO 10642", "size": "M6",
+              "end_condition": "blind", "depth_mm": 15, "points": [[-6.0, 25.0, 12.0]]},
+     "data": {"HoleDiameter_mm": 6.6, "HoleDepth_mm": 15.0, "CounterSinkDiameter_mm": 13.44,
+              "CounterSinkAngle_deg": 90.0}, "type": None},
 ]
 EXPECTED_SPIKE = {"a_clearance": 855.2986, "b_tapped": 363.2607, "c_counterbore": 1244.5545}
 
